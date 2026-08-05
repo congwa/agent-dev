@@ -20,4 +20,4 @@ The existing documents follow a deliberate research methodology worth preserving
 - **First-hand verification over secondhand claims**: existing notes clone repos and verify against actual source code, and say so. When a claim comes from a third-party source that couldn't be cross-checked against official/primary material, it is explicitly flagged inline (e.g. "第三方来源、未经官方确认"). Maintain this distinction — never present unverified claims as confirmed.
 - **Lead with conclusions**: documents open with a one-sentence takeaway ("一句话结论") and summary tables before diving into detail. Counterintuitive findings are called out explicitly.
 - **Language**: documents are written in Chinese, with technical terms, project names, and code identifiers kept in English.
-- **Tutorials start from a concrete scenario**, not definitions (see `singleflight入门教程.md`).
+- **Tutorials start from a concrete scenario**, not definitions (see `17_番外_singleflight入门教程.md`).
