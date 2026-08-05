@@ -10,7 +10,7 @@ This is **not a code project** — it is a personal research-notes knowledge bas
 
 - One folder per topic series, named `YYYY-MM_中文标题` (e.g. `2026-07_agent当前发展`); the month is when the series was written. Multiple series in the same month get separate folders.
 - Documents inside each folder are numbered: `1_xxx.md`, `2_xxx.md`, …
-- `README.md` at the repo root is the Chinese-language index: **everything is reverse-chronological (newest first)** — folders newest first, and within each folder's table the documents are listed in descending number order (15, 14, … 1), so the newest content is seen first. Each folder gets a short Chinese description plus a table of its documents. **Whenever a document or folder is added, renamed, or removed, update README.md to match.**
+- `README.md` at the repo root is the Chinese-language index. Ordering rule: **AI/agent-related series always come first** (so readers see them before anything else), then backend series in reverse-chronological order; within each folder's table the documents are listed in descending number order (15, 14, … 1). Each folder gets a short Chinese description plus a table of its documents. Keep the README lean — no reading-order footnotes or per-row tags that repeat what the description already says. **Whenever a document or folder is added, renamed, or removed, update README.md to match.**
 
 ## Writing conventions (follow these when adding or editing notes)
 
