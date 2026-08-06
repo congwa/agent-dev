@@ -49,6 +49,9 @@ export PGHOST=localhost PGPORT=5433 PGUSER=postgres PGPASSWORD=pg PGDATABASE=pos
 | `exp23_bloat.sql` | 第 9 篇 | 膨胀、REINDEX、VACUUM FULL、TOAST |
 | `exp24_conn.py` | 第 10 篇 | 建连接成本；连接数与吞吐的曲线 |
 | `exp25_ddl2.py` | 第 11 篇 | 各种 ALTER 的耗时和锁级别 |
+| `exp30_rowlock_storage.py` | **第 5 篇（机制）** | 行锁写在 `t_xmax`/`t_infomask` 上；MultiXact 成员；锁 100 万行 `pg_locks` 纹丝不动 |
+| `exp31_locktable_capacity.sh` | **第 5 篇（机制）** | 锁表容量公式、`out of shared memory` 的真实触发点、fast path 的 16 个槽 |
+| `exp32_wait_events.py` | **第 5 篇（机制）** | 等行锁 = 等 `Lock:transactionid` + `Lock:tuple`，以及队列顺位 |
 
 ## 跑法
 
@@ -62,4 +65,6 @@ psql -f exp9_index.sql        # SQL 脚本
 - 部分实验（`exp9`、`exp21`、`exp22`、`exp23`、`exp25`）会插入几百万行数据，需要几 GB 磁盘和 1~2 分钟。
 - 时间类的数字（毫秒、秒）在你的机器上会不同，**看的是数量级和相对关系，不是绝对值**。
 - 并发实验（`exp1`、`exp10`、`exp17`）的结果有随机性，多跑几次看趋势。`exp1` 的"丢失次数"每次都不一样，这本身就是"丢失更新"的特征。
-- `exp3_mvcc.sql` 需要 `pageinspect` 扩展，`exp22` 需要 `pg_trgm`，`exp23` 需要 `pgstattuple`。官方 docker 镜像都自带（`postgresql-contrib`）。
+- `exp3_mvcc.sql`、`exp30` 需要 `pageinspect` 扩展，`exp22` 需要 `pg_trgm`，`exp23` 需要 `pgstattuple`。官方 docker 镜像都自带（`postgresql-contrib`）。
+- `exp31_locktable_capacity.sh` 不连你的实验库，它用 `initdb` 现起一个用完即扔的小集群（跑完自动删），所以需要本机装了 `initdb` / `pg_ctl`。
+- `exp30`、`exp31`、`exp32` 于 2026-08-05 在 PostgreSQL 16.6 上跑出第 5 篇里引用的那批输出，其余脚本的数字来自 16.13。
