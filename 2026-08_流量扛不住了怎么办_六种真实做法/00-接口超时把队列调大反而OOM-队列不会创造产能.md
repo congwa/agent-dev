@@ -18,6 +18,30 @@
 
 这个操作我见过太多次了。它的问题不在于「10000 太大」，而在于**改队列长度这件事本身，从来就不会增加任何产能**。
 
+拆开这次操作的因果链，是这样一步步走到 OOM 的：
+
+```mermaid
+flowchart TD
+    A["<b>接口超时告警响起</b><br/>corePoolSize=20，queueCapacity=200"]
+    B["<b>误判</b><br/>以为是队列太小挡住了请求"]
+    C["<b>调大队列</b><br/>queueCapacity 改成 10000"]
+    D["<b>请求疯狂涌入排队</b><br/>店员数量没变，处理速度没变"]
+    E["<b>排队对象持续占用内存</b><br/>越攒越多，不释放"]
+    F["<b>OOM 告警</b><br/>超时告警依然没停"]
+
+    A --> B --> C --> D --> E --> F
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B note
+    class C,D main
+    class E,F danger
+```
+
 ---
 
 ## 用奶茶店把这事说清楚
@@ -25,6 +49,28 @@
 一家奶茶店，**1 个店员**，做一杯**平均 1 秒**。
 
 所以这家店的产能是死的：**1 杯/秒**。不管门口排多少人，它一秒就出一杯。
+
+这家店的排队结构画出来是这样：
+
+```mermaid
+flowchart LR
+    A["<b>顾客到达</b><br/>速率 λ，忽快忽慢"]
+    B["<b>排队等候</b><br/>队伍长度随 ρ 剧烈变化"]
+    C["<b>店员服务</b><br/>产能固定 1 杯/秒，永远不变"]
+    D["<b>离店</b><br/>总耗时 = 服务时间 × 1/(1-ρ)"]
+
+    A --> B --> C --> D
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B note
+    class C main
+    class D data
+```
 
 现在让客人以不同速度进店：
 
@@ -87,6 +133,30 @@ python3 demos/demo00_queue.py
 
 你没有多服务任何一个人。你只是把「第 21 个人在门口被告知满了」，变成了「第 500 个人在队伍里站 8 分钟，然后还是没买到，而且极其愤怒」。
 
+把「调大队列前」和「调大队列后」摆在一起对比：
+
+```mermaid
+flowchart LR
+    subgraph WRONG["常见误解"]
+        M1["<b>队列越大</b><br/>能扛住的流量就越多"]
+        M2["<b>推论</b><br/>第 500 位客人也能被服务"]
+        M1 --> M2
+    end
+    subgraph REAL["实际情况"]
+        R1["<b>店员还是 1 个</b><br/>产能死死锁定在 1 杯/秒"]
+        R2["<b>真实结果</b><br/>第 500 位客人排队 500 秒才轮到"]
+        R1 --> R2
+    end
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class M1,M2 danger
+    class R1,R2 data
+```
+
 Fred Hébert 在 [Queues Don't Fix Overload](https://ferd.ca/queues-don-t-fix-overload.html) 里的原话是：
 
 > 当人们不动脑子地拿队列当缓冲区用时，他们做的只是造了一个更大的桶，来装那些迟早要倒掉的水。
@@ -120,6 +190,30 @@ Reactive Streams 规范自己说得很明白（[原文](https://github.com/react
 - **闭环**：客人看到「满员」牌子，回家了。你慢一点，客流自然就少了。
 - **开环**：客人看到牌子，**再敲一次门**。你慢一点，敲门声反而更多了。
 
+闭环和开环的差别，画出来是这样：
+
+```mermaid
+flowchart LR
+    subgraph CLOSED["闭环系统"]
+        C1["<b>看到满员牌子</b><br/>客户端是人"]
+        C2["<b>转身回家</b><br/>客流真实下降了"]
+        C1 --> C2
+    end
+    subgraph OPENED["开环系统"]
+        O1["<b>看到满员响应</b><br/>客户端是自动重试的 SDK"]
+        O2["<b>再敲一次门</b><br/>一次请求变成三次"]
+        O1 --> O2
+    end
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class C1,C2 data
+    class O1,O2 danger
+```
+
 现实中的客户端几乎全是后者 —— SDK 自带重试，用户自己会刷新。所以你的背压往往不是"减少了流量"，而是"把一次请求变成了三次"。
 
 Brooker 的原话：
@@ -139,6 +233,32 @@ Brooker 的原话：
 | 降低 λ（进来的量） | 限流、丢弃、降级、采样 | 一部分请求失败 |
 | 提高 μ（处理的量） | 扩容、加机器、优化代码 | 花钱，而且慢 |
 | 切断正反馈 | 重试预算、熔断、有界队列 | 需要提前埋好 |
+
+把这三件事和「过载」的关系摆成一张图：
+
+```mermaid
+flowchart TD
+    S["<b>系统过载</b><br/>到达率 ≥ 产能"]
+    A["<b>降低 λ</b><br/>限流、丢弃、降级、采样"]
+    B["<b>提高 μ</b><br/>扩容、加机器、优化代码"]
+    C["<b>切断正反馈</b><br/>重试预算、熔断、有界队列"]
+    A2["<b>代价</b><br/>一部分请求失败"]
+    B2["<b>代价</b><br/>花钱，而且慢"]
+    C2["<b>代价</b><br/>需要提前埋好"]
+
+    S --> A --> A2
+    S --> B --> B2
+    S --> C --> C2
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class S entry
+    class A,B,C main
+    class A2,B2,C2 note
+```
 
 你在标题那张表里看到的 01~05 五种做法，全都落在这三件事上（06 的时间轮是另一类问题——不是"量太大"，而是"每件事各约了一个闹钟"）：
 
@@ -235,6 +355,26 @@ python3 demos/demo05_metastable.py
 
 因为服务器 100% 的产能都花在处理「客户端已经放弃了的请求」上（那一列叫「白烧」）。它每处理完一个，结果都直接扔掉，因为对面早就重试了。于是所有人继续超时，继续重试，队列继续排满。
 
+这个循环长这样：
+
+```mermaid
+flowchart TD
+    P["<b>10 秒尖峰</b><br/>300 QPS 打进来"]
+    Q["<b>请求排队超时</b><br/>服务器处理不过来"]
+    R["<b>客户端自动重试</b><br/>一次请求变多次"]
+    T["<b>产能被白烧请求占满</b><br/>有效产出趋近于 0"]
+
+    P --> Q --> R --> T --> Q
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class P entry
+    class Q,R,T danger
+```
+
 **这个循环自己养活自己。** 学术上叫**元稳定失效**（metastable failure），2021 年 HotOS 那篇[论文](https://sigops.org/s/conferences/hotos/2021/papers/hotos21-s11-bronson.pdf)的定义是：
 
 > 触发因素被移除之后，坏状态依然持续存在。
@@ -271,6 +411,30 @@ OSDI '22 那篇[《Metastable Failures in the Wild》](https://www.usenix.org/sy
 2. **再扩容**
 
 反过来做，新扩的机器一上线就被同一股重试洪水打回坏状态，钱白花。
+
+把这个顺序画成一张图：
+
+```mermaid
+flowchart LR
+    subgraph RIGHT["正确顺序"]
+        G1["<b>1. 先掐正反馈</b><br/>关重试、丢负载、必要时重启清空队列"]
+        G2["<b>2. 再扩容</b><br/>新机器接的是干净流量"]
+        G1 --> G2
+    end
+    subgraph BAD["反过来做"]
+        H1["<b>先扩容</b><br/>正反馈还在烧"]
+        H2["<b>新机器秒变肉盾</b><br/>被同一股重试洪水打回坏状态"]
+        H1 --> H2
+    end
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class G1,G2 data
+    class H1,H2 danger
+```
 
 ---
 

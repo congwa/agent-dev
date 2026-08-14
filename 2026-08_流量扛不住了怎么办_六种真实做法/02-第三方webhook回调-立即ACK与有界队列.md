@@ -42,6 +42,29 @@ Svix 的重推退避表是这样的：**立刻 → 5 秒 → 5 分钟 → 30 分
 - 对方峰值推 **200 条/秒**，是你的 4 倍
 - 对方超时 300ms（真实是 10~15 秒，这里等比缩小），失败重推 3 次
 
+三条路径从这里分岔开：
+
+```mermaid
+flowchart TD
+    S["<b>Webhook 请求到达</b><br/>对方限时等 2xx"]
+    S --> A["<b>方案 A</b><br/>处理完再返回"]
+    S --> B["<b>方案 B</b><br/>立即 ACK + 无界队列"]
+    S --> C["<b>方案 C</b><br/>立即 ACK + 有界队列"]
+
+    A --> AR["<b>数据永久丢失</b><br/>超时重推更忙的恶性循环"]
+    B --> BR["<b>无声丢失</b><br/>进程重启，内存队列清空"]
+    C --> CR["<b>可恢复的丢失</b><br/>满了回 503，对方按退避表重推"]
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class S entry
+    class A,B,C note
+    class AR,BR danger
+    class CR data
+```
+
 ```bash
 python3 demos/demo02_webhook.py
 ```
@@ -94,6 +117,20 @@ python3 demos/demo02_webhook.py
         → 你收到的请求变多 → 你更慢 → 更多超时 → 更多重推
 ```
 
+画成时序图看得更清楚，谁在等谁、谁在重复推：
+
+```mermaid
+sequenceDiagram
+    participant W as 对方 Webhook 服务
+    participant H as 你的 HTTP handler
+    W->>H: 推送事件
+    H->>H: 处理中，写库加发通知要 100ms
+    Note over H: 队列拥堵，ACK 变慢到 305ms
+    W--xH: 超过 300ms 耐心，判定超时
+    W->>H: 重推同一事件
+    Note over W,H: 请求量变成原始的 3 倍，越忙越慢
+```
+
 而且注意 A 的「队列峰值长度」是 0 —— 你没有任何队列。**你的队列就是对方的重推缓冲区**，只不过你完全控制不了它。
 
 这就是第 00 篇说的：**你越慢，它推得越多，你更慢。**
@@ -117,6 +154,28 @@ demo 里只跑了 3 秒。真实场景下对方可能推 10 分钟。那时候�
 可你已经对每一条都回过 202 了。对方不会再推。
 
 **这是最阴险的一种数据丢失** —— 无声、不可恢复、监控上看不出来，而且发生在你以为最安全的方案里。
+
+这条丢失路径画出来是这样：
+
+```mermaid
+flowchart TD
+    R["<b>请求到达</b><br/>对方推送事件"]
+    Q["<b>立即回 202</b><br/>塞进进程内存队列"]
+    P["<b>队列持续堆积</b><br/>无上限，峰值 450 条"]
+    K["<b>进程重启</b><br/>部署、OOM、被驱逐"]
+    L["<b>队列瞬间清空</b><br/>内存不是持久化介质"]
+    N["<b>对方不会重推</b><br/>因为你已经回过 202"]
+
+    R --> Q --> P --> K --> L --> N
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class R entry
+    class Q,P note
+    class K note
+    class L,N danger
+```
 
 FastAPI 的 `BackgroundTasks` 就是这个模式。官方文档自己承认了：
 
@@ -154,6 +213,33 @@ return 202
 ```
 
 核心就是 `put_nowait` + 捕获 `QueueFull`。
+
+两条分支画成判定树：
+
+```mermaid
+flowchart TD
+    E["<b>事件到达 handler</b><br/>验签已通过"]
+    T["<b>put_nowait 入队</b><br/>不阻塞地尝试塞进有界队列"]
+    OK["<b>入队成功</b><br/>回 202"]
+    FULL["<b>抛出 QueueFull</b><br/>队列已经满了"]
+    R503["<b>回 503</b><br/>带 Retry-After"]
+    RETRY["<b>对方按退避表重推</b><br/>27.6 小时窗口内可补回"]
+
+    E --> T
+    T -- "还有空位" --> OK
+    T -- "队列已满" --> FULL
+    FULL --> R503 --> RETRY
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class E entry
+    class T main
+    class OK data
+    class FULL,R503 note
+    class RETRY data
+```
 
 注意 C 的表里也有 220 条「彻底放弃」。别被这个数字吓到 —— 那是因为 demo 里对方只重试 3 次、退避 0.2/0.4 秒。
 
@@ -246,6 +332,28 @@ def verify(raw: bytes, sig: str) -> bool:
 
 要彻底解决，队列必须在进程外。看看真实项目怎么做的。
 
+进程内和进程外两种队列的差别就在这里：
+
+```mermaid
+flowchart LR
+    subgraph IN["进程内队列"]
+        I1["<b>asyncio.Queue</b><br/>内存里，maxsize 封顶"]
+        I2["<b>进程重启就清空</b><br/>已回过 202 的事件找不回来"]
+        I1 --> I2
+    end
+
+    subgraph OUT["进程外队列"]
+        O1["<b>落到 Postgres、RabbitMQ、Redis</b><br/>独立于你的进程存活"]
+        O2["<b>进程重启不影响队列</b><br/>重启后 worker 接着消费"]
+        O1 --> O2
+    end
+
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class I1,I2 note
+    class O1,O2 data
+```
+
 ### Sentry：写进 Postgres，回 202
 
 **[getsentry/sentry](https://github.com/getsentry/sentry)** · 44.1k stars · Python
@@ -287,6 +395,23 @@ MAX_DELIVERY_AGE = 3 days      # 超过 3 天直接 delete()，打点 outcome="m
 ```
 
 **尝试次数有上限、消息年龄有上限、单次处理量有上限，而且每种丢弃都有对应的打点。** 这就是「有界」的完整含义。
+
+三层上限对应的丢弃路径：
+
+```mermaid
+flowchart TD
+    M["<b>WebhookPayload 落库</b><br/>等待投递"]
+    M -- "重试次数达到上限" --> D1["<b>delete，打点 attempts_exceed</b>"]
+    M -- "消息存活超过 3 天" --> D2["<b>delete，打点 max_age</b>"]
+    M -- "投递成功" --> S1["<b>正常消费完成</b>"]
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class M entry
+    class D1,D2 danger
+    class S1 data
+```
 
 ### sentry-python SDK：有界队列 + 满则丢的教科书实现
 
@@ -339,6 +464,23 @@ if not self._worker.submit(send_envelope_wrapper):
 - **`reject-publish`** —— 丢**新来的**，并通过 `basic.nack` **告诉发送方**。这才是真背压。
   ⚠️ 前提是**开了 publisher confirms**。官方原文是 "if publisher confirms are enabled, the publisher will be informed of the reject via a `basic.nack` message"。没开 confirms 你照样是静默丢弃，只是丢的是新的而已。
 - **`reject-publish-dlx`** —— 同上，但被拒的消息还会进死信队列存档。
+
+三个值的判定分支画出来：
+
+```mermaid
+flowchart TD
+    F["<b>队列写满了</b><br/>x-max-length 到顶"]
+    F -- "drop-head 默认值" --> DH["<b>丢队首</b><br/>静默丢最老的支付回调，发送方不知道"]
+    F -- "reject-publish" --> RP["<b>拒绝新消息</b><br/>basic.nack 告诉发送方，需开 publisher confirms"]
+    F -- "reject-publish-dlx" --> RD["<b>拒绝新消息且存档</b><br/>被拒的进死信队列"]
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class F entry
+    class DH danger
+    class RP,RD data
+```
 
 **webhook 场景请显式设成 `reject-publish`。** 宁可让对方按退避表重推，也不要静默丢新事件。
 

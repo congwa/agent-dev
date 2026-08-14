@@ -18,6 +18,35 @@
 
 **能采样就别丢弃。** 采样是有控制的、可还原的、可预算的；丢弃是被动的、不可还原的。
 
+两者的差别画成图是这样：
+
+```mermaid
+flowchart LR
+    subgraph S1["采样 sampling"]
+        A1["<b>主动决定</b><br/>你选择只看一部分"]
+        A2["<b>按比例抽取</b><br/>知道自己抽了多少"]
+        A3["<b>可还原</b><br/>结果乘回去就是全量"]
+        A1 --> A2 --> A3
+    end
+
+    subgraph S2["丢弃 drop"]
+        B1["<b>被动发生</b><br/>队列/缓冲区装不下"]
+        B2["<b>溢出即砍</b><br/>丢多少不一定知道"]
+        B3["<b>不可还原</b><br/>丢掉的数据永远消失"]
+        B1 --> B2 --> B3
+    end
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class A1 entry
+    class A2 main
+    class A3 data
+    class B1 entry
+    class B2,B3 danger
+```
+
 但两个都得会，因为你不可能预知所有尖峰。
 
 ---
@@ -58,6 +87,32 @@ python3 demos/demo03_sampling.py
 （traceID 是真随机的，所以每次跑具体数字会变，但这个量级差是稳定的。）
 
 原因很简单：掷骰子的方案里，一条链路要 4 个服务**同时中奖**才完整，概率是 `0.1⁴ = 万分之一`。剩下 3511 条是断成几截的残片 —— 存了，占空间，但排查问题时啥也看不出来。
+
+两种判定方式画成树是这样：
+
+```mermaid
+flowchart TD
+    T["<b>一条 trace 经过 4 个微服务</b><br/>都要判断要不要采样"]
+    T --> P1["<b>方案A：各自 random()</b><br/>每个服务独立掷骰子"]
+    T --> P2["<b>方案B：读 traceID</b><br/>低 64 位与阈值比较"]
+
+    P1 --> R1["<b>4 个服务同时中奖才完整</b><br/>概率 0.1⁴ ≈ 万分之一"]
+    R1 --> D1["<b>残缺链路占多数</b><br/>3511/10000 断成几截，存了没用"]
+
+    P2 --> R2["<b>结果由 traceID 本身决定</b><br/>不用随机数，不用同步配置"]
+    R2 --> D2["<b>要么全留要么全丢</b><br/>988/10000 完整，0 条残缺"]
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class T entry
+    class P1,P2 main
+    class R1 danger
+    class D1 danger
+    class R2 main
+    class D2 data
+```
 
 ---
 
@@ -183,6 +238,30 @@ processors:
                 {key: url.path, values: [\/health, \/metrics], enabled_regex_matching: true}
 ```
 
+这组策略画成判定链是这样：
+
+```mermaid
+flowchart TD
+    W["<b>trace 在内存缓冲</b><br/>decision_wait 10s 等 span 到齐"]
+    W --> C1{"<b>状态码是 ERROR？</b>"}
+    C1 -- "是" --> K1["<b>全部保留</b><br/>错误不能靠概率碰运气"]
+    C1 -- "否" --> C2{"<b>耗时超过 5000ms？</b>"}
+    C2 -- "是" --> K2["<b>全部保留</b><br/>慢请求同样全留"]
+    C2 -- "否" --> C3{"<b>是健康检查路径？</b>"}
+    C3 -- "是" --> K3["<b>直接丢弃</b><br/>/health /metrics 没有排查价值"]
+    C3 -- "否" --> K4["<b>抽 10%</b><br/>剩下的正常请求走概率采样"]
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class W entry
+    class C1,C2,C3 main
+    class K1,K2 data
+    class K3 danger
+    class K4 main
+```
+
 policy 一共 17 种：`always_sample`、`latency`、`numeric_attribute`、`probabilistic`、`status_code`、`string_attribute`、`trace_state`、`trace_flags`、`rate_limiting`、`bytes_limiting`、`span_count`、`boolean_attribute`、`ottl_condition`、`and`、`not`、`drop`、`composite`。
 
 关键默认值：`decision_wait: 30s`、`num_traces: 50000`。
@@ -252,6 +331,28 @@ func (c PercentageIncreaseCappedCalculator) Calculate(targetQPS, curQPS, prevPro
 
 真实 P99 耗时           : 204.6 ms
 采样后算出的 P99        : 189.1 ms   ← 不用还原，直接就是对的
+```
+
+判定规则画成树是这样：
+
+```mermaid
+flowchart TD
+    Q["<b>要还原的是什么指标？</b>"]
+    Q --> C1{"<b>数量 counter？</b><br/>QPS、错误数、总请求数"}
+    C1 -- "是" --> A1["<b>必须 ÷ 采样率</b><br/>不还原大盘会啪一下掉下去"]
+    Q --> C2{"<b>分布 timer/histogram？</b><br/>P50/P99、平均值"}
+    C2 -- "是" --> A2["<b>不要还原</b><br/>抽样不改变分布形状"]
+    Q --> C3{"<b>瞬时值/基数？</b><br/>gauge、set"}
+    C3 -- "是" --> A3["<b>不要还原</b><br/>还原了反而是错的"]
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class Q entry
+    class C1,C2,C3 main
+    class A1 data
+    class A2,A3 note
 ```
 
 **规则很简单，但特别容易搞混：**
@@ -386,6 +487,42 @@ if c.out.pb > c.out.mp/4*3 && c.out.stc == nil {
 
 **先背压、后丢弃，两段式。** 比一刀切优雅得多。这个模式值得在自己的系统里抄。
 
+三家的丢弃逻辑画成图是这样：
+
+```mermaid
+flowchart LR
+    subgraph E["EMQX：丢最老的"]
+        E1["<b>队列满</b><br/>max_mqueue_len 到顶"]
+        E2["<b>踢掉队头</b><br/>最老的消息被丢弃"]
+        E3["<b>新消息留下</b><br/>永远能收到最新读数"]
+        E1 --> E2 --> E3
+    end
+
+    subgraph M["Mosquitto：丢最新的"]
+        M1["<b>队列满</b><br/>max_queued_messages 到顶"]
+        M2["<b>拒绝入队</b><br/>db__ready_for_queue 返回 false"]
+        M3["<b>新消息被丢</b><br/>队里旧顺序保持不变"]
+        M1 --> M2 --> M3
+    end
+
+    subgraph N["NATS：丢整个连接"]
+        N1["<b>pending 到 75%</b><br/>先卡住生产者"]
+        N2["<b>pending 到 100%</b><br/>直接断开连接"]
+        N3["<b>整批消息一起丢</b><br/>保护 broker 不被拖垮"]
+        N1 --> N2 --> N3
+    end
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class E1,M1,N1 entry
+    class E2,M2,N2 danger
+    class E3 data
+    class M3 main
+    class N3 main
+```
+
 ### 三者对比
 
 | Broker | 参数 | 默认 | 满了丢谁 | 适合什么 |
@@ -409,6 +546,24 @@ sub.SetPendingLimits(1024*500, 1024*5000)   // 默认 500,000 条 / 64MB
 上面讲的都是「服务端收到之后怎么办」。但对 IoT 来说，**最划算的优化永远在设备侧**。
 
 三个手段，按性价比排序：
+
+```mermaid
+flowchart TD
+    D["<b>IoT 设备优化流量</b><br/>按性价比排序"]
+    D --> H1["<b>1. 变化才上报</b><br/>dead-band，差值超阈值才发"]
+    H1 --> E1["<b>省 90%+ 流量</b><br/>不丢任何有意义信息"]
+    D --> H2["<b>2. 批量上报</b><br/>攒多条读数再发一个包"]
+    H2 --> E2["<b>省包头开销</b><br/>MQTT 固定开销可能比 payload 还大"]
+    D --> H3["<b>3. 按设备 ID 一致性采样</b><br/>只挑 1% 设备报详细数据"]
+    H3 --> E3["<b>可持续观察趋势</b><br/>同一批设备被选中，不是每次换一批"]
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class D entry
+    class H1,H2,H3 main
+    class E1,E2,E3 data
+```
 
 **1. 变化才上报（dead-band）**
 
