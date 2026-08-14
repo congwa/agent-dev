@@ -644,3 +644,121 @@ const MAX_CONSECUTIVE_TRUE_NOOPS: u32 = 4;
 
 - `max_turns` 各调用方的默认值。⚠️ 未确认。
 - SSE 采样流中途是否存在插话检查点（按排水点清单推断为无，置信度高）。⚠️ 未逐行确认。
+
+---
+
+## 9. 第五个样本：DeepSeek Harness
+
+> 调研时间 2026-08-14，`deepseek-ai/deepseek-harness` v0.1.0-rc.5（commit `47f9438`）；全项目背景见 [18 番外](./18-番外-DeepSeekHarness全项目速览.md)。本节只看循环维度。
+
+**一句话**：三层手写 loop，形状是 Codex / Grok 同族；但循环体只有 192 行，因为两件东西被拿走了——**历史**（每次请求的 messages 由 session log 投影出来，并有运行时断言）和**策略**（重试、压缩、停止、防转圈全是插件监听的事件）。它的第五种答案是：停不停不由钩子的返回值决定，而由停止边界上**重读一次 inbox** 决定。
+
+### 9.1 循环形状：三层，192 行
+
+| 层 | 位置 | 循环体 | 职责 |
+|---|---|---|---|
+| L0 turn | `packages/core/agent-loop/src/agent.ts:212`（`kick()`） | `while (await this.turn()) {}` | 排队的 prompt 一个一个开 turn |
+| L1 step | `agent.ts:263`（`turn()`） | `while (true)` | claim inbox → 一次模型请求 → 跑工具 → 再来一步 |
+| L2 request | `agent.ts:339`（`step()`） | `while (true)` | 一次请求的重试壳，turn/step 号不变 |
+
+与 Codex 的 `Task → run_turn → sampling`、Grok 的 L0/L1/L2 完全同构——**五个样本里四个产品全部收敛到手写嵌套 loop，图调度依然只有 LangChain 一家**。差别在体量：三层加起来是 `agent.ts:210-401`，192 行（`packages/core/agent-loop/src/` 六个文件共 1643 行，其中 `index.ts` 713 行全是工厂与生命周期，与循环无关）；对照 Codex 一个 `run_turn` 就 400 行。
+
+### 9.2 turn / step 的定义：文档给了定义，代码逐条对得上
+
+`docs/architecture.md:65` 原话：`A **step** is one model request plus the tools it calls. A **turn** is zero or more steps: it opens before its first input is claimed and closes once nothing is owed.` 所以 dsh 的 **step ≈ Pi 的 turn**，dsh 的 **turn ≈ Codex 的 Turn**（本章 §3.2 已指出 Codex 的 Turn 更接近 Pi 的整个 run）。
+
+`docs/architecture.md:63-83` 那张 Turn flow 时序逐条对到代码，无偏差：`turn/start`(agent.ts:255) → claim(`packages/core/agent/src/inbox.ts:71`) → `agent/pre-step`(agent.ts:234) → `step/start`(:279) → `user/message`(:283) → `agent/request`(:438) → `assistant/chunk*`(:349) → `assistant/message`(:381) → `tool/call*`(tool-calls.ts:263) → `tool/result*`(:281) → `step/end`(agent.ts:292) → `agent/turn-stopping`(:296) → `turn/end`(:319)。
+
+关键差异：**turn / step 边界是 durable session event，不是 UI 事件流**。Pi 的 `turn_start`、Grok 的轮次都是发给上层的活事件，dsh 直接写进日志——重启后还能数出这个会话跑过几个 turn（`agent.ts:92` 就是靠 `findLast(event => event.type === 'turn/start')` 恢复计数的）。
+
+### 9.3 停止条件：一个 serial 事件 + 一次重读 inbox（第五种答案）
+
+```typescript
+// packages/core/agent-loop/src/agent.ts:295-299
+if (turnEnds && this.inbox.nextStep.length === 0) {
+  await this.dispatch.serial('agent/turn-stopping', { turn, signal })
+  signal.throwIfAborted()
+}
+if (turnEnds && this.inbox.nextStep.length === 0) break
+```
+
+`agent/turn-stopping` 是 serial、**没有 `next()`**（`docs/architecture.md:84` 原话："`agent/turn-stopping` is serial and has no `next()`"），监听器既不能否决也不能返回决定。它想续跑，办法是在监听器里调 `agent.steer(...)`（或任何往 next-step 塞消息的 API，如 `agent.inject(...)`）往 inbox 塞一条消息——于是紧接着的**第二次** `this.inbox.nextStep.length === 0` 读到非空，`break` 不成立，循环继续。事件声明处的原话把这个设计说透了（`packages/core/agent/src/runtime-types.ts:266`）：
+
+> Data decides, so listener order cannot change the outcome.
+
+这是本章的第五种答案。Pi 的 `shouldStopAfterTurn` 回调、Codex 的 `stop_outcome.should_block`、Grok 的 `StopGateDecision::KeepWorking` **都是返回值决定**——监听器顺序有意义，只有一个能赢；dsh 把停止决策改成读共享队列，几个插件可以同时想续跑而不打架。测试直接叫它 `/loop pattern`（`packages/core/agent-loop/tests/loop.spec.ts:766`），生产用例是把 Claude Code / Codex 的 Stop hook 桥成 `steer`（`packages/hooks/hooks-claude-code/src/index.ts:270`、`packages/hooks/hooks-codex/src/index.ts:260`）。
+
+反向也是数据：任一工具结果带 `concludesTurn` 就提前收尾（`tool-calls.ts:157` → `agent.ts:399`）。对照 Pi 的 `terminate: true` 要**整批**都标才生效，dsh 是**任一**即可，但文档明确它不短路已提交的 next-step 工作。默认出口仍是老规矩：assistant 消息里没有 tool call（`agent.ts:394`）。
+
+### 9.4 硬上限：核心循环里一个都没有，而且它知道
+
+`rg 'maxSteps|maxTurns|maxIterations|recursionLimit'` 在 `packages/**/src/**/*.ts` 里**零命中**；`agent.ts` 里也搜不到 limit / budget / cap。核心循环之外有两条迭代上限，都不在 loop 里：goal 子系统的 `maxGoalRounds`（默认 **256**，`packages/goal/goal/src/index.ts:187`），只约束 `goal-round-driver` 那条自动续跑线，超了是 `ctx.goals.block(...)` 把目标标成 `round-limit`（`goal-round-driver/src/index.ts:166-170`），不是停循环；以及 ralph 工具的 `maxRounds`（schema 默认 **256**，CLI 三个 preset 都配成 **64**，`packages/workflow/tool-ralph/src/index.ts:37`、`:153`），那是工具脚本里 `for` 循环开新 subagent 的预算，同样管不到 agent loop。递归上限在别处：subagent 的 `maxDepth` 默认 **3**（`packages/subagent/tool-subagent/src/index.ts:98`）。
+
+两处 hook 桥接直接承认这个洞，其中一处点名了 Codex：
+
+```typescript
+// packages/hooks/hooks-codex/src/index.ts:257-259
+// TODO(stop-loop-guard): Codex supplies `stop_hook_active` so a Stop hook can
+// avoid continuing the same turn indefinitely. It is always false here, so an
+// unconditionally blocking hook force-continues every step until it self-limits.
+```
+
+本章 §5 对照表「硬迭代上限」一栏，dsh 填：**核心循环无；仅目标线 `maxGoalRounds`(256) 与 ralph 工具线 `maxRounds`(256，预设 64)**。这比 Pi/Codex 的「无」还要靠后一格——Codex 至少还有「压缩一定有效」这个假设兜底，dsh 连假设都不需要，因为它压根不自己决定续跑。
+
+### 9.5 防转圈：第二个做 stationarity 检测的样本，第一个明确选择不熔断
+
+`packages/guard/repeat-tool-reminder`（base bundle 默认装载，`packages/bundle/base/cordis.patch.yml:390-394`）：签名 = `[tool 名, 参数深度 key 排序后 stringify]`（`src/index.ts:195`，参数规范化在 `:89-105`），连续命中同一签名，在 3 / 5 / 8 次时注入提醒——3 次是温和版，5/8 次是详细版（点名工具、连续次数、参数原文，参数预览截到 500 字符）。
+
+两个值得抄的细节：计数放在 `tools/post-execute` 而不是 pre，因为**被拒绝的调用也走这条 waterfall**——注释原话是 "a model hammering a denied call is exactly the loop worth breaking"（`:184-187`）；以及 `agent/pre-step` 里只要 claim 到的消息带 `source.kind === 'user'` 就清零计数链（`:229-231`）——用户插话换了上下文，跨插话的重复不算转圈。
+
+但它 **never vetoes**（`:209` "Observe-and-enrich, never veto"），没有任何次数会终止循环。对照 Grok 的 8 次 nudge / 16 次 `StationarityEnded` 硬停：**§8.3「四个样本里唯一的显式熔断」这个结论在第五个样本之后依然成立**。工具层另有 `packages/guard/timeout-policy`：合作式超时，工具声明 `timeoutMs`，wrapper 把 `exec.signal` 临时换成 deadline signal，超时后把结果整个替换成结构化的 `TOOL_TIMEOUT`，不 race、不抛弃 tool promise（`src/index.ts:56-80`）。
+
+### 9.6 重试与压缩共用一个 waterfall，重试次数写在日志里
+
+L2 循环体本身不知道「重试」是什么：出错就发 `agent/request-error` waterfall，默认返回 `undefined` = 终止，监听器返回 `{ kind: 'retry' }` 才 `continue`（`agent.ts:354-370`）。重试**不新开 step**，turn/step 号不变。两个真实监听器共用这一个点：
+
+- `packages/llm/llm-retry`：退避 + 追加 `llm/retry` 会话事件；下一次的重试序号是用 `agent.session.events.findLast(...)` 从**日志**里读回来的（`src/index.ts:182-189`），不是本地计数器——重试预算跨进程重启存活。
+- `packages/compaction/compaction-basic`：只认 `CONTEXT_WINDOW_EXCEEDED_CODE`，压缩后确认 `surface.replaceGeneration` 真的推进了才返回 retry，并自带 `maxOverflowRetries`（`src/index.ts:179-222`）。
+
+对照 §6 经验 1「把重试和循环分开」：Pi 是应用层摘掉失败消息后 `continue()`，dsh 更彻底——循环连历史数组都不持有，所以重试根本不需要摘任何东西。截断处理则是 §6 经验 5 的第二次独立验证：`if (finish.kind === 'max-tokens') return { kind: 'max-tokens' }` 写在取 `toolCalls` **之前**（`agent.ts:391-393`），半截 tool call 一个都不执行；而且 max-tokens 在一个 turn 内是 sticky 的（`:288-290`），后面正常完成的 step 不会把 turn 结局降级回 completed。
+
+### 9.7 历史不在循环里：request.messages 必须逐字等于 deriveMessages()
+
+`buildRequest` 的消息直接来自 `this.session.deriveMessages()`（`agent.ts:341`），而 agent-loop 自带一个 invariant 插件在 `llm/stream` 上 prepend 全局监听器做断言：
+
+```typescript
+// packages/core/agent-loop/src/invariant.ts:39-41
+const expected = session.deriveMessages()
+if (JSON.stringify(options.messages) !== JSON.stringify(expected)) {
+  fail(`llm request for session "..." diverges from the dispatch-time durable derivation (log-reconstruction desync)`)
+```
+
+四个既有样本的循环都持有一个可变消息数组（Pi 的 `currentContext.messages`、Codex 的 turn 历史、LangChain 的 `messages` 通道），**dsh 的循环里没有任何「当前历史」变量**。代价是硬的：任何模型可见的东西必须先变成 session event 才能进请求，插件不能顺手改 messages——`agent/request` waterfall 的文档原话是 "Model-visible content must use logged channels; this waterfall cannot mutate messages."（`runtime-types.ts:235-236`）。
+
+### 9.8 用户插话：一个 inbox、两个队列、排队不打断，但 inbox 本身是持久的
+
+inbox 只有两个 target（`'next-turn'` / `'next-step'`），三个别名 API 是它的固定组合（`agent.ts:122-132`）：`followup` = next-turn + 唤醒、`steer` = next-step + 唤醒、`inject` = next-step + **不唤醒**。`docs/architecture.md:86` 那句 "Some messages wake it immediately; injected context waits in the inbox until another message does" 说的就是 `inject` 的 `wakeup: false`。
+
+claim 发生在 pre-step，顺序是「先全部 next-step，再最多**一条** next-turn」（`packages/core/agent/src/inbox.ts:71-77`）——等于把 Pi 的 `"all"` / `"one-at-a-time"` 两种排空模式**分别定死**给了两个队列。注入粒度是 **step 边界**（同 Grok 的循环边界，比 Pi 的 turn 边界细）；采样流和正在跑的工具都不会被插话打断。
+
+两点是四家都没有的：其一，**inbox 是 durable projection**——每次 splice 写一条 `agent/inbox/spliced` 事件（`inbox.ts:186`），构造时从日志重放（`:32-39`），所以「用户排了三条还没被消费的话」也能跨重启恢复。其二，**打断与补话是一个原子操作**：`cancel(cause)` 默认清空 inbox 并 abort 当前 turn 的 signal（`agent.ts:134-139`），而 abort 之后再发来的唤醒消息会被自动改写 target 到 `next-turn` 并 latch 住，等旧 driver 收敛到 idle 后自动开新 turn（`agent.ts:116-119` + `:172-193`）。`AgentCancelCause` 是 `user | parent | hook | disposed` 的类型级枚举，durable `turn/end` 也照原样记下它——`{ kind: 'aborted'; reason: TurnEndCancelCause }`（`packages/core/session/src/types.ts:143-158`，`agent.ts:304` 写入），只有历史导入的粗粒度记录才落到 `legacy` 变体。
+
+### 9.9 它最像谁 / 哪里是第五种答案
+
+| 维度 | dsh 的位置 |
+|---|---|
+| 循环形状 | 与 Codex / Grok 三层同构，无新意，但体量小一个数量级 |
+| 停止条件 | **第五种答案**：数据（inbox）决定，不是钩子返回值决定 |
+| 硬迭代上限 | 比 Pi/Codex 还空一格：核心零上限，只有目标线与 ralph 工具线有 256 |
+| 防转圈 | Grok 的检测机制 + 明确不熔断的立场 |
+| 历史来源 | **第五种答案**：唯一不持有历史数组、且有运行时断言的 |
+| 插话 | Pi 式排队 + Grok 式 step 粒度 + 唯一持久化的 inbox |
+| 重试位置 | 与 Pi 同侧（循环外），但落点是插件事件而非应用层代码 |
+
+不推翻本章任何既有结论；补强两条——经验 1「重试与循环分开」被推到极致，经验 5「截断整批不执行」被第二次独立验证。可新增一条：**把「要不要继续」从返回值改成共享队列**，代价是没人能否决续跑（谁塞谁赢），收益是多个插件可以同时续跑而不需要约定优先级。
+
+### 9.10 本节未确认
+
+- ⚠️ `docs/architecture.md:119` 的表格写 "`agent/turn-stopping` stops a turn"，但代码里这个事件既不能否决也不能提前结束（它本来就在停止边界上），实际能力是**反向**的强制续跑。这处措辞与代码不符，我没有在任何测试或注释里找到与「stop a turn」对应的实现。
+- ⚠️ 全仓有 13 个包共 14 处注册 `agent/pre-step`，我只逐行读了 `goal-round-driver`、`compaction-basic`、`repeat-tool-reminder` 三个；是否有别的插件在 pre-step 里实现了步数上限，未逐个核对。
+- `DEFAULT_MAX_PARALLEL_TOOL_CALLS = 10`（`packages/core/agent-loop/src/constants.ts:6`）：全仓 bundle / preset 的 yml、yaml、json 里 grep `maxParallelToolCalls` 零命中，没有任何一处覆盖它；⚠️ 运行时用户配置（settings 分节）能否改成别的值，未核。

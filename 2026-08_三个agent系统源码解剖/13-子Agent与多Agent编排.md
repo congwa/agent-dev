@@ -817,3 +817,112 @@ scoped namespace. ...
 **编排的第四种载体**。本章看过三种编排逻辑的居所：Pi 写在 prompt 模板里、Codex 放在模型脑子里（ultra 档自主委派）、LangChain 写成 Python 代码。Grok 的 `workflow` 工具给了第四种：**模型现场生成 Rhai 脚本**，host 函数只有 `agent()/parallel()/phase()/log()`（`xai-workflow/src/engine.rs:461-710`），预算护栏 `DEFAULT_AGENT_BUDGET=128`、上限 1024、`MAX_HOST_CALLS=10_000`（lib.rs），支持 `validate_only` 干跑和 `resume_from_run_id` 断点续跑。它比 Pi 的 chain 有真控制流、比 Codex 的"模型自由发挥"可审计、比 LangChain 的预写代码灵活——代价是脚本本身也是模型生成物，第 2.3 节"模型完全可以决定跳过 planner"的问题只是从 prompt 层挪到了 DSL 层。
 
 **本节未确认**：并发子 agent 数量的硬上限未找到（20 是 `get_task_output` 查询侧上限，不是并发侧）；`Forked` 模式的 3-turn 常量是否可配置未查。
+
+---
+
+## 9. 第五个样本：DeepSeek Harness
+
+> 调研时间 2026-08-14，`deepseek-ai/deepseek-harness` v0.1.0-rc.5（commit `47f9438`）；全项目背景见 [18 番外](./18-番外-DeepSeekHarness全项目速览.md)。本节只看子 agent 与多 agent 编排。
+
+**一句话**：前四个样本各自选了一种隔离机制（Pi 子进程、Codex 同进程 thread、LangChain Python 对象、Grok ACP 子会话），dsh 把这个选择本身做成了 seam——`ctx.subagents` 是**具名 provider 注册表**，6 个实现并存，其中两个直接把一次委派交给真的 `claude` CLI 和真的 `codex app-server`；同时它给出了本章前面没有的第五种「能力隔离」答案：子 agent 的工具集不是白名单，而是**它加入的那棵插件树**。
+
+### 9.1 六个 provider，一个接口
+
+`docs/architecture.md:102` 的原话是全项目定位的一部分：
+
+> Subagent providers vary just as widely behind one interface, from a fresh child agent to a delegated turn in another product.
+
+代码里确实有 6 个包各注册一个 provider（`packages/subagent/README.md:11-16` 的表 + 各包 `registerProvider` 调用逐个核对）：
+
+| provider | 隔离机制 | `capabilities` | `inheritsParentContext` | `prepareContinuable` |
+|---|---|---|---|---|
+| `spawn` | 同进程新 Agent，不带任何 seed | 四项全 true（`subagent-spawn-in-process/src/index.ts:42`） | false（:44） | 有（:55） |
+| `fork` | 同进程新 Agent + 父日志 completed-turn 前缀作 seed | 四项全 true（`subagent-fork-in-process/src/index.ts:62`） | **true**（:64） | 有（:83，但默认配置不用） |
+| `acp` | 外部 ACP 子进程 | 全 false（`subagent-acp/src/index.ts:147`） | false | 无 |
+| `codex` | **真的 `codex app-server --stdio` 进程**（`subagent-codex/src/index.ts:2-4`） | `NO_START_CAPABILITIES`（:49） | false | 无 |
+| `claude-code` | **真的 Claude Code CLI，走官方 Agent SDK**（`subagent-claude-code/src/index.ts:2-4`） | `NO_START_CAPABILITIES`（:54） | false | 无 |
+| `dsh-sdk` | 另一个 dsh 进程，走 TS SDK | `NO_START_CAPABILITIES`（`subagent-dsh-sdk/src/index.ts:94`） | false | 无 |
+
+`NO_START_CAPABILITIES` 的注释把代价写得很直白（`packages/subagent/subagent/src/out-of-process.ts:19-23`）：跨进程的孩子**没法**兑现 `outputSchema`/`maxDepth`/`toolFilter`/`persona`，所以服务在 `start()` 之前就用 `SubagentError('UNSUPPORTED_CAPABILITY')` 拒掉（`subagent/src/index.ts:442, 492`），"never accepted-then-ignored"。这是本章第一次看到有人把「工具白名单在跨进程场景下不可执行」这件事做成了**类型化的能力协商**，而不是像 Pi 的 `reviewer.md` 那样在提示词里叮嘱一句。
+
+选哪个 provider 不是工具参数，而是**加载几个工具实例**。默认组合（`packages/bundle/base/cordis.patch.yml:313-329`）挂了两个 `tool-subagent`：`subagent`（provider=spawn，`backgroundMode: continuable`）和 `subagent_fork`（provider=fork，`one-shot`）。示例组合里还能再挂 `subagent_codex` / `subagent_claude_code`（`examples/acp-agent/product-subagent-both.cordis.yml:14-27`，两者都被迫写 `maxDepth: provider-managed`——递归预算归对方运行时管）。
+
+### 9.2 上下文继承：不是一个参数，是两把不同的工具
+
+Codex 在 v1（默认不继承）和 v2（默认全继承）之间摇摆，Grok 用 `InitialContextSource` 三档，LangChain 交给调用者。dsh 的答案是把 spawn 和 fork 做成两个 provider、暴露成两个工具名，让模型在调用点选。而且 `inheritsParentContext` 这个布尔值的主要用途是**生成不同的工具描述**（`tool-subagent/src/index.ts:211-236`、`:291`）：fork 那份写 "It already sees this conversation's completed turns… state only what is new"，spawn 那份写 "it does not see this conversation"。注释解释了为什么必须这样：给 fork 用 spawn 的措辞是**说谎**。（它还有第二处用途：`tool-ralph` 拿它做准入校验，直接拒掉继承型 provider，`tool-ralph/src/index.ts:228-230`。）
+
+fork 的 seed 口径与 Grok 的衰减式继承不同——它是**无损的 completed-turn 前缀**（止于最后一个 `turn/end`，不含在飞的那个 turn），且只在创建时抓一次（`subagent-fork-in-process/src/index.ts:48-53`，one-shot 路径在 `:68-69` 调用）。没有 Grok 那种「近 3 turn 逐字、更早的摘要」的压缩。
+
+### 9.3 第五种答案：子 agent 的能力集是一棵插件树
+
+这是本章此前没有出现过的形态。dsh 的模型可见工具几乎全部挂在 **agent preset**（服务在 `packages/preset/agent-presets`，随仓库发的四个 preset 在 `apps/cli/config/agent-presets/{code,standard,cordis,minimal}/agent.cordis.yml`）上，而子 agent 的组合窗口做三件事（`packages/subagent/subagent/src/child-agent.ts:163-175`）：
+
+```ts
+// packages/subagent/subagent/src/child-agent.ts:168-174
+childCtx.get('agentPresets')?.composeFrom(childCtx, parent.ctx)
+// Order 120: after the sandbox:policy (110) and approval:policy (115) sentences.
+childCtx.systemPrompt.context({ name: 'subagent:delegation', order: 120, text: SUBAGENT_DELEGATION_CONTEXT })
+if (composition.persona !== undefined) {
+  childCtx.systemPrompt.section({ name: 'deployment:persona', order: 0, text: composition.persona })
+}
+if (composition.toolFilter !== undefined) childCtx.tools.restrict(composition.toolFilter)
+```
+
+所以 `toolFilter` 只是**在继承来的那棵树上再做交集**，不是能力的来源。同一段函数的注释点明了这个设计的脆弱处：一个没 join preset 的孩子会看到**空的工具注册表**——正因为如此，join 和 per-child 注册被强行写在同一个函数里，"Taking the parent as a parameter is what makes that omission unrepresentable at the call sites"。preset id 还会写进子会话 header（:108-111），理由是冷读转录时必须用同一套工具集重建历史。
+
+比工具白名单更硬的一条：委派时**强制把 approval 策略钉成 `'never'`**，不管父 agent 自己是什么策略（`child-agent.ts:199-215`），并作为 `source: 'delegation'` 事件落进子日志。配套的固定上下文句子（:135-139）告诉子 agent：
+
+> You are a delegated subagent: your permission scope was fixed when you were started and cannot be widened from inside this session — operations that require approval are rejected automatically.
+
+对照第 2.3 节 Pi 作者那句「Assume tool permissions are not perfectly enforceable」——dsh 在**审批面**上把这个洞堵成了机制（子 agent 无法通过弹窗提权），在**bash 万能**这一面仍然没堵。
+
+### 9.4 continuable 子 agent：比 Codex v2 更彻底的 actor 化，外加一条子→父推送
+
+默认的 `subagent` 工具是 `backgroundMode: continuable`，`run_in_background` **默认 true**（`tool-subagent/src/index.ts:263`）——与 Grok 一致，与三个主样本相反。返回的不是 job id 而是**持久的 child session id**（`:398`，`subagentId: started.childId`），子 agent 是一个「至多一个活 Activation 的持久 Session」，三态 `running` / `waiting` / `settled` 由 Agent 静默性和 owned-child 集合推导，不维护第二个状态机（`subagent/src/continuation.ts:145-159, 871-873`；`docs/subsystems/subagent.md:136`）。`send_message` 冷 resume 已落盘的孩子，`interrupt_agent` 能打断**任意后代**而不只是直接子女（工具描述：`tool-subagent-control/src/index.ts:82-87`，"The target may be your direct child or a deeper agent created under you"），且只停当前 turn、排队消息原地保留。
+
+真正的新东西是 `report`：一个**只注册进 continuable 子 agent 自己 scope**的工具（`tool-subagent-report/src/index.ts:39-52`，注册点 `:64`），让孩子在**不结束自己 turn**的情况下主动把结论推给直接父亲，`reportDelivery` 可选 `wakeup`（默认，唤醒父亲开一个新 turn）或 `quiet`（只入上下文不唤醒，`:26-36`）。它的提示词直指第 1.1 节的带宽悖论，而且给的是和 Pi scout「回传坐标」不同的解法：
+
+> The agent that started you shares your workspace but does not automatically receive your transcript, tool output, or reasoning, so a closing remark such as "done" leaves it nothing it can use.
+
+**共享工作区就是回传通道**——不传内容，因为文件本来就在那儿。另外，Activation 结算时 runtime 还会**无条件**给父亲发一条 `subagent-settled` 通知（`continuation.ts:83, 1414`），和孩子自己写的 `report` 用不同的 `kind`，理由写在类型注释里：合并两者等于「credit the child with words it never wrote」（`docs/subsystems/subagent.md:212-231`）。这个「运行时的话」和「孩子的话」分开记账的做法，四个既有样本都没有。
+
+### 9.5 编排：一个引擎，两个消费者（模型写脚本 / 部署写脚本）
+
+`ctx.workflowEngine` 与 Grok 的 `workflow` 工具形态几乎一样，但脚本语言是**普通 JavaScript**（`node:worker_threads` 里一个 `vm` context），host 全局只有 5 个函数加一个数据全局（`workflow-worker-thread/src/runtime.ts:100-108`）：`agent` / `parallel` / `pipeline` / `phase` / `log` / `args`。比 Grok 的 Rhai 多一个 `pipeline(items, ...stages)`——逐项流水线、**阶段之间没有 barrier**，工具描述明确说 "prefer this for multi-stage work"（`tool-workflow/src/index.ts:144`）。
+
+真正拉开差距的是 `agent(prompt, opts)` 的 `opts.schema`：传 JSON Schema 就返回**校验过的结构化对象**，脚本可以直接在 JS 里对它做计算（`runtime.ts:39`：`SUPPORTED_AGENT_OPTIONS = new Set(['label', 'phase', 'schema', 'provider', 'model'])`）。第 8 节记录的 Grok host 函数清单里没提到这一项（该节没有展开 Rhai `agent()` 的可选参数，未在 Grok 仓库复核）。而下一行同样值钱（`runtime.ts:40-41`）：
+
+```ts
+/** Deferred Claude Code options we name explicitly in the rejection message. */
+const DEFERRED_AGENT_OPTIONS = new Set(['effort', 'isolation', 'agentType'])
+```
+
+`isolation` 被逐字列为**拒绝项**，测试断言脚本会因此整个死掉（`workflow-worker-thread/tests/workflow-worker-thread.spec.ts:328-332`，`expect(result.error).toContain('"isolation" is deferred')`）。也就是说 dsh 知道 Grok 的 worktree 隔离长什么样，并且明确没做。
+
+护栏：`maxConcurrentAgents` 默认 0→自动 `min(16, max(1, cores-2))`（`workflow-worker-thread/src/index.ts:35`，实现在 `:152`）、`maxTotalAgents` 1000（"a runaway-loop backstop"）、单次 `parallel/pipeline` 最多 4096 项、同步片 5s、取消宽限 5s（`index.ts:116-121`；`runtime.ts:256-258`）。
+
+第 8 节批评 Grok 时说「脚本本身也是模型生成物，跳过 planner 的问题只是从 prompt 层挪到了 DSL 层」。dsh 给了这个批评一个正面回应：同一个引擎上还挂着 `tool-ralph`（`packages/workflow/tool-ralph/src/index.ts:413` 注册为 `ralph`），脚本是**编译期写死的常量** `RALPH_SCRIPT`，注释直说 "The model supplies data only; it cannot alter the loop, provider route, schema, or handoff validation."（:87-88）。模型只能传 `objective` 和 `maxRounds`。循环体是：每轮开一个**全新**子 agent，只带不变的 objective 和上一轮那份被 schema 严格校验、超 16384 字符就报错的结构化 handoff（:24-30, :90-177）。工具描述那句是全项目最凝练的上下文管理声明：
+
+> Each round opens a new child with no parent conversation or prior child session; the shared workspace is long-term memory, and only a bounded structured report crosses rounds.
+
+**编排逻辑的第五种居所：部署方写死的脚本**——比 LangChain 的应用层代码更靠近产品，比 Grok 的模型生成脚本更可审计。
+
+### 9.6 没做的和倒退的
+
+- **并行写冲突：完全不管**。子 agent 共享父会话 cwd（`child-agent.ts:110`），无 worktree、无锁，`isolation` 是拒绝项。连 Codex `worker` 角色那种「明确分配文件所有权」的提示词约定都没有——`rg -n "worktree"` 全仓的命中全部落在 git 工具链与开发/翻译文档、Windows ACL 注释和上面那条拒绝测试上，`packages/subagent` 与 `packages/workflow` 的源码里一处都没有。第 6 节经验第 4 条「Grok 做了、三家没做」在五样本尺度下变成 **1:4**。out-of-process provider 可以配一个固定 `cwd`（`out-of-process.ts:114-120`），但那是部署级常量，不是每个孩子一份。
+- **递归上限默认 3**，不是 1（`tool-subagent/src/index.ts:98`：`maxDepth: … .default(3)`）。Codex 和 Grok 独立收敛到 1，dsh 是唯一放到 3 的——正好落在第 7 节「递归深度 > 2 就该退回单 agent」的红线之外。深度是持久的、单调的：`SessionHeader.delegationDepth` 与运行时 `AgentOptions.subagentDepth` 取**大**（`depth.ts:35`），冷 resume 无法把自己降回顶层。
+- **直接委派没有并发上限**。`maxConcurrentAgents` 只存在于 workflow 引擎；`ctx.subagents` 侧只有一句「shared capacity controller **may** delay」的接口注释（`types.ts:280-284`），我在 `packages/subagent/*/src` 全文搜 `concurren|capacity|semaphore`，除这句注释外只剩 listing 的冷读并发常量 `COLD_READ_CONCURRENCY = 4`（`list-children.ts:32`）和几处并发安全说明，没有任何准入闸门。模型连着发 20 个后台 `subagent` 调用，没有东西拦。
+- **`schedule` 不是多 agent 设施**。`packages/schedule` 是会话内的定时提醒（after/at/every，其中 `every` 最小 5 分钟），提醒以普通 follow-up turn 回到**原会话**，不起新 agent。后台线走的是 `packages/jobs`：通用 job 注册表 + `job_output` / `job_list` / `job_kill`（`packages/jobs/tool-jobs/src/index.ts:303, 343, 363`）+ 完成通知注入 owner 的下一步或唤醒空闲 owner，一次性子 agent 的后台模式就复用它（`tool-subagent/src/index.ts:406-422`）。
+
+### 9.7 可观测性：子 agent 是可以走进去说话的会话
+
+第 1.4 节说子 agent 是「黑盒里的黑盒」，Pi 的立场是宁可用 tmux 换可观测性。dsh 的答案比另外四家都远：子 agent 的转录**就是一个普通 Session**，Web 端在父会话头部挂一棵可懒加载展开的目录树，点任意深度调 `SessionRuntime.openSubagent()` 切进去（`packages/client/ui-subagent/README.md:5-11`）。一次性子 agent 打开是只读执行记录；**continuable 子 agent 只要父亲还活着，输入框就是可用的——你打的字直接进它的 FIFO inbox，Stop 走 `subagent.interrupt`**。也就是说 Pi 用 tmux 换来的「实时看到 + 随时切进去直接对话」，dsh 在保留程序化编排的前提下拿到了。代价写在同一份 README 的 Known Limitations 里：目录树**没有持久的结果状态**，只有 running/inactive，分不清完成、失败还是取消。
+
+模型侧则相反地保守：`report` 是唯一的中途回传，工具描述逐字承诺 "You receive its result, not its intermediate steps."（fork 那份，`tool-subagent/src/index.ts:219`；spawn 那份是 "The subagent returns its result, not its intermediate steps."，:229-230）。**人看得见全部，模型只看得见结论**——这个分层比 Pi 的「模型可见截断 50 KB / tool details 看全部」更彻底。
+
+### 9.8 本节未确认
+
+- ⚠️ 一次性（one-shot）子 agent 最终输出**有没有 token/字符上限**没找到。`SubagentResult.output` 是「最后一条非空 assistant 消息」原样带回（`docs/subsystems/subagent.md:316-323`），`tool-subagent` 只在失败路径拼 `Partial output before the run ended:`（:149-155），没看到截断。对照 Codex 的 1000 token 硬墙（该数值本身在第 7 节存疑 1 里被标为未确认）和 Pi 的 50 KB，dsh 这里可能真的不截。
+- ⚠️ `subagent-acp` / `subagent-dsh-sdk` 的进程与转录细节没细读（只核了 config schema 与 capability 声明），它们的中断传播是否等价于 Pi 的 SIGTERM→SIGKILL 未验证。
+- ⚠️ `agent-presets` 的 `composeFrom` 具体如何把 mount scope 挂到子 ctx（`packages/preset/agent-presets/src/mount.ts`）我没逐行读，只读到 `child-agent.ts` 的调用点和 `subagent-in-process-driver/tests/preset-inheritance.spec.ts` 的五条断言（子 agent 用父 preset 的工具、带父 prompt section、把组合记进 header、toolFilter 在其上做交集、父亲空白时换 preset 会跟随）。
+- ⚠️ `docs/subsystems/subagent.md` 里大量 `ts type-equiv` 代码块是文档独有的等价类型渲染，我逐条核对的是 `types.ts` / `child-agent.ts` / `depth.ts` / `continuation.ts` / 各 provider 的真实声明；**未发现文档与代码冲突**，但没有全量比对（该文件 734 行）。
