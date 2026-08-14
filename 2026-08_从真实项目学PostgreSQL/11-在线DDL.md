@@ -33,6 +33,36 @@
 
 `AccessExclusiveLock` 持有 0.001 秒没关系；持有 8 秒，加上第 5 篇讲的**锁队列 FIFO**效应，就是整张表停摆 8 秒 + 后面积压的所有请求。
 
+判断一条 DDL 危不危险，沿着这条判定树走一遍就有数：
+
+```mermaid
+flowchart TD
+    A["<b>这条 DDL 语句</b><br/>要拿多强的锁、拿多久"]
+    B["<b>只改元数据？</b><br/>RENAME / DROP COLUMN / DROP DEFAULT"]
+    C["<b>瞬间 AccessExclusive</b><br/>风险约等于 0"]
+    D["<b>要全表扫描或重写？</b><br/>改类型 / 加易变默认值 / 加约束 / 建索引"]
+    E["<b>有没有拆分技巧？</b><br/>NOT VALID+VALIDATE / CONCURRENTLY"]
+    F["<b>瞬间强锁 + 长时间弱锁</b><br/>业务基本无感"]
+    G["<b>长时间强锁</b><br/>整表停摆，锁队列 FIFO 积压"]
+
+    A --> B
+    B -- "是" --> C
+    B -- "否" --> D
+    D --> E
+    E -- "有" --> F
+    E -- "没用/没做" --> G
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,D,E main
+    class C,F data
+    class G danger
+```
+
 ---
 
 ## 二、危险操作与它们的安全替代
@@ -46,6 +76,31 @@ ALTER TABLE d ALTER COLUMN v TYPE bigint    3.87s（200 万行）
 200 万行 3.87 秒，一张 10 亿行的表就是**半小时以上的全表锁**。
 
 **注意：`int → bigint` 也要重写**，因为存储宽度变了。
+
+两条路线走出来的结果差别很大：
+
+```mermaid
+flowchart TD
+    S["<b>需求：给 amount 换类型</b><br/>比如 int → bigint"]
+    D1["<b>❌ 直接 ALTER TYPE</b><br/>一步到位"]
+    D2["<b>AccessExclusiveLock 全表重写</b><br/>200 万行 3.87s，10 亿行半小时以上"]
+    A1["<b>✅ 新列 + 双写</b><br/>加 amount_new，触发器同步"]
+    A2["<b>分批回填历史数据</b><br/>每批独立事务 + sleep"]
+    A3["<b>加约束</b><br/>先 NOT VALID 再 VALIDATE"]
+    A4["<b>应用切换 + 删旧列</b><br/>两次发布，DDL 全部秒级"]
+
+    S --> D1 --> D2
+    S --> A1 --> A2 --> A3 --> A4
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class S entry
+    class D1,D2 danger
+    class A1,A2,A3 main
+    class A4 data
+```
 
 **✅ 安全做法：新列 + 双写 + 回填 + 切换**
 
@@ -100,6 +155,32 @@ ADD COLUMN c3 uuid DEFAULT gen_random_uuid()    8.45s   ❌ 必须重写
 
 但**易变函数（`gen_random_uuid()`、`now()`、`random()`）不行**，因为每行的值都不同，必须真的写进去。
 
+分岔点就在默认值是不是常量：
+
+```mermaid
+flowchart TD
+    Q["<b>ADD COLUMN ... DEFAULT</b><br/>默认值是什么类型"]
+    C1["<b>常量</b><br/>如 DEFAULT 42"]
+    C2["<b>易变函数</b><br/>如 gen_random_uuid() / now()"]
+    R1["<b>存进 pg_attribute.attmissingval</b><br/>读老行时现补，0.00s"]
+    R2["<b>必须真的写进每一行</b><br/>全表重写，8.45s"]
+    F1["<b>✅ PG 11+ 直接加，安全</b>"]
+    F2["<b>✅ 先加空列，分批回填，最后设默认值</b>"]
+
+    Q --> C1 --> R1 --> F1
+    Q --> C2 --> R2 --> F2
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class Q entry
+    class C1,C2 main
+    class R1 data
+    class R2 danger
+    class F1,F2 data
+```
+
 **✅ 做法**：先加空列，再分批回填，最后设默认值。
 
 ### ③ `SET NOT NULL`（需要全表校验）
@@ -127,6 +208,30 @@ ALTER TABLE t DROP CONSTRAINT t_col_nn;                                   -- 可
 
 这就是 `NOT VALID` 的全部意义：**把"长时间的强锁"拆成"瞬间的强锁 + 长时间的弱锁"。**
 
+两条路线的总耗时接近，但阻塞读写的时长天差地别：
+
+```mermaid
+flowchart TD
+    S["<b>要给表加一个约束</b><br/>CHECK / FOREIGN KEY / NOT NULL"]
+    D1["<b>❌ 一步到位 ADD CONSTRAINT</b><br/>AccessExclusive 全程持有"]
+    D2["<b>阻塞读写 1.50s</b><br/>全程强锁"]
+    A1["<b>✅ 先 NOT VALID</b><br/>AccessExclusive，但瞬间释放"]
+    A2["<b>再 VALIDATE CONSTRAINT</b><br/>ShareUpdateExclusive，1.26s"]
+    A3["<b>不阻塞读写</b><br/>总耗时相近，阻塞时长归零"]
+
+    S --> D1 --> D2
+    S --> A1 --> A2 --> A3
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class S entry
+    class D1,D2 danger
+    class A1,A2 main
+    class A3 data
+```
+
 ```sql
 -- ✅ 两步法，外键同理
 ALTER TABLE child ADD CONSTRAINT fk FOREIGN KEY (pid) REFERENCES parent(id) NOT VALID;
@@ -147,6 +252,22 @@ ALTER TABLE child VALIDATE CONSTRAINT fk;
 ```
 [A] CREATE INDEX（普通）        DDL 耗时 2.12s   业务 UPDATE 最长被卡 2115 ms
 [B] CREATE INDEX CONCURRENTLY  DDL 耗时 2.10s   业务 UPDATE 最长被卡  183 ms
+```
+
+`CONCURRENTLY` 之所以不阻塞读写，是因为它把一遍扫描拆成了两遍，中间让业务事务先走完：
+
+```mermaid
+sequenceDiagram
+    participant APP as 业务读写
+    participant IDX as CONCURRENTLY 会话
+    participant TBL as 表数据
+
+    IDX->>TBL: 第一遍扫描，建立初始索引
+    APP->>TBL: 正常 INSERT/UPDATE/DELETE，不被阻塞
+    IDX->>IDX: 等待扫描开始时的旧事务全部提交
+    IDX->>TBL: 第二遍扫描，补齐扫描期间的新增改动
+    IDX->>IDX: 校验索引与表数据是否一致
+    IDX->>TBL: 校验通过，标记索引为 valid
 ```
 
 **一律用 `CONCURRENTLY`。** 代价：
@@ -309,6 +430,29 @@ DDL 安全只是一半，另一半是**应用代码和 schema 的版本必须能
 
 **✅ 扩展-收缩（expand-contract）模式**：任何破坏性变更都拆成 **3 次发布**：
 
+```mermaid
+flowchart LR
+    subgraph P1["发布 1：扩展"]
+        A1["<b>加新结构</b><br/>代码同时读写新旧两处"]
+    end
+    subgraph P2["发布 2：迁移"]
+        A2["<b>回填历史数据</b><br/>代码切换到只用新结构"]
+    end
+    subgraph P3["发布 3：收缩"]
+        A3["<b>删掉旧结构</b><br/>确认旧版本 Pod 已全部下线"]
+    end
+
+    P1 -- "等旧版本 Pod 下线" --> P2
+    P2 -- "等新版本稳定" --> P3
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class A1 entry
+    class A2 main
+    class A3 data
+```
+
 ```
 发布 1（扩展）: 加新结构，代码同时读写新旧两处
                 （此时数据库同时支持新旧两种代码）
@@ -348,7 +492,28 @@ UPDATE big_table SET new_col = old_col;      -- 1 亿行
 - 整个过程钉住 VACUUM 水位线（**它自己就是那个长事务**）；
 - 中途超时被杀 → **全部回滚，白干，还留下满地死元组**。
 
-**✅ 分批 + 每批独立事务 + 限速**：
+**✅ 分批 + 每批独立事务 + 限速**，整个过程是一个不断缩小战场的循环：
+
+```mermaid
+flowchart TD
+    S["<b>从 last_id 开始</b><br/>按主键顺序取一批，如 5000 行"]
+    U["<b>UPDATE 这一批</b><br/>单独事务"]
+    C["<b>COMMIT</b><br/>释放锁，死元组可以被回收"]
+    W["<b>sleep 0.05s</b><br/>给 autovacuum 和业务留窗口"]
+    N["<b>还有未处理的行？</b>"]
+    D["<b>全部完成</b><br/>退出循环"]
+
+    S --> U --> C --> W --> N
+    N -- "是" --> S
+    N -- "否" --> D
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class S entry
+    class U,C,W,N main
+    class D data
+```
 
 ```sql
 DO $$
