@@ -27,6 +27,34 @@ ctx.on('tools/pre-execute', async (exec, next) => {
 
 上面那八行里藏着两个必须先搞清的问题：**`return { kind: 'deny' }` 凭什么能顶掉整条链？`return next()` 又把控制权交给了谁？** 答案全在 Cordis 的十行实现里，而且比你想的更朴素。
 
+先把形状记住：一个 `exec` 从派发方出发，按注册顺序一层层穿过监听器，`return next()` 就往下走一格，直接 `return` 就地终结，链尾兜着派发方写死的 `inner`。
+
+```mermaid
+flowchart TD
+    IN["<b>派发方 ctx.waterfall</b><br/>交出 exec 和兜底 inner"]
+    A["<b>监听器 A · 最先注册 = 最外层</b><br/>就地改 exec，再 return next()"]
+    B["<b>监听器 B · 后注册 = 内层</b><br/>命中危险命令，直接 return"]
+    DENY["<b>短路：kind 为 deny</b><br/>下游和 inner 一个都不跑"]
+    INNER["<b>inner 兜底：kind 为 allow</b><br/>没人拦时本来会发生的事"]
+    OUT["<b>ctx.waterfall 的返回值</b><br/>= 最外层 A 的返回值"]
+
+    IN --> A
+    A -- "next()" --> B
+    B -- "这次判决归我" --> DENY
+    B -- "return next() 才走到这里" --> INNER
+    DENY --> OUT
+    INNER --> OUT
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class A,B,OUT main
+    class INNER data
+    class IN entry
+    class DENY danger
+```
+
 ---
 
 ## 全部实现就这十行
@@ -49,6 +77,30 @@ ctx.on('tools/pre-execute', async (exec, next) => {
 
 接着造一个闭包 `next`。注意它**没有形参**——只从 `cbs` 头部取一个回调，取不到就退回 `inner`。造好之后把它 `push` 回 `args` 尾部，顶替刚被 pop 掉的 `inner`；于是监听器收到的最后一个参数永远是 `next`。最后 `return next()` 启动链条，整个 `ctx.waterfall(...)` 的返回值就是最外层监听器的返回值。
 
+这十行对 `args` 做的事就是削头、削尾、再补一位：
+
+```mermaid
+flowchart LR
+    R["<b>原始 args</b><br/>carrier、事件名、exec、inner"]
+    D["<b>dispatch 削头</b><br/>取走 carrier 与事件名"]
+    CBS["<b>cbs 监听器快照</b><br/>按 scope 过滤器筛出的新数组"]
+    P["<b>pop 削尾</b><br/>inner 收进闭包，args 里不再有它"]
+    NX["<b>push next</b><br/>尾部换成没有形参的 next"]
+    C["<b>cb 展开同一个 args</b><br/>每个监听器的最后一参永远是 next"]
+
+    R --> D
+    D -- "产出" --> CBS
+    D --> P --> NX --> C
+    CBS -- "shift 一个跑一个" --> C
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class D,P,NX,C main
+    class CBS data
+    class R entry
+```
+
 派发端长这样，`inner` 一目了然（`packages/core/tools/src/index.ts:1474-1478`）：
 
 ```ts
@@ -59,11 +111,60 @@ ctx.on('tools/pre-execute', async (exec, next) => {
       )
 ```
 
-`carrier` 是 scope 载体（`scopeTarget()`，见 `packages/core/scope/src/index.ts:170-185`），它挂了一个 `Context.filter`，`dispatch` 在 `events.ts:171-173` 拿它筛监听器。筛法要看清楚，反过来的：**没打 scope 标签的监听器一律放行**（`packages/core/scope/src/index.ts:175-176`），被筛掉的只是"标了别的 agent 的"；`{ global: true }` 的监听器连过滤器都不进（`events.ts:116`、`events.ts:173`）。各处事件文档里说的 "Scope-filtered dispatch" 就是这回事。
+`carrier` 是 scope 载体（`scopeTarget()`，见 `packages/core/scope/src/index.ts:170-185`），它挂了一个 `Context.filter`，`dispatch` 在 `events.ts:171-173` 拿它筛监听器。筛法要看清楚，反过来的：**没打 scope 标签的监听器一律放行**（`packages/core/scope/src/index.ts:175-176`），被筛掉的只是"标了别的 agent 的"；`{ global: true }` 的监听器连过滤器都不进（`events.ts:116`、`events.ts:173`）。各处事件文档里说的 "Scope-filtered dispatch" 就是这回事。落到单个监听器身上，筛法是这三条岔路：
+
+```mermaid
+flowchart TD
+    H["<b>一个已注册的监听器</b><br/>dispatch 逐个过它"]
+    Q1{"注册时带 global true 吗"}
+    Q2{"它的 ctx 打了 scope 标签吗"}
+    Q3{"标的是这次派发的那个 agent 吗"}
+    PASS["<b>进 cbs，这次会跑</b>"]
+    DROP["<b>被筛掉，这次不跑</b><br/>只有标了别的 agent 才会走到这里"]
+
+    H --> Q1
+    Q1 -- "是：连过滤器都不进" --> PASS
+    Q1 -- "否" --> Q2
+    Q2 -- "没标：一律放行" --> PASS
+    Q2 -- "标了" --> Q3
+    Q3 -- "是" --> PASS
+    Q3 -- "否" --> DROP
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class PASS main
+    class H entry
+    class DROP danger
+```
 
 ---
 
 ## 洋葱：先注册的在外层
+
+同一个 `events.ts` 里还有另外四种派发模式，只有 waterfall 是嵌套的，别的都把监听器排成一排：
+
+```mermaid
+flowchart LR
+    subgraph FLAT["并排型 · 监听器彼此不嵌套"]
+        F1["<b>emit</b><br/>同步全跑，不等返回的 promise"]
+        F2["<b>parallel</b><br/>并发全跑，等全部落定"]
+        F3["<b>serial / bail</b><br/>顺序跑，谁先返回 bail 值谁定调"]
+    end
+
+    subgraph NEST["嵌套型 · 只有 waterfall"]
+        W1["<b>A 包住 B</b><br/>next() 之前是进入时机"]
+        W2["<b>B 包住 inner 兜底</b>"]
+        W3["<b>返回值一路往回穿</b><br/>next() 之后是返回时机"]
+    end
+
+    W1 --> W2 --> W3
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class W1,W2,W3 main
+    class F1,F2,F3 entry
+```
 
 监听器按**注册顺序**入链，先注册的在外层（`register()` 默认 `push`，`events.ts:255`；`{ prepend: true }` 改成 `unshift`，把自己顶到最外层）。
 
@@ -87,6 +188,30 @@ ctx.on('tools/pre-execute', async (exec, next) => {
 "洋葱中间件"这个词如果你没见过：它指每个监听器**包住**下游，而不是排在下游后面。`next()` 之前的代码在进入时跑，`next()` 之后的代码在返回时跑，所以一个监听器同时拥有前置和后置两个时机。Koa 的 middleware 是同一个形状；Express 的 `next()` 不返回下游结果，只有进入方向，不是这个形状。
 
 想看"后半段"怎么用，`packages/hooks/hooks-claude-code/src/index.ts:247-264` 是教科书级的例子：先把自己的判决算出来，deny 就直接短路；不 deny 则 `await next()` 拿到下游判决，再把自己的 context 折叠上去返回。
+
+`{ prepend: true }` 改的就是入链位置——`unshift` 到队首，等于抢在所有已注册的监听器外面：
+
+```mermaid
+flowchart TD
+    subgraph PUSH["默认 push · 按注册先后排层"]
+        A1["<b>A</b> 先注册 = 最外层"] --> A2["<b>B</b> 后注册 = 内层"] --> A3["<b>inner</b> 派发方兜底"]
+    end
+
+    subgraph PRE["新插件 C 带 prepend true"]
+        C1["<b>C</b> unshift 到队首 = 最外层"] --> C2["<b>A</b>"] --> C3["<b>B</b>"] --> C4["<b>inner</b>"]
+    end
+
+    NOTE["<b>别拿顺序当优先级</b><br/>加载顺序一变就失效，语义靠返回的 decision 决定"]
+
+    PUSH --> PRE --> NOTE
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A1,A2,C1,C2,C3 main
+    class A3,C4 data
+    class NOTE note
+```
 
 ---
 
@@ -127,6 +252,27 @@ A 返回 → 这就是 ctx.waterfall 的返回值
 
 这条在 `tools/execute` 上尤其致命，因为那里的 `inner` 是 `() => this.dispatchToolBody(mutableExec)`（`packages/core/tools/src/index.ts:1575`）。第二次 `next()` 等于**工具体被执行两次**。想做重试的人最容易在这里翻车：重试要写在 `agent/request-error`，那里有专门的 `{ kind: 'retry' }` 语义（`packages/core/agent/src/runtime-types.ts:245-260`），不要靠反复调 `next()`。
 
+以 `tools/execute` 为例，第二次 `next()` 的走向是这样的：
+
+```mermaid
+flowchart TD
+    N1["<b>A 第一次 next()</b><br/>shift 出 B，cbs 变空"]
+    IB["<b>inner 第一遍</b><br/>dispatchToolBody 真的跑了工具体"]
+    RB["<b>返回值回到 A 手里</b>"]
+    N2["<b>A 又调一次 next()</b><br/>以为能重跑 B"]
+    IN2["<b>shift 空，命中 inner</b><br/>兜底行为跑第二遍"]
+    BAD["<b>工具体执行两次</b><br/>重试请改挂 agent/request-error"]
+
+    N1 --> IB --> RB --> N2 --> IN2 --> BAD
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class N1,RB,N2 main
+    class IB data
+    class IN2,BAD danger
+```
+
 一句话记住：**`next()` 是"往下走一格"，不是"运行剩下的链"。一次通过，别回头。**
 
 ### 附带的两条
@@ -145,6 +291,31 @@ A 返回 → 这就是 ctx.waterfall 的返回值
 
 两句合起来才是完整约定，翻成可执行的判据就三种情况。
 
+```mermaid
+flowchart TD
+    Q["<b>这个监听器想干什么</b>"]
+    Q1{"这次决策归你吗"}
+    Q2{"你要动进入下游的输入吗"}
+    OWN["<b>拥有决策权</b><br/>算出结论直接 return，不调 next()"]
+    MOD["<b>只改输入</b><br/>就地改 payload，return next()，跑完还原"]
+    OBS["<b>只观察 / 标注 / 加料</b><br/>必须 await next()，拿回下游结果再加工"]
+    BAD["<b>观察者却 return 了</b><br/>下游被你悄悄全短路，别人的策略集体失效"]
+
+    Q --> Q1
+    Q1 -- "是，策略 / 判决 / 答复" --> OWN
+    Q1 -- "否" --> Q2
+    Q2 -- "是" --> MOD
+    Q2 -- "否" --> OBS
+    OBS -. "忘了委派" .-> BAD
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class OWN,MOD,OBS main
+    class Q entry
+    class BAD danger
+```
+
 **你拥有这次决策权**（策略、判决、答复），算出结论就 `return`，不调 `next()`。`hooks-claude-code` 判 deny 时就是直接返回的（`packages/hooks/hooks-claude-code/src/index.ts:241-242`）。
 
 **你只观察、只标注、只加料**，那就必须 `await next()`，把下游结果拿回来再加工。同一个文件的 `:256-264` 演示了正例：不 block 时委派，再把 context 折到下游判决上。
@@ -162,6 +333,36 @@ A 返回 → 这就是 ctx.waterfall 的返回值
 ## 全仓 13 个拦截点
 
 `grep -rn "@mode waterfall" packages/*/*/src` 在 2026-08-14 出 14 行，其中 `packages/typert/generator/src/cordis-catalog.ts:208` 是校验器的报错文案、不是事件声明；剩下 13 行就是下面这张表（与全仓 `ctx.waterfall(` 派发点交叉核对一致）。
+
+这 13 个点不是平铺的，它们分布在一次 step 从提示词装配到遥测导出的路上：
+
+```mermaid
+flowchart TD
+    subgraph LOOP["一次 step 的主路"]
+        SP["<b>system-prompt/assemble</b><br/>装配提示词，返回值是权威"]
+        AG["<b>agent 三处</b><br/>agent/pre-step、agent/request、agent/request-error"]
+        LLM["<b>llm/stream</b><br/>请求发出前的最后一道"]
+        TL["<b>工具四处</b><br/>tools/pre-execute、execute、post-execute、code-dispatch-log"]
+        FS["<b>fs 两处</b><br/>fs/write-intent、fs/edit-intent，在工具体内部"]
+        AP["<b>approval/request</b><br/>pre-execute 返回 ask 时转到这里"]
+    end
+
+    TE["<b>session-telemetry/record</b><br/>导出前改写 record，本身不带脱敏规则"]
+
+    SP --> AG
+    AG -- "发请求" --> LLM
+    LLM -- "模型要调工具" --> TL
+    TL -- "写和编辑文件" --> FS
+    TL -- "要问用户" --> AP
+    LOOP -. "会话数据往外导" .-> TE
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class SP,AG,LLM,TL main
+    class FS,AP data
+    class TE note
+```
 
 选型时最该看的是最后那一列——**不调 `next()` 你就替系统做了什么决定**。
 

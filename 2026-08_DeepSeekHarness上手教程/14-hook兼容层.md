@@ -23,6 +23,37 @@
 
 桥存在的理由只有一条：**你已经有一份 `hooks.json` 了，不想重写成插件。** CC 桥的 README 自己就把话说死了，原生插件能做这个桥做的一切，而且更强——有类型化返回、没有序列化边界；桥只是那个被映射子集的兼容通道（`packages/hooks/hooks-claude-code/README.md:7`）。
 
+摆开看是这么个格局：一份外部配置文件，两个把它翻译成 Cordis 插件的桥，最后都落在同一批生命周期拦截点上；原生插件走的是旁边那条更短的路。
+
+```mermaid
+flowchart TD
+    EXT["<b>外部 hooks.json</b><br/>CC 或 Codex 方言，一个字不改"]
+
+    subgraph PKG["packages/hooks 下的三个包"]
+        HP["<b>hook-protocol</b><br/>共享线协议库，什么都不注册"]
+        CC["<b>hooks-claude-code</b><br/>Cordis 插件，CC 方言桥"]
+        CX["<b>hooks-codex</b><br/>Cordis 插件，Codex 方言桥"]
+    end
+
+    NAT["<b>原生插件</b><br/>默认答案，能力更全"]
+    PT["<b>生命周期拦截点</b><br/>tools/pre-execute 之类"]
+
+    EXT --> CC
+    EXT --> CX
+    CC -- "复用" --> HP
+    CX -- "复用" --> HP
+    CC --> PT
+    CX --> PT
+    NAT --> PT
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class CC,CX,PT main
+    class EXT,HP entry
+    class NAT note
+```
+
 ---
 
 ## 先看它真的拦住一次 bash
@@ -53,6 +84,23 @@
 ```
 
 整条链路都在这三行里：`exit 2` 让 stderr 变成 block reason，reason 变成 `PreToolDecision.deny`，工具层再把它包成 `Error: <你的 stderr>` 交给模型（拼这个前缀的代码在 `packages/core/tools/src/index.ts:1494`）。
+
+换个视角，是四方各干一件事，按时间排成一条线。
+
+```mermaid
+sequenceDiagram
+    participant T as 工具层拦截点
+    participant B as CC 桥
+    participant H as hook 进程
+    participant L as 会话日志
+    T->>B: 模型要调 bash，拿工具名比 matcher
+    B->>L: 记 hook/invoked，带 point 与 handlerId
+    B->>H: payload 写进 stdin
+    H-->>B: exit 2，stderr 吐一行文案
+    B->>L: 记 hook/result，decision block、exitCode 2
+    B-->>T: 返回 PreToolDecision.deny，reason 取 stderr
+    T->>L: 记 tool/result，isError 且正文带 Error 前缀
+```
 
 ---
 
@@ -109,6 +157,37 @@ profile 目录是 `$DSH_HOME/profiles/<name>`（`apps/cli/README.md:11`），里
 
 ### 三个必踩的坑
 
+三个坑长在同一个位置：插件 `apply()` 那一次性的加载动作上。
+
+```mermaid
+flowchart TD
+    P["<b>apply 时读一次</b><br/>进程级，相对路径按启动 cwd 解析"]
+    R{"readFileSync 加 JSON.parse"}
+    S{"逐事件解析 matcher 与 hooks"}
+    OK["<b>注册各拦截点监听</b><br/>此后不再看这份文件，无热重载"]
+    E1["<b>读失败或 JSON 坏</b><br/>只 warn 一行，一个 hook 都不注册"]
+    E2["<b>matcher 正则非法</b><br/>抛 SyntaxError，同一个 catch 接住，整份作废"]
+    K1["<b>非 command 的 type</b><br/>跳过并 warn"]
+    K2["<b>名单外的事件</b><br/>静默丢弃，配了也永远不响"]
+
+    P --> R
+    R -- "失败" --> E1
+    R -- "成功" --> S
+    S -- "抛错" --> E2
+    S -- "通过" --> OK
+    S -.-> K1
+    S -.-> K2
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class P,OK main
+    class R,S entry
+    class E1,E2 danger
+    class K1,K2 note
+```
+
 **`configPath` 是进程级的，只读一次。** 加载时 `readFileSync` 读一遍就完了（`hooks-claude-code/src/index.ts:104`），相对路径按**进程启动 cwd** 解析。没有「每个会话发现各自项目里的 `hooks.json`」，也没有热重载——这两条写在字段自己的 JSDoc 里，连同那个 `TODO(per-session-hook-config)`（`index.ts:48`–`:51`）。写绝对路径。
 
 **读失败、解析失败都是静默降级。** `catch` 里只 `ctx.logger.warn` 然后 `return`，一个 hook 都不注册（`index.ts:113`–`:115`）。路径打错不会让 dsh 起不来，代价是也不会有人在 UI 上提醒你，你的 hook 就是安安静静地全体缺席。查日志。
@@ -120,6 +199,29 @@ profile 目录是 `$DSH_HOME/profiles/<name>`（`apps/cli/README.md:11`），里
 ## 两种方言各接了哪些事件
 
 看表之前先记住两个待会儿要反复出现的动作，它们的差别决定了 hook 能不能改变 agent 的走向。`agent.inject(msg)` 是「给下一次 pre-step 排一条模型可见的上下文，但**不唤醒** driver」（`packages/core/agent/src/runtime-types.ts:143`）；`agent.steer(msg)` 是「给最近的一步塞进 steering，driver 空闲就直接开一个 turn」（`runtime-types.ts:133`）。前者只是加料，后者能把停下来的循环推着再跑一步。
+
+派发模式决定了 hook 有多大话语权：能不能被 await，返回值有没有人要。
+
+```mermaid
+flowchart LR
+    EM["<b>emit 点</b><br/>SessionStart 与两个 subagent 点"]
+    WF["<b>waterfall 点</b><br/>pre-step、pre-execute、post-execute"]
+    SR["<b>serial 点</b><br/>agent/turn-stopping"]
+    D1["<b>detached 跑，没人 await</b><br/>只能 inject 加料，拦不住"]
+    D2["<b>返回值就是 typed Decision</b><br/>放行、拒绝、或改写下游 context"]
+    D3["<b>返回值没人要</b><br/>只能 steer，把循环推着再跑一步"]
+
+    EM --> D1
+    WF --> D2
+    SR --> D3
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class EM,WF,SR entry
+    class D2 main
+    class D1,D3 note
+```
 
 | CC hook | Codex hook | harness 拦截点 | 派发模式 | 桥做什么 |
 |---|---|---|---|---|
@@ -211,6 +313,35 @@ hook 进程
 
 `hookSpecificOutput` 上还有一道守卫，专治拼写错误。桥每次调用都传 `expectedEventName = point`（CC `index.ts:172`、Codex `index.ts:148`），块里的 `hookEventName` 对不上（或者压根没写）时，只丢弃事件域的那几个字段——`permissionDecision` / `permissionDecisionReason` / `additionalContext` / `updatedInput`——顶层字段和那个声明值仍然保留下来进日志（`codec.ts:120` 记下声明值，`:122` 提前 return）。所以给 `PreToolUse` 写的 hook 里把 `hookEventName` 拼成 `PreToolUSe`，症状是：exit 0、一切正常、决定就是没生效。
 
+两条通道加上这道守卫，一次结构化输出的去向分成这么几股。
+
+```mermaid
+flowchart TD
+    OUT["<b>exit 0 且 stdout 以左花括号开头</b><br/>才尝试 JSON，坏了当纯文本"]
+    TOP["<b>顶层 decision</b><br/>只认 approve 与 block"]
+    HSO["<b>hookSpecificOutput</b><br/>permissionDecision 认 allow / deny / ask"]
+    G{"hookEventName 是否等于本次触发的事件"}
+    DROP["<b>事件域四个字段全丢</b><br/>顶层字段与声明值仍进日志"]
+    KEEP["<b>覆盖顶层 decision</b><br/>additionalContext 与 updatedInput 一并留下"]
+    FIN["<b>HookOutput</b><br/>方言中性，交给 mergeHookOutputs"]
+
+    OUT --> TOP
+    OUT --> HSO
+    HSO --> G
+    G -- "对不上或压根没写" --> DROP
+    G -- "对得上" --> KEEP
+    TOP --> FIN
+    KEEP --> FIN
+    DROP --> FIN
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class OUT,TOP,HSO,KEEP,FIN main
+    class G entry
+    class DROP danger
+```
+
 合并之后的 `decision` 到各个落点的映射：
 
 | merged.decision | pre-step | pre-execute | post-execute | turn-stopping |
@@ -227,7 +358,35 @@ hook 没给 reason 时的兜底文案有三条，分别是 `blocked by PreToolUs
 
 ## 多个 hook 同时命中，谁说了算
 
-同一个点上命中的 hook **串行执行、按配置顺序**——`index.ts:152` 那个双层循环里老老实实 `await`——跑完之后一次性折叠（`merge.ts:62`）。
+同一个点上命中的 hook **串行执行、按配置顺序**——`index.ts:152` 那个双层循环里老老实实 `await`——跑完之后一次性折叠（`merge.ts:62`）。折叠的形状是一次打分，加几路各走各的累积。
+
+```mermaid
+flowchart TD
+    H1["<b>命中的 hook 按配置顺序串行</b><br/>上一条 await 完才跑下一条"]
+    R3["deny 或 block 记 3 分"]
+    R2["ask 记 2 分"]
+    R1["approve 或 allow 记 1 分"]
+    R0["没表态记 0 分"]
+    M["<b>取最高分定档</b><br/>reason 只收胜出档位的，空行连接"]
+    C["<b>其余字段各自累积</b><br/>continue false 首个置位后黏住，context 存数组"]
+    OUTP["<b>MergedHookOutcome</b><br/>桥再映射成各点的 typed Decision"]
+
+    H1 --> R3 --> M
+    H1 --> R2 --> M
+    H1 --> R1 --> M
+    H1 --> R0 --> M
+    H1 --> C --> OUTP
+    M --> OUTP
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class H1,M,C,OUTP main
+    class R3 danger
+    class R2 note
+    class R1,R0 entry
+```
 
 权限维度取最严：`deny`/`block` 记 3 分，`ask` 记 2 分，`approve`/`allow` 记 1 分，没表态记 0 分，最高分胜出（`merge.ts:35`）。reason 只收**胜出档位**的那些，多条用 `\n\n` 连接（`merge.ts:74`、`:91`、`:94`）——有人 deny 时，ask 的理由不会混进去，免得模型收到互相矛盾的解释。
 
@@ -258,7 +417,40 @@ hook 没给 reason 时的兜底文案有三条，分别是 `blocked by PreToolUs
 
 ## 什么时候该扔掉桥，直接写插件
 
-README 把损失列得很完整，这里挑最会咬人的说。
+README 把损失列得很完整，这里挑最会咬人的说。边界画出来是这样，右边那几格不是配错了，是根本没接。
+
+```mermaid
+flowchart LR
+    B["<b>hooks.json 经桥</b><br/>只有被映射的那个子集"]
+    Y1["拦下调用<br/>deny，以及 CC 独有的 ask"]
+    Y2["追加上下文<br/>additionalContext"]
+    Y3["Stop 点强制续跑<br/>steer 一条消息"]
+    N1["<b>预批准</b><br/>桥从不返回 allow，只是不拦"]
+    N2["<b>改写工具输出</b><br/>没有 updatedToolOutput"]
+    N4["<b>continue false 停机</b><br/>只记录，且 Stop 循环没护栏"]
+    N3["<b>改写工具入参</b><br/>原生插件同样做不到"]
+    NAT2["<b>原生插件</b><br/>typed Decision，没有序列化边界"]
+
+    B --> Y1
+    B --> Y2
+    B --> Y3
+    B -. "接不上" .-> N1
+    B -. "接不上" .-> N2
+    B -. "接不上" .-> N4
+    B -. "接不上" .-> N3
+    N1 --> NAT2
+    N2 --> NAT2
+    N4 --> NAT2
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class B,Y1,Y2,Y3 main
+    class N1,N2,N4 danger
+    class N3 note
+    class NAT2 entry
+```
 
 **事件覆盖只有一小半。** CC 那 30 个 hook 事件里桥支持 7 个，另外 23 个 `hooks-claude-code/README.md:89` 逐个列了；Codex 10 个里支持 5 个（`hooks-codex/README.md:93`）。两个基线数字都是 README 引外部文档说的，见篇末未确认。
 
