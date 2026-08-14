@@ -14,6 +14,34 @@
 
 模型只负责一件事：决定下一步做什么。剩下的全归 harness——给它工具、真的去执行、把执行结果变成模型看得懂的文本、判断哪些操作需要人点头、超时了怎么收场、上下文塞满了扔掉哪些、以及把发生过的事记成一份能回放的日志。
 
+这条分界线的形状很简单：模型只往外发决定，执行、关卡、上下文、日志全长在它外面，而结果最终都要以文本的形式回到它眼前。
+
+```mermaid
+flowchart TD
+    M["<b>模型</b><br/>只决定下一步做什么"]
+
+    subgraph HN["harness：模型之外的那一整套"]
+        G["<b>关卡</b><br/>哪些动作要人点头、超时怎么收场"]
+        T["<b>执行</b><br/>真的去跑，结果转成模型看得懂的文本"]
+        C["<b>上下文</b><br/>塞满了扔什么、留什么"]
+        LOG["<b>会话日志</b><br/>发生过的事，可回放"]
+    end
+
+    M -- "发出工具调用" --> G
+    G -- "放行" --> T
+    T -- "结果文本" --> M
+    C -- "装配进下一次请求" --> M
+    M -- "写" --> LOG
+    T -- "写" --> LOG
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class G,T,C main
+    class LOG data
+    class M entry
+```
+
 dsh 的 README 第一句就是这个定位：
 
 > DeepSeek Harness (`dsh`) is an open-source agent harness developed by DeepSeek AI.
@@ -72,6 +100,35 @@ graph.run(input)
 - `locate` 阶段模型意识到该先看一眼配置文件。**图里没有这个节点**，它看不了。
 - 模型想在 `patch` 之前先问一句人。**这不是图上的一个状态**，它问不了。
 
+把这三处摆回图上，缺的东西一眼能看见：实线是你画过的边，虚线是模型想走、但图上没有的路。
+
+```mermaid
+flowchart TD
+    F["<b>fetch_log</b>"]
+    LO["<b>locate</b>"]
+    PA["<b>patch</b>"]
+    VE["<b>verify</b>"]
+    OK["<b>END</b><br/>testsPass 时收工"]
+
+    X1["<b>想回去重取日志</b><br/>没有这条边"]
+    X2["<b>想先看一眼配置文件</b><br/>图里没有这个节点"]
+    X3["<b>想先问一句人</b><br/>这不是图上的一个状态"]
+
+    F --> LO --> PA --> VE
+    VE -- "testsPass" --> OK
+    VE -- "testsFail" --> PA
+    VE -.-> X1
+    LO -.-> X2
+    PA -.-> X3
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class F,LO,PA,VE main
+    class OK entry
+    class X1,X2,X3 danger
+```
+
 于是维护就变成了补边补节点：每发现一种模型"本来会做但被拦住"的行为，就往图里加一条边。图越长越像一张流程图，而你正在用流程图去规定一个比流程图聪明的东西该怎么想。
 
 ---
@@ -98,6 +155,33 @@ if (toolCalls.length === 0) return { kind: 'completed' }
 ```
 
 没有工具调用就算完成；有就执行完再走下一个 step（`agent.ts:395-399`）。最外层那个 `while` 的终止条件在另一处：inbox 里没有待处理输入了，`turn()` 返回 `false`（`agent.ts:324`）。
+
+三层套下来就是全部骨架：`kick()` 反复开 turn，`turn()` 反复取 step，一个 step 走到最后只问一句有没有工具调用。
+
+```mermaid
+flowchart TD
+    K["<b>kick</b><br/>反复开 turn，inbox 空了就停"]
+    T["<b>turn</b><br/>内层 while 反复取 step"]
+    S1["<b>拼请求</b><br/>system prompt 加上已有消息"]
+    S2["<b>流式收模型输出</b>"]
+    S3["<b>落日志</b><br/>append assistant/message"]
+    S4{"这条消息里有 tool-call 吗"}
+    EX["<b>执行工具</b>"]
+    DONE["<b>completed</b><br/>这一 step 收工"]
+
+    K -- "开一个 turn" --> T --> S1 --> S2 --> S3 --> S4
+    S4 -- "有" --> EX
+    EX -- "下一个 step" --> S1
+    S4 -- "没有" --> DONE
+    DONE -- "inbox 还有待处理输入就再开一轮" --> K
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class T,S1,S2,S4,EX main
+    class S3 data
+    class K,DONE entry
+```
 
 请注意上面这些代码里缺了什么。**"取日志 → 定位 → 修改 → 验证"这个顺序在源码里根本不存在**，它是模型每一轮自己决定的。想先看配置文件？调 `read` 就行（工具名见 `packages/fs/tool-fs/src/read.ts:77`）。验证完想回头重取日志？再调一次 `bash` 就行（`packages/shell/tool-bash/src/index.ts:243`）。没有边要补，因为压根没有图。
 
@@ -188,11 +272,68 @@ if (toolCalls.length === 0) return { kind: 'completed' }
 
 所以工程量的真实分布是：**循环 1 个包；上表这 13 个分组就 70 个包，而上表还不是环境的全部。**
 
+摊开看是这个形状：中间那一个包几乎没人在运行期 import，工程量全长在它周围的分组里。
+
+```mermaid
+flowchart TD
+    LOOP["<b>agent-loop</b><br/>1 个包 1643 行，全仓唯一含具体循环逻辑"]
+    DEP["<b>运行期依赖它的只有 2 个包</b><br/>一个 bundle、一个示例包"]
+    REST["<b>其余 217 个包运行期不 import 它</b><br/>靠服务与事件挂在扩展点上"]
+
+    subgraph ENV["其中 13 个分组共 70 个包，另有 9 个工具包在表外"]
+        G1["session 13 · subagent 11 · shell 9 · fs 7"]
+        G2["interaction 5 · sandbox 4 · compaction 4 · context 4"]
+        G3["workflow 4 · hooks 3 · spill 3 · guard 2 · core/tools 1"]
+    end
+
+    LOOP --> DEP
+    LOOP --> REST
+    REST --> ENV
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class LOOP,DEP,REST main
+    class G1,G2,G3 entry
+```
+
 ---
 
 ## 5. 环境工程学：四个真实样例
 
 下面四个都是 dsh 内置插件。它们都不改流程，只改模型所处的环境，而效果比在图上加一条边更强——因为它们对**大量**路径同时生效。每个的覆盖边界我都在各自小节里写清楚，那些边界比结论更值得记。
+
+四个挂的不是同一个点。先看一次工具调用要穿过哪些关卡，以及它们各自守在哪一关（整条管线的逐关讲解在第 13 章）。
+
+```mermaid
+flowchart TD
+    TC["<b>模型发出 tool-call</b><br/>执行前先记一条 tool/call"]
+    PRE["<b>tools/pre-execute</b><br/>hook、权限、沙箱"]
+    AROUND["<b>tools/execute 环绕</b><br/>timeout-policy 挂这里"]
+    BODY["<b>工具自己的 execute 体</b>"]
+    FSG["<b>fs/write-intent 与 fs/edit-intent</b><br/>fs-observation-policy 挂这里，只管 tool-fs 的改动"]
+    POST["<b>tools/post-execute</b><br/>repeat-tool-reminder 挂这里"]
+    DENY["<b>被拒或被 block</b><br/>换成 isError 结果灌回给模型"]
+    RES["<b>tool/result</b><br/>模型唯一看得见的那个结果"]
+
+    TC --> PRE
+    PRE -- "放行" --> AROUND --> BODY
+    BODY -- "要动文件时" --> FSG
+    FSG -- "通过" --> BODY
+    BODY --> POST --> RES
+    PRE -- "拒绝" --> DENY
+    FSG -- "FS_NOT_OBSERVED" --> DENY
+    POST -- "block 加 feedback" --> DENY
+    DENY --> RES
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class PRE,AROUND,BODY,FSG,POST main
+    class RES data
+    class DENY danger
+    class TC entry
+```
 
 ### 5.1 没读过就不许写：`fs-observation-policy`
 
@@ -247,6 +388,29 @@ export type PostToolDecision =
 分辨手上的东西是框架还是 harness，问自己一个问题：
 
 > **假如明天模型强十倍，我代码里哪些行会变成累赘？**
+
+答案沿着一条分界线走：这行代码约束的是模型的智力，还是模型作用的那个世界。
+
+```mermaid
+flowchart TD
+    Q{"这行代码约束的是什么"}
+    A["<b>模型的智力</b><br/>写死的顺序、写死的边"]
+    B["<b>模型作用的那个世界</b><br/>沙箱、审批、日志、截断"]
+    A1["<b>强十倍就成了障碍</b><br/>它本来想走别的路"]
+    B1["<b>强十倍反而更需要</b><br/>破坏更大、动作更多"]
+
+    Q -- "智力" --> A --> A1
+    Q -- "世界" --> B --> B1
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class Q entry
+    class A,A1 danger
+    class B main
+    class B1 data
+```
 
 **写死的边会。**"验证失败必须回到修改"这条边，在更强的模型手里是障碍，它本来想回去重取日志。你写下的每一条顺序约束，都是在为今天这个模型的弱点打补丁，而补丁会比弱点活得更久。
 
