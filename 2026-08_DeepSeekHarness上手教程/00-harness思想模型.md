@@ -124,7 +124,7 @@ if (toolCalls.length === 0) return { kind: 'completed' }
 
 ### 4.1 循环在配置里就是一行 `- id:`
 
-先补三个词，第 02 / 21 章细讲。**profile** 是一份具名的启动组合，列出它要叠哪些 bundle；**bundle** 是"一组 Cordis 配置行 + 它们挂载的代码"的分发格式；两者各自在自己 `package.json` 的 `dsh` 字段里声明（`docs/architecture.md:19-23`）。dsh 的启动树就由这些 bundle 的 patch 文件按序叠出来，`dsh-base` 是每个 profile 的第一层（`docs/architecture.md:25`）。
+先补三个词，第 03 / 22 章细讲。**profile** 是一份具名的启动组合，列出它要叠哪些 bundle；**bundle** 是"一组 Cordis 配置行 + 它们挂载的代码"的分发格式；两者各自在自己 `package.json` 的 `dsh` 字段里声明（`docs/architecture.md:19-23`）。dsh 的启动树就由这些 bundle 的 patch 文件按序叠出来，`dsh-base` 是每个 profile 的第一层（`docs/architecture.md:25`）。
 
 在这份文件里，**agent 循环和其它任何插件长得一模一样**：
 

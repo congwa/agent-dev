@@ -84,7 +84,7 @@ Cordis 认的不是 Schemastery，而是 **Standard Schema**——一个跨校�
 
 顺序是硬编码的：先跑 `internal/config` waterfall（`!!js` 插值就挂在这上面），再跑 schema。
 
-> waterfall 是 Cordis 的洋葱式事件派发：一串监听器依次拿到值、可以改写后再传给下一个，第 09、10 章展开。这里只需要知道它是"配置在到达 schema 之前经过的一道可改写管道"。
+> waterfall 是 Cordis 的洋葱式事件派发：一串监听器依次拿到值、可以改写后再传给下一个，第 10、11 章展开。这里只需要知道它是"配置在到达 schema 之前经过的一道可改写管道"。
 > fiber 是一个插件实例的运行期句柄（第 05 章），下面几张状态名都挂在它身上。
 
 ```

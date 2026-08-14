@@ -21,7 +21,7 @@
 
 同样的话在两处重复出现：`packages/hooks/README.md:5`（"a 'native hook' is just an ordinary Cordis plugin on those extension points"）和 `docs/cookbook/extension-cookbook.md:13`（"A 'native hook' is an ordinary Cordis plugin on an interception point; it needs no external protocol."）。
 
-所以 dsh 里想在生命周期上插一脚，**默认答案永远是第 10、12 章那套**：写个插件，监听 `tools/pre-execute` 之类的 waterfall 拦截点，返回一个 typed Decision。`packages/hooks/` 下的三个包是**另一件事**：
+所以 dsh 里想在生命周期上插一脚，**默认答案永远是第 11、13 章那套**：写个插件，监听 `tools/pre-execute` 之类的 waterfall 拦截点，返回一个 typed Decision。`packages/hooks/` 下的三个包是**另一件事**：
 
 | 包 | 角色 | 是不是插件 |
 |---|---|---|
