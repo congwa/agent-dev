@@ -1,0 +1,89 @@
+# permission-presets
+
+> `@deepseek-ai/dsh-permission-presets` · bundle：`base` · 配置树 id：`permission` · v0.1.0-rc.5（commit `47f9438`）2026-08-14 核对
+
+**一句话**：把两个各自独立的执行旋钮——[sandbox-policy](./dsh-sandbox-policy.md) 的 `sandbox/mode` 与 [user-approval](./dsh-user-approval.md) 的 `approval/policy`——打包成用户能一次选好的命名档位，自己**不做任何强制**，只记录意图再通过两个旋钮各自的写路径落下去。
+
+## 它在树上长什么样
+
+`packages/bundle/base/cordis.patch.yml:193-205`：
+
+```yaml
+    - id: permission
+      name: '@deepseek-ai/dsh-permission-presets'
+      config:
+        presets:
+          read-only:
+            sandbox: read-only
+            approval: ask
+          workspace-write:
+            sandbox: workspace-write
+            approval: ask
+          danger-full-access:
+            sandbox: danger-full-access
+            approval: never
+```
+
+bundle 把 schema 自带的两档表（`workspace-write` / `danger-full-access`，`packages/interaction/permission-presets/src/index.ts:167-176`）整个换掉，扩成三档——schemastery 的 dict 默认值只在整个字段缺省时生效，给了就是整表替换（`vendor/schemastery/src/index.ts:474-484`、`719-736`）——因此**丢掉了 schema 默认表里的 `name` / `description` 字段**，客户端显示时会回落到表的 key（`optionOf()`，`src/index.ts:366`）。`defaultPreset` 没给，走「匹配组合默认值」的推断路径（`src/index.ts:195-196`）。
+
+## 它注册了什么
+
+| 类型 | 名字 | 说明 |
+|---|---|---|
+| service | `ctx.permissionPresets` | `PermissionPresetService`，`super(ctx, 'permissionPresets')`（`src/index.ts:186`） |
+| 依赖 | `static inject = ['shell', 'approval', 'sessions']` | `src/index.ts:180`；bundle 那行 YAML 没写 inject，全靠这个静态字段 |
+| 事件监听 | `session/created`（**emit**，非 waterfall） | 新 session 创建时钉入初始权限事实；挂载时还会把已经活着的 session 扫一遍（`src/index.ts:220-225`；派发模式见 `packages/core/session/src/index.ts:52`） |
+| session 事件 | `permission/preset` | log-only 的用户意图记录，不进模型 transcript（`src/index.ts:50`） |
+| 可选子件：session projection | `permissions` | 仅当 `ctx.sessionProjections` 已组合时注册；fold 三个整值旋钮事件，view 出「表内选项 + 仅当前可见的 `custom`」（`src/index.ts:243-252`） |
+| 可选子件：命令 | `/permission` | 仅当 `ctx.commands` 已组合时注册。空参数报当前档位与可选列表，带参数即切换（`src/index.ts:257-277`） |
+| settings 段 | 命名空间 `permission` | `settingsNamespace('permission')`，字段只有 `defaultPreset`（`src/index.ts:73`、`208-218`） |
+
+## 三档语义与 custom
+
+`set(session, name)` 的顺序是固定的（`apply()`，`src/index.ts:380-392`）：先在**档位确实变了**时 append 一条 `permission/preset`，再对两个旋钮**逐个比较有效值**，只有变了才调各自的 setter（`setSandboxMode` / `setApprovalPolicy`）。重选当前档位一个事件都不写。
+
+`current(events)`（`304-306`，逻辑在 `derive()`，`309-321`）的判定顺序：上次记录的选择若仍然匹配当前旋钮值 → 用它（这就是记录 `permission/preset` 的理由：两档共享同一组旋钮值时保住用户意图）；否则取表中第一条匹配；都不匹配 → `custom`。`custom` 是**只读派生态**：可以显示为当前值，但不能被选中，也不会成为事件载荷（`src/index.ts:66-70`）。
+
+新 session 的钉入逻辑（`pinInitialPermission()`，`400-430`）：干净的新 session 用当前用户默认档，一次写三条事件；带种子或已部分初始化的 session 保留既有有效值，只补缺的那几条——`session/end-seed` 标记的空种子也按「已表态」处理。因为创建时就钉死了，**之后改设置不会影响已存在的 session**。
+
+构造期有三处硬性拒绝：表里出现名为 `custom` 的 key（`189-191`）、挂载的 shell executor 不做约束即 `ctx.shell.sandboxMode === undefined`（`192-194`）、组合默认值匹配不到任何档位且没显式给 `defaultPreset`（`197-199`）。
+
+## 配置项
+
+| 字段 | 类型 | schema 默认 | bundle 实际给的 | 作用 |
+|---|---|---|---|---|
+| `presets` | `Record<string, PresetSpec>` | `workspace-write` + `danger-full-access` 两档（带 name/description） | 三档，见上 | 档位表：name → `{ sandbox, approval, name?, description? }` |
+| `defaultPreset` | `string` | 无（省略时推断） | 未给 | 新 session 的默认档；也是 settings 里唯一可改的字段 |
+
+## 模型看得见什么
+
+README 的 Model Experience（`packages/interaction/permission-presets/README.md:17`）：
+
+> Indirectly, through `dsh-user-approval` and `dsh-tool-bash`, which render the approval-policy prompt, switch notice, and sandboxed tool outcomes selected by this service's knob events; `permissionPresets/preset` itself is log-only.
+
+KV Cache effect：`No direct invalidation; the named consumer owns any request-prefix changes.`（同文件 `:21`）。换句话说模型永远不知道「档位」这个概念，只会看到 [sandbox-policy](./dsh-sandbox-policy.md) 和 [user-approval](./dsh-user-approval.md) 各自那句策略文本变了。（引文里的 `permissionPresets/preset` 是 README 的旧名，源码是 `permission/preset`，见下节。）
+
+## 什么时候你会想换掉它 / 怎么换
+
+- **改档位表**：直接改 `permission` 那行的 `config.presets`。想让客户端选择器上显示中文说明，就把 `name` / `description` 补回去——bundle 现在这三档是没有的。
+- **改新会话默认档**：给 `config.defaultPreset`，或者让用户在 settings 的 `permission` 段里改（改动在**下一个 session 创建时**才被读取）。
+- **不要它**：卸掉后 `sandbox/mode` 与 `approval/policy` 依然各自工作，只是没人把它们捆在一起、也没人给新 session 钉初始值——两个旋钮就退回各自 config 的部署默认。
+- 反过来注意：它 `inject` 了 `shell`，所以在没有约束型 shell executor 的组合（例如把 `bash-sandbox` 换成不约束的实现）里它会**直接抛错**，而不是安静退化。
+
+## 坑与边界
+
+README 的 Known Limitations and Deferred Work（`packages/interaction/permission-presets/README.md:23-28`）：
+
+- **只捆两个机制旋钮**——`PresetSpec` 里还没有 agent/profile 的选择。
+- **`custom` 只能被推导出来**——调用方可以从一个不匹配的旋钮组合切走，但没法通过本服务瞄准或持久化一个具名的自定义档。
+- **档位表是进程级的**——配置在插件生命周期内固定，要改可选档位必须重载插件。
+- **存下来的默认档必须还在表里**——把被引用的档位删掉，会让 Permission 设置注册一直失败，直到 `settings.yaml` 里的相应段被更新或重置。
+
+读源码补两条：
+
+- 可选的 `./invariant` 伴生插件会校验每条 `permission/preset` 事件命名的档位仍然可解析，不在表里就 fail（`src/invariant.ts:16-18`）——这正是上面最后一条限制在事件层面的体现。
+- **README 的三处命名已过时，按源码写**：事件是 `permission/preset`（`src/index.ts:50`），不是 README 的 `permissionPresets/preset`（README `7`、`9`、`17`）；命令是 `/permission`（`src/index.ts:259`），不是 `/permissionPresets`（README `13`）；settings 命名空间是 `permission`（`src/index.ts:73`），不是 README `9`、`28` 的 `permissionPresets`。三处都有独立佐证：事件名见仓库自动生成的 `docs/persistence-catalog.md:501`、`docs/capability-seams.md:454`、`docs/subsystems/permission-presets.md:66`；命令名见 web 客户端提交的命令行 `packages/client/ui-permission-presets/src/client/index.ts:164`；命名空间必须匹配小写 kebab-case（`packages/settings/settings/src/index.ts:19`、`26-31`），`permissionPresets` 根本过不了校验。
+
+## 未确认
+
+- ⚠️ `permissions` projection 与 `/permission` 命令的实际渲染只读了代码（含 web 客户端源码），未跑起来对拍。
