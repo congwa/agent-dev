@@ -14,6 +14,37 @@ MVCC 的思路是：**别人改的时候产生一个新版本，我这个读事�
 
 代价是：**旧版本要留在系统里，直到确认没人需要它。** 这个代价就是 Postgres 全部运维痛苦的来源。
 
+两条路子摆在一起看更直观：
+
+```mermaid
+flowchart LR
+    Q["<b>目标</b><br/>读不阻塞写，写不阻塞读"]
+
+    subgraph T["传统做法：读写锁"]
+        T1["<b>读事务持锁</b><br/>别人不能改"]
+        T2["<b>写事务排队等待</b><br/>吞吐立刻塌"]
+        T1 --> T2
+    end
+
+    subgraph M["MVCC 做法"]
+        M1["<b>写产生新版本</b><br/>旧版本原地保留"]
+        M2["<b>读事务看旧版本</b><br/>谁都不用等谁"]
+        M1 --> M2
+    end
+
+    Q --> T
+    Q --> M
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class Q entry
+    class T1,T2 danger
+    class M1,M2 main
+```
+
 ---
 
 ## 二、三个核心概念
@@ -46,6 +77,17 @@ SELECT pg_current_xact_id();               -- 强制分配一个（调试用，�
 
 **注意：`DELETE` 在 Postgres 里也不是真删。** 它只是给行版本填上 `xmax`。数据还在页里，等 VACUUM 来收。（所以"删了一半数据，表怎么没变小"是常见困惑，答案在第 9 篇。）
 
+一行数据从出生到被回收，走的是这样一条路：
+
+```mermaid
+stateDiagram-v2
+    [*] --> Live : INSERT，xmin 设为当前事务
+    Live --> Live : 未被修改，一直有效
+    Live --> Dead : UPDATE 或 DELETE，填入 xmax
+    Dead --> Reclaimed : VACUUM 确认没人再需要
+    Reclaimed --> [*]
+```
+
 ### 3. 快照（Snapshot）
 
 快照回答一个问题：**在我眼里，哪些事务算"已经完成"？**
@@ -76,6 +118,34 @@ SELECT pg_current_snapshot();
 
 翻译成人话：**"创建它的人在我出发之前就已经落定了，而毁掉它的人还没落定（或者根本没人毁它）。"**
 
+两个条件缺一不可，画成判定路径是这样：
+
+```mermaid
+flowchart TD
+    S["<b>某行版本</b><br/>对当前事务可见吗"]
+    C1["<b>条件①：创建者已完成吗</b><br/>xmin 小于快照.xmin<br/>或 不在 xip_list 且小于快照.xmax"]
+    C2["<b>条件②：销毁者未完成吗</b><br/>xmax 为 0<br/>或 xmax 未提交/未完成"]
+    V["<b>可见</b><br/>创建它的人已落定<br/>毁掉它的人还没落定"]
+    N1["<b>不可见</b><br/>创建它的事务对我来说还没发生"]
+    N2["<b>不可见</b><br/>销毁它的事务已经落定"]
+
+    S --> C1
+    C1 -- "不满足" --> N1
+    C1 -- "满足" --> C2
+    C2 -- "不满足" --> N2
+    C2 -- "满足" --> V
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class S entry
+    class C1,C2 main
+    class V data
+    class N1,N2 danger
+```
+
 `clog`（`pg_xact` 目录）记录每个 XID 的最终状态（提交/回滚/进行中）。为了避免每次判断都去查 clog，Postgres 把结论缓存在行头的 `infomask` 标志位里——这叫 **hint bit**。这解释了一个诡异现象：
 
 > **第一次 `SELECT` 一张刚导入的大表，会产生大量写 I/O。** 因为它在顺手回填 hint bit，把干净页变成了脏页。
@@ -92,6 +162,41 @@ SELECT pg_current_snapshot();
 | REPEATABLE READ | **事务里第一条语句**时取一次，整个事务共用 |
 | SERIALIZABLE | 同 RR，另外加一层 SSI 依赖追踪（第 4 篇） |
 
+拍照时机的差异摆出来看更清楚：
+
+```mermaid
+flowchart LR
+    TX["<b>事务开始</b><br/>BEGIN"]
+
+    subgraph RC["READ COMMITTED（默认）"]
+        RC1["<b>语句1</b><br/>取新快照"]
+        RC2["<b>语句2</b><br/>再取一次新快照"]
+        RC3["<b>语句3</b><br/>又取一次新快照"]
+        RC1 --> RC2 --> RC3
+    end
+
+    subgraph RR["REPEATABLE READ"]
+        RR1["<b>语句1</b><br/>取一次快照"]
+        RR2["<b>语句2</b><br/>复用同一个快照"]
+        RR3["<b>语句3</b><br/>复用同一个快照"]
+        RR1 --> RR2 --> RR3
+    end
+
+    TX --> RC
+    TX --> RR
+    RR --> NOTE["<b>SERIALIZABLE</b><br/>快照取法同 RR，另加 SSI 依赖追踪"]
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class TX entry
+    class RC1,RC2,RC3 main
+    class RR1,RR2,RR3 data
+    class NOTE note
+```
+
 实测（`labs/exp16_snapshot.py`）：
 
 ```
@@ -104,6 +209,21 @@ SELECT pg_current_snapshot();
   A 第一次读: 100  快照: 1969:1969:
   (另一个事务把 v 改成 200 并提交)
   A 第二次读: 100  快照: 1969:1969:   ← 快照没变，值也没变
+```
+
+同一笔写入，两个并发读事务看到的结果分道扬镳：
+
+```mermaid
+sequenceDiagram
+    participant B as 事务B（写者）
+    participant ARC as 事务A（READ COMMITTED）
+    participant ARR as 事务A'（REPEATABLE READ）
+
+    ARC->>ARC: 语句1 取快照 1967:1967:，读到 v=100
+    ARR->>ARR: 语句1 取快照 1969:1969:，读到 v=100
+    B->>B: 把 v 改成 200 并提交
+    ARC->>ARC: 语句2 取新快照 1968:1968:，读到 v=200
+    ARR->>ARR: 语句2 复用快照 1969:1969:，仍读到 v=100
 ```
 
 ### ❓ 问题：报表统计该用哪个隔离级别？
@@ -135,6 +255,36 @@ COMMIT;
 > **如果这次 UPDATE 没有改动任何被索引的列，并且新版本能塞进同一个数据页**，那就不动任何索引。新版本只存在于堆里，通过旧版本的 `t_ctid` 指针串起来。索引仍然指向旧位置，读的时候顺着链往下走一步就找到新版本。
 
 > ⚠️ PG 16 起放宽了一点：**只被 BRIN 这类"摘要索引"覆盖的列被修改时，仍然可以走 HOT**（BRIN 只记录页范围的最值，行在页内挪动不影响它）。所以准确的说法是"没有改动任何被**非摘要索引**（B-tree/GiST/GIN/hash）引用的列"。
+
+一次 UPDATE 能不能走 HOT，判定路径是这样：
+
+```mermaid
+flowchart TD
+    U["<b>UPDATE 发生</b>"]
+    Q1["<b>改动了非摘要索引引用的列吗</b><br/>B-tree/GiST/GIN/hash"]
+    Q2["<b>新版本能塞进同一页吗</b><br/>取决于 fillfactor 留白"]
+    HOT["<b>走 HOT</b><br/>不动任何索引，堆内链式指向新版本"]
+    FULL["<b>不走 HOT</b><br/>所有索引都要写一遍"]
+    NOTE["<b>PG 16 起放宽</b><br/>只被 BRIN 摘要索引覆盖的列改动，仍可走 HOT"]
+
+    U --> Q1
+    Q1 -- "没改动" --> Q2
+    Q1 -- "改动了" --> FULL
+    Q2 -- "能" --> HOT
+    Q2 -- "不能" --> FULL
+    Q1 -.-> NOTE
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class U entry
+    class Q1,Q2 main
+    class HOT data
+    class FULL danger
+    class NOTE note
+```
 
 实测（`labs/exp4_hot.sql`，同一张表 UPDATE 5000 次）：
 
@@ -199,6 +349,36 @@ B 里还额外多了一个 128 kB 的 `balance` 索引。也就是说：
 | READ COMMITTED + 只读 | ❌ 不拖 | 语句结束就释放了快照，也没有 XID |
 | READ COMMITTED + 写过数据 | ✅ **拖** | 它持有一个未完成的 XID，水位线被钉住 |
 | REPEATABLE READ（哪怕全程只读） | ✅ **拖** | 它必须持有整个事务期间的快照 |
+
+这张表翻译成判定路径就是：
+
+```mermaid
+flowchart TD
+    I["<b>一个空闲事务</b><br/>好久没提交也没回滚"]
+    Q1["<b>隔离级别是 REPEATABLE READ 吗</b>"]
+    Q2["<b>这个事务写过数据吗</b><br/>持有真实 XID"]
+    DRAG["<b>拖住回收水位线</b><br/>OldestXmin 被钉在这一刻"]
+    FREE["<b>不拖</b><br/>语句结束即释放快照，没有 XID"]
+    NOTE["<b>例外</b><br/>持有游标（尤其 WITH HOLD）同样会钉住快照"]
+
+    I --> Q1
+    Q1 -- "是" --> DRAG
+    Q1 -- "否，READ COMMITTED" --> Q2
+    Q2 -- "写过" --> DRAG
+    Q2 -- "只读" --> FREE
+    FREE -.-> NOTE
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class I entry
+    class Q1,Q2 main
+    class DRAG danger
+    class FREE data
+    class NOTE note
+```
 
 两点补充：
 

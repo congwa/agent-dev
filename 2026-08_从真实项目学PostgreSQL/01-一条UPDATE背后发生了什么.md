@@ -42,6 +42,30 @@ RETURNING balance
 [数据文件 base/*] ← 由 checkpointer / bgwriter 慢慢在后台刷，跟你的 COMMIT 不同步
 ```
 
+这 8 步里第 ⑥⑦ 步是全文的关键——不是原地改，而是追加新版本、标记旧版本、同时写 WAL，压成一张图看：
+
+```mermaid
+flowchart TD
+    A["<b>客户端程序</b><br/>发送 SQL 文本 + 参数"]
+    B["<b>postmaster fork 出<br/>专属 backend 进程</b>"]
+    C["<b>Parse / Rewrite / Plan</b><br/>语法树到执行计划"]
+    D["<b>定位数据页</b><br/>先查 shared_buffers，不在就从磁盘读"]
+    E["<b>追加新版本，旧版本标 xmax</b><br/>同时写入 WAL 缓冲区"]
+    F["<b>COMMIT 时 fsync WAL</b><br/>落盘成功才算提交成功"]
+    G["<b>数据文件 base/*</b><br/>由 checkpointer/bgwriter 后台慢慢刷"]
+
+    A --> B --> C --> D --> E --> F --> G
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,C,D main
+    class E,F,G data
+```
+
 有 4 件事值得单独拎出来说，因为它们直接决定了后面所有章节的内容。
 
 ---
@@ -79,6 +103,31 @@ db.SetConnMaxIdleTime(settings.ConnMaxIdleTime)
 ```
   开到第 100 个连接时: FATAL:  sorry, too many clients already
   → 此时新的业务请求、监控、甚至运维想连上去救火，全都连不上
+```
+
+池上限设与不设，是两条完全不同的路：
+
+```mermaid
+flowchart TD
+    A["<b>应用发起新连接</b><br/>请求执行一条 SQL"]
+    B["<b>连接池准入检查</b><br/>应用层是否设了连接数上限"]
+    C["<b>复用/新建连接</b><br/>池未耗尽就正常执行"]
+    D["<b>没有上限，连接数<br/>一路涨到 max_connections</b>"]
+    E["<b>FATAL: too many clients already</b><br/>数据库还活着，但谁都连不进去"]
+
+    A --> B
+    B -- "设了应用层池上限" --> C
+    B -- "没设上限" --> D
+    D --> E
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,C main
+    class D,E danger
 ```
 
 这是生产事故里最难受的一种：**数据库还活着，但你连不进去看它为什么活得不好。**
@@ -129,6 +178,26 @@ SELECT lp, t_ctid, t_xmin, t_xmax FROM heap_page_items(get_raw_page('acct',0));
 
 **物理上有 3 行，逻辑上只有 1 行。**
 
+三个版本靠 `t_ctid` 串成一条链，只有最后一个对当前事务可见：
+
+```mermaid
+flowchart LR
+    V1["<b>版本1 (0,1)</b><br/>xmin=1054 xmax=1055"]
+    V2["<b>版本2 (0,2)</b><br/>xmin=1055 xmax=1056"]
+    V3["<b>版本3 (0,3)</b><br/>xmin=1056 xmax=0"]
+
+    V1 -- "t_ctid 指向后继" --> V2
+    V2 -- "t_ctid 指向后继" --> V3
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class V1,V2 main
+    class V3 data
+```
+
 每一行（heap tuple）头部都带着这几个字段：
 
 | 字段 | 含义 |
@@ -141,6 +210,33 @@ SELECT lp, t_ctid, t_xmin, t_xmax FROM heap_page_items(get_raw_page('acct',0));
 一个版本对当前事务可见的判断，简化后就是：
 
 > `xmin` 对应的事务已提交 **且** 在我的快照里算"已完成" **且** （`xmax` 为 0 或 `xmax` 对应事务未提交/在我快照里算"未完成"）
+
+拆开这句判断，是一棵两层的决策树：
+
+```mermaid
+flowchart TD
+    A["<b>某行版本</b><br/>带着 xmin / xmax"]
+    B["<b>xmin 对应事务</b><br/>已提交，且在我快照里算已完成？"]
+    C["<b>不可见</b><br/>这个版本对当前事务无效"]
+    D["<b>xmax 是否为 0</b><br/>或对应事务未提交/未完成？"]
+    E["<b>可见</b><br/>当前事务能读到这个版本"]
+
+    A --> B
+    B -- "否" --> C
+    B -- "是" --> D
+    D -- "否（已被删且已提交）" --> C
+    D -- "是" --> E
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,D main
+    class E data
+    class C danger
+```
 
 这套东西叫 **MVCC（多版本并发控制）**，下一篇专讲。这里先记住一个推论链：
 
@@ -168,6 +264,60 @@ InnoDB 是**原地更新 + undo log**。旧版本被挪到 undo 段里，主表�
 | 二级索引 | 存 ctid，行一挪索引就得改（除非 HOT） | 存主键，行挪了索引不用动 |
 
 两边都没有免费午餐，只是把痛苦挪到了不同地方。理解这一点比记住"谁更好"有用得多。
+
+两条路线并排放在一起看更直观：
+
+```mermaid
+flowchart LR
+    subgraph PG["Postgres：追加新版本"]
+        P1["<b>UPDATE 产生新版本</b><br/>旧版本留在堆里"]
+        P2["<b>回滚代价≈0</b><br/>新版本天然不可见"]
+        P3["<b>长事务→表膨胀</b><br/>需要 VACUUM 回收"]
+        P1 --> P2
+        P1 --> P3
+    end
+
+    subgraph IB["InnoDB：原地更新+undo"]
+        I1["<b>UPDATE 原地覆盖</b><br/>旧版本挪进 undo 段"]
+        I2["<b>回滚要逐条回放 undo</b><br/>成本高于 Postgres"]
+        I3["<b>长事务→undo 膨胀</b><br/>历史链变长，读放大"]
+        I1 --> I2
+        I1 --> I3
+    end
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class P1,I1 main
+    class P2,I2 data
+    class P3,I3 note
+```
+
+表格里"除非 HOT"这四个字，拆开看是这样一个分岔：
+
+```mermaid
+flowchart TD
+    A["<b>UPDATE 追加新版本</b><br/>新行有新的 ctid"]
+    B["<b>是否满足 HOT</b><br/>同一页内，且没改索引列"]
+    C["<b>满足 HOT</b><br/>二级索引不用改，堆内维护 ctid 链"]
+    D["<b>不满足 HOT</b><br/>二级索引也要写一条指向新 ctid 的记录"]
+
+    A --> B
+    B -- "满足" --> C
+    B -- "不满足" --> D
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B main
+    class C data
+    class D note
+```
 
 ---
 
