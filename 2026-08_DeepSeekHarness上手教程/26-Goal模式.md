@@ -49,6 +49,34 @@
 
 拆成四个不是洁癖。`goal` 只管"目标现在是什么状态"，它明确**不决定什么时候续跑**（`packages/goal/goal/README.md:54`）；驱动器只管调度，连 `maxGoalRounds` 都不复制一份（理由后面说）；工具和命令是两个互不知道对方存在的消费者。四个里任何一个都可以单独不挂，剩下的照样能跑。
 
+把依赖方向摊平了看是这个形状：三个消费者各从自己的入口进来，都只落到 `ctx.goals` 这一个服务上，服务再往日志里写；只有驱动器反过来还订阅了 `goal/changed`。
+
+```mermaid
+flowchart LR
+    HU["<b>人</b><br/>敲 /goal"]
+    MO["<b>模型</b><br/>调 goal 工具"]
+    ID["<b>agent 变 idle</b><br/>边沿触发"]
+
+    CMD["<b>dsh-command-goal</b><br/>还要 commands 服务"]
+    TL["<b>dsh-tool-goal</b><br/>要 agents tools systemPrompt"]
+    DRV["<b>dsh-goal-round-driver</b><br/>要 agents goals sessions"]
+    GO["<b>dsh-goal</b><br/>ctx.goals，七个动词"]
+    LOG["<b>会话日志</b><br/>append goal/change"]
+
+    HU --> CMD -- "调 verb" --> GO
+    MO --> TL -- "调 verb" --> GO
+    ID --> DRV -- "调 verb" --> GO
+    GO -- "写" --> LOG
+    GO -. "goal/changed" .-> DRV
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class CMD,TL,DRV,GO main
+    class LOG data
+    class HU,MO,ID entry
+```
+
 ---
 
 ## 目标"出了什么事"和"这个进程能不能动它"是两件事
@@ -73,6 +101,24 @@ type GoalPhase = 'active' | 'paused' | 'blocked' | 'complete'
 | `block` | 仅 `active` | `blocked` | disarmed | `index.ts:355-368` |
 | `clear` | 有当前目标 | 无（墓碑） | disarmed | `index.ts:376-390` |
 
+这七个动词把四个 phase 串成的机器长这样，箭头上是动词：
+
+```mermaid
+stateDiagram-v2
+    [*] --> active: create（revision 1，armed）
+    active --> paused: pause
+    paused --> active: resume（armed）
+    blocked --> active: resume（顺手清掉 blocker）
+    active --> active: resume（只为重新 armed）
+    active --> active: edit（phase 与 activation 都不变）
+    active --> blocked: block（只有 active 进得来）
+    active --> complete: complete
+    paused --> complete: complete
+    blocked --> complete: complete
+    active --> [*]: clear（任意 phase 都行，留墓碑）
+    complete --> [*]: create 只能顶掉已 complete 的目标
+```
+
 以上都在 `packages/goal/goal/src/index.ts`。三个容易看漏的判定：`create` 撞上一个未完成的目标会直接报 `GOAL_ALREADY_EXISTS`（`index.ts:255-257`），想换目标要么 `clear` 要么 `resume`，不许覆盖；`resume` 会拒绝"已经 active 而且 armed"这种冗余操作（`index.ts:318-320`），也会拒绝额度已经用尽的目标（`index.ts:321-326`）；`edit` 保留 blocker 原因和 activation——blocker 靠 `...current` 展开原样带过去（`index.ts:284`），activation 靠把 `cache.activation` 原值传下去（`index.ts:289`）。而 `resume` 反过来会把 blocker 清掉，因为新快照由 `withPhase()` 重建，压根不带 `blockedReason`（`index.ts:450-458`）。
 
 ### active 不等于可以自动跑
@@ -84,6 +130,38 @@ type GoalActivation = 'armed' | 'disarmed'
 这行在 `packages/goal/goal/src/types.ts:71`。`phase` 回答"这个目标出了什么事"，`activation` 回答"**这个进程**现在有没有权限再开一轮"（`docs/subsystems/goal.md:21`）。
 
 关键在于 **activation 从不落盘**（`packages/goal/goal/src/types.ts:81-82`）。它被摁回 `disarmed` 的时机有三处：缓存新建时一律 disarmed（`index.ts:428`）；每一次 `agent/session-start` 边沿再 disarm 一次（`index.ts:198-200`）；每观察到一条 `goal/change` 事件也回落 disarmed，除非它正好是本进程这次变更预登记的那一条（`index.ts:437-447`）。
+
+两个维度是这么合起来判的——一个从日志里读出来，一个只活在进程内，而且有三处边沿专门把后者摁回去：
+
+```mermaid
+flowchart TD
+    P["<b>phase</b><br/>目标出了什么事，写进日志"]
+    A["<b>activation</b><br/>本进程有没有权限，从不落盘"]
+    G["<b>要不要自动开下一轮</b><br/>两个条件必须同时成立"]
+    Y["<b>drive：预留下一轮</b>"]
+    N["<b>不动，等人再显式 resume 一次</b>"]
+
+    D1["<b>缓存新建</b>"]
+    D2["<b>agent/session-start 边沿</b>"]
+    D3["<b>观察到不是自己预登记的 goal/change</b>"]
+
+    P -- "active" --> G
+    A -- "armed" --> G
+    G -- "两个都成立" --> Y
+    G -- "缺一个" --> N
+    D1 -- "摁回 disarmed" --> A
+    D2 -- "摁回 disarmed" --> A
+    D3 -- "摁回 disarmed" --> A
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class G,Y main
+    class P data
+    class A,N note
+    class D1,D2,D3 entry
+```
 
 于是 resume 一个旧会话、fork 一个会话、或者换掉驱动器插件，目标、phase、revision、已跑轮数全都在，但**它不会自己动**。要动，必须有人再显式 `resume` 一次——那次 resume 会写一条新 revision，是模型和人都看得见的授权边沿。
 
@@ -115,6 +193,31 @@ provider 限额、配置预算、执行错误、需要人来拍板——这四�
 | `queue-failed` | `followup()` 排队失败 | `goal-round-driver/src/index.ts:199-202` |
 | `prompt-rejected` | 下游 pre-step 监听器否掉了这一轮 | `goal-round-driver/src/index.ts:393-396` |
 | `model-reported` | 模型自己调 `update_goal action=blocked` | `tool-goal/src/index.ts:309-311` |
+
+三个出自驱动器、一个出自工具层，四条路汇进同一个停止态，区分留给 `code`：
+
+```mermaid
+flowchart LR
+    C1["<b>驱动器</b><br/>轮次额度用尽"]
+    C2["<b>驱动器</b><br/>followup 排队抛错"]
+    C3["<b>驱动器</b><br/>下游 pre-step 否掉这一轮"]
+    C4["<b>tool-goal</b><br/>模型自己报 blocked"]
+    B["<b>phase = blocked</b><br/>唯一的停止态，同时 disarmed"]
+    RT["<b>下游靠 code 路由</b><br/>不靠新增 phase"]
+
+    C1 -- "round-limit" --> B
+    C2 -- "queue-failed" --> B
+    C3 -- "prompt-rejected" --> B
+    C4 -- "model-reported" --> B
+    B --> RT
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class C1,C2,C3,C4 entry
+    class B danger
+    class RT note
+```
 
 ---
 
@@ -149,6 +252,34 @@ private expectCurrent(cache: GoalCache, ref: GoalRef): GoalSnapshot {
 `goal/change` 是 goal 域自己的会话事件（`packages/goal/goal/src/domain.ts:61-68`），负载是两种之一。一种是完整快照 `{ kind, version, operation, goal, roundsStarted, createdAt, updatedAt }`（`domain.ts:24-32`）——注意不是 diff，是**变更后的全量状态**。另一种是墓碑：`clear` 写 `{ kind, version, operation: 'clear', cleared: GoalRef, clearedAt }`（`domain.ts:35-41`），其中 `cleared.revision` 是被清目标的 revision 加一（`index.ts:380`）。
 
 全量快照让重放变成"最后一条赢"，也让 `clear` 这种"删除"仍然带着 revision 留在历史里。清掉的是**指针**，不是记录。
+
+写进去的是两种形状，读出来的却是同一条规则——谁最后写的谁说了算：
+
+```mermaid
+flowchart TD
+    OP["<b>七个动词里的任意一个</b><br/>每次变更 revision 加一"]
+    S1["<b>快照负载</b><br/>operation 不是 clear，带 goal 全量状态"]
+    S2["<b>墓碑负载</b><br/>operation 是 clear，只带 cleared 和 clearedAt"]
+    LOG["<b>日志里的 goal/change</b><br/>只追加，唯一权威"]
+    F["<b>严格重放 fold.ts</b><br/>逐字段校验，key 集合要精确相等"]
+    R["<b>最后一条赢</b><br/>不合并 diff，直接取最新全量"]
+    X["<b>就在那条记录上失败</b><br/>检测得到，但拦不住同进程伪造"]
+
+    OP --> S1 --> LOG
+    OP --> S2 --> LOG
+    LOG -- "读" --> F
+    F -- "通过" --> R
+    F -- "不通过" --> X
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class S1,S2,F,R main
+    class LOG data
+    class OP entry
+    class X danger
+```
 
 严格重放（`packages/goal/goal/src/fold.ts`）不是走过场。`decodeGoalChange()` 逐字段校验，而且要求 key 集合**精确相等**（`fold.ts:104-106`、`fold.ts:156-159`），`create` 必须是全新 id 加 revision 1 加 phase active 加 rounds 0（`fold.ts:289-295`）。时间戳有两道独立的检查：同一条变更里 `updatedAt` 不许早于 `createdAt`（`fold.ts:162`），相邻两次变更之间 `updatedAt` 不许倒退（`fold.ts:209-213`）。写入侧同样有一道钳制，时钟回拨时新 `updatedAt` 取 `max(now, 上次)`（`index.ts:507-512`）。
 
@@ -206,6 +337,26 @@ agent/pre-step（waterfall = 洋葱中间件，见 [11 章](./11-waterfall专章
 **前后各校验一次**看着啰嗦，其实防的是一个很实际的场景：下游某个 async 监听器在 `await` 期间把目标 pause 或 edit 掉了，旧 prompt 却照样进去（`.agents/notes/implemented/feature/2026-07-19-same-session-goal-round-driver.md:25`）。
 
 **只有真正落成 `user/message` 的那一轮才扣号。** 被判 stale 的预留不消耗轮次号（`packages/goal/goal-round-driver/README.md:24`），因为轮次计数完全由 `fold.ts:321-331` 从日志里数出来——进程内的那个预留根本不是事实。这一条和第 01 章"日志是唯一真相"是同一件事在 goal 域的具体落法。
+
+把扣号这件事按时间轴摆开更清楚：预留只是驱动器进程内的一个念头，前后两道校验都过、`user/message` 真的落了盘，重放才把轮次数往上推一格。
+
+```mermaid
+sequenceDiagram
+    participant DRV as 驱动器
+    participant AGT as agent 与 inbox
+    participant MID as agent/pre-step 洋葱
+    participant LOG as 会话日志
+
+    DRV->>DRV: 预留 round 等于 roundsStarted 加一，只记在 state.attempt
+    DRV->>AGT: followup(message)，source 是 goal
+    AGT->>MID: 进这一步之前先过中间件
+    MID->>MID: 校验 #1 validReservation
+    MID->>MID: await next() 交给下游监听器
+    MID->>MID: 校验 #2 再跑一遍同一个判定
+    MID-->>DRV: 任一处不过就标 stale，本轮作废且不扣号
+    MID->>LOG: 都过了才落一条 user/message
+    LOG-->>DRV: 严格重放到这条才推进 roundsStarted
+```
 
 **外来消息永远优先**，实践中主要就是人类消息。任何进入 `nextTurn` 且不等于本次预留的消息，都会把 `competingQueued` 置真，并把处于 queued 的预留标成 stale（`:284-291`）；混批里的自动 prompt 会被否掉，等下一个 checkpoint 再重新预留。
 

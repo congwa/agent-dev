@@ -6,6 +6,36 @@
 
 [26 章](./26-Goal模式.md)的 goal 选择留在这条对话里，靠驱动器不断塞下一条提示。Ralph 选了相反的那条路：**每一轮换一个全新的 child**。它没有父会话，没有上一轮 child 的会话，只有三样东西——不可变的目标、共享工作区（`cwd` 下的真实文件），以及上一轮留下的一份有大小上限的结构化交接报告。工作区是长期记忆，对话不是。
 
+一轮接一轮的形状是这样：目标每轮原样重发，工作区被反复读写并一直留着，而 child 本身用完即弃，只有一份有界报告能跨过轮次边界。
+
+```mermaid
+flowchart TD
+    OBJ["<b>不可变 objective</b><br/>每轮原样重发"]
+    C1["<b>Ralph round N</b><br/>全新 child，无父会话无 seed"]
+    R1["<b>结构化报告</b><br/>五字段，有大小上限"]
+    C2["<b>Ralph round N+1</b><br/>又一个全新 child"]
+    P["<b>父会话</b><br/>只落一次调用 + 一个终态"]
+
+    subgraph WS["共享工作区：cwd 工作树，长期记忆与事实源"]
+        W1["真实文件，跨轮一直在"]
+    end
+
+    OBJ --> C1
+    C1 -- "读 / 写" --> WS
+    C1 --> R1
+    R1 -- "有界交接" --> C2
+    OBJ --> C2
+    C2 -- "读，并核对报告" --> WS
+    C2 --> P
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class C1,C2,R1 main
+    class W1,P data
+    class OBJ entry
+```
+
 这一章讲 dsh 自带的 `ralph` 工具怎么把这件事做出来。读的时候不妨一直带着一个问题：同样是"朝一个目标反复推进"，为什么两种做法在"什么时候继续、什么时候停、状态放哪"上会分岔得这么远。最后一节专门算这笔账。
 
 ## 官方术语表把三个词定死了
@@ -57,6 +87,40 @@ provider 选择、报告 schema、交接上限、脚本本体、编排行为，*
 
 起跑前有四道前置检查，任何一道不过就直接报错，**不会产生 run**。先要有 `exec.agent`，Ralph 需要一个调用方 agent 当所有 child 的 parent（`:438-441`）；`objective` trim 后必须非空（`:442-443`）；`maxRounds` 必须是正安全整数且 `≤` 部署天花板，填 `1.5`、`0`、`NaN` 或超天花板都直接打回（`:208-217`、`:444`，单测 `packages/workflow/tool-ralph/tests/tool-ralph.spec.ts:303-305`）；最后是 provider 三连校验（`:220-232`）：**已注册** → **支持结构化输出（`capabilities.outputSchema`）** → **`inheritsParentContext === false`**。
 
+四道闸门是串成一条的，任何一道落下来都在 `engine.start()` 之前，所以失败时连 run 都没有：
+
+```mermaid
+flowchart TD
+    IN["<b>模型发起调用</b><br/>只填 objective 与可选 maxRounds"]
+    K1{"exec.agent 存在？"}
+    K2{"objective trim 后非空？"}
+    K3{"maxRounds 是正安全整数<br/>且不超部署天花板？"}
+    K4{"provider 已注册 · 支持 outputSchema<br/>· 不继承父上下文？"}
+    OK["<b>engine.start</b><br/>产生一次 run，开始跑固定脚本"]
+    NO["<b>直接报错</b><br/>不会产生 run"]
+    TIP["spawn 天生合格<br/>fork 天生不合格：它会 seed 父会话已完成轮次"]
+
+    IN --> K1
+    K1 -- "否" --> NO
+    K1 -- "是" --> K2
+    K2 -- "否" --> NO
+    K2 -- "是" --> K3
+    K3 -- "否" --> NO
+    K3 -- "是" --> K4
+    K4 -- "否" --> NO
+    K4 -- "是" --> OK
+    K4 -.- TIP
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class K1,K2,K3,K4,OK main
+    class IN entry
+    class NO danger
+    class TIP note
+```
+
 第四道的三条错误信息各有各的话，单测逐条钉住（`packages/workflow/tool-ralph/tests/tool-ralph.spec.ts:311-324`）：`is not registered` / `does not support structured output` / `inherits parent context`。哪些 provider 过得了这一关不用猜——`spawn` 天生合格（`packages/subagent/subagent-spawn-in-process/src/index.ts:42,44`），`fork` 天生不合格（`packages/subagent/subagent-fork-in-process/src/index.ts:64`），后者会把父会话已完成轮次 seed 给 child，正是 Ralph 要消灭的东西。
 
 有个容易被当成低效的细节：**每次调用都重查 provider**，而不是在 `apply()` 时查一次。理由是 provider 注册是 effect 作用域的，插件生命周期和 HMR（热重载，[08 章](./08-effect与生命周期.md)）都可能让它变（`packages/workflow/tool-ralph/README.md:34`）。
@@ -90,6 +154,38 @@ provider 选择、报告 schema、交接上限、脚本本体、编排行为，*
 5. `Previous structured handoff:` + 上一轮报告的 JSON，第一轮是 `(none — this is the first round)`
 6. 报告要求：`continue` 必须带至少一条 nextSteps；`complete` 只在有具体证据且没有 nextSteps 时用；`blocked` 只在没有人类介入或外部状态变化就无法推进时用；`blocker` 除 blocked 外必须为空
 
+六段里有一半是脚本常量、每轮一字不差，真正随轮次变的只有轮号和上一轮那份报告：
+
+```mermaid
+flowchart LR
+    S1["<b>脚本常量</b><br/>每轮一字不变"]
+    S2["<b>args</b><br/>objective / maxRounds"]
+    S3["<b>上一轮报告</b><br/>唯一跨轮变量"]
+
+    subgraph PR["拼给 child 的提示词，空行连接"]
+        A1["1 身份：fresh worker，别调 ralph"]
+        A2["2 Immutable objective"]
+        A3["3 Ralph round N of M"]
+        A4["4 工作区是长期记忆，先看再动"]
+        A5["5 Previous structured handoff"]
+        A6["6 报告要求：三种 status 的条件"]
+    end
+
+    S1 --> A1
+    S1 --> A4
+    S1 --> A6
+    S2 --> A2
+    S2 --> A3
+    S3 --> A5
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class A1,A2,A3,A4,A5,A6 main
+    class S1,S2 entry
+    class S3 data
+```
+
 child 自己的 system prompt 照常由它那棵插件树装配（[15 章](./15-系统提示词与上下文装配.md)），但**父会话的内容一个字都不进来**。这一条不是口头承诺，有落盘证据：shipped headless 回放快照跑完后逐条检查磁盘上的会话日志（`examples/headless-agent/tests/headless.snapshot.ts:729-772`）——三份日志，一份 parent（`delegationDepth: 0`）、两份 child（`delegationDepth: 1`，`parentSession` 都是 parent 的 id，`cwd` 与 parent 相同，**`seedLength`**（会话被预置的历史长度，[16 章](./16-会话日志与分叉.md)）**都是 `undefined`**，两个 id 互不相同）。内容上，child 1 的首条 `user/message` 含 `Ralph round: 1 of 2.` 和 `(none — this is the first round)`、**不含** `ROUND_ONE_HANDOFF`；child 2 含 `Ralph round: 2 of 2.` 和 `ROUND_ONE_HANDOFF`；两个 child 的 prompt 都含 `objective` 原文，**都不含人类那句原话**。真实栈的集成测试用同一组断言再验一遍，并额外断言 child 的请求里既没有父会话 prompt 标记也没有父会话历史标记（`packages/workflow/tool-ralph/tests/integration.spec.ts:95-113`）。
 
 child 侧唯一多出来的东西是结构化输出捕获契约：回放快照断言每个 child 的工具调用**只有一次** `structured_output`（`examples/headless-agent/tests/headless.snapshot.ts:768-772`；该工具名定义在 `packages/subagent/subagent-in-process-driver/src/structured.ts:19`）。
@@ -118,6 +214,31 @@ child 侧唯一多出来的东西是结构化输出捕获契约：回放快照�
 
 同一套规则会被跑两遍。一遍在 workflow 脚本里，也就是上面这些；另一遍在工具消费端跨过 workflow 缝之后重新解码（`readReport()`，`:247-280`）。消费端还额外要求键集合精确等于 `blocker,evidence,nextSteps,status,summary`，多一个键都算 malformed。源码把这一遍写成"跨 provider 边界的防御性解码"（`:246`），README 则把"脚本内 + 消费端各校验一次"直接定为契约（`packages/workflow/tool-ralph/README.md:11`）。单测把 18 种畸形终值逐个跑了一遍（`packages/workflow/tool-ralph/tests/tool-ralph.spec.ts:333-366`）。
 
+一份报告从 child 手里到工具返回值，要过两道内容一样的关，中间隔着 provider 边界；任何一道不过，都是整个 workflow 失败：
+
+```mermaid
+flowchart LR
+    CH["<b>child</b><br/>一次 structured_output"]
+    V1["<b>脚本内 validateReport</b><br/>字段规范化 + status 语义 + 大小闸门"]
+    SEAM["<b>workflow 缝</b><br/>跨 provider 边界"]
+    V2["<b>消费端 readReport</b><br/>再来一遍，且键集合必须精确等于五个"]
+    OUT["<b>result 里的权威值</b><br/>不被 maxResultChars 裁"]
+    BAD["<b>失败</b><br/>非法 / 缺失 / 超长都算失败<br/>绝不当成轮次用光"]
+
+    CH --> V1 --> SEAM --> V2 --> OUT
+    V1 -- "不过" --> BAD
+    V2 -- "不过" --> BAD
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class V1,V2,SEAM main
+    class CH entry
+    class OUT data
+    class BAD danger
+```
+
 超长为什么是让整个 workflow 失败，而不是截断留个尾巴？Agent Note 的原话是：截断可能刚好切掉状态证据或 next steps，而剩下的东西**看起来仍然像一份权威交接**；生产者必须在配额内产出一份合法报告（`.agents/notes/implemented/feature/2026-07-19-fresh-agent-ralph-workflow-tool.md:57`）。同一条逻辑贯穿到底——报告非法、缺失、超长都是**失败**，绝不会被误当成"轮次用光"（`packages/workflow/tool-ralph/README.md:11`）。
 
 ## 终态、返回值，以及"worker reported"这几个字
@@ -129,6 +250,38 @@ child 侧唯一多出来的东西是结构化输出捕获契约：回放快照�
 | `complete` | 某轮报 `complete`，立即返回 | 该轮报告 |
 | `blocked` | 某轮报 `blocked`，立即返回 | 该轮报告 |
 | `budget-limited` | 最后一轮仍是 `continue`，循环走完 | 最后一份 `continue` 报告 |
+
+把这三个出口和后面那节的 `round-failed` 摆在一起看，一轮结束后的分岔一共只有四条，其中只有 `continue` 会回到循环里：
+
+```mermaid
+flowchart TD
+    R["<b>第 N 轮 child</b>"]
+    Q0{"拿到结构化报告<br/>且通过校验？"}
+    F["<b>round-failed</b><br/>报错并附上一份成功交接<br/>不重试这一轮"]
+    Q1{"status 是哪个"}
+    CP["<b>complete</b><br/>立即返回该轮报告"]
+    BL["<b>blocked</b><br/>立即返回该轮报告"]
+    NX{"还有轮次预算？"}
+    BU["<b>budget-limited</b><br/>返回最后一份 continue 报告"]
+
+    R --> Q0
+    Q0 -- "否" --> F
+    Q0 -- "是" --> Q1
+    Q1 -- "complete" --> CP
+    Q1 -- "blocked" --> BL
+    Q1 -- "continue" --> NX
+    NX -- "有，换一个全新 child" --> R
+    NX -- "用光了" --> BU
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class Q0,Q1,NX main
+    class R entry
+    class CP,BL,BU data
+    class F danger
+```
 
 工具的返回信封只有三个字段（`:379-383`）：`{ runId: string, agentsStarted: integer, result: json }`。其中 `agentsStarted` 来自引擎结算值 `settled.agentsStarted`（`:466-470`）——正常结算时它是脚本侧计数，被强制终止时退化为宿主观测值（`packages/workflow/workflow/src/types.ts:80-86`）。
 
@@ -253,6 +406,31 @@ export function apply(ctx: Context): void {
 ## Ralph 还是 goal
 
 两者都是"朝一个目标反复推进"，真正的分岔点只有一个：**上下文往哪儿放**。这一个选择往下决定了成本曲线、错误传染、可观测性、能不能 resume。
+
+一边把状态存进对话、由驱动器判停，另一边把状态存进文件、由干活的 child 自己在报告里声明停不停：
+
+```mermaid
+flowchart LR
+    subgraph G["goal：same-session"]
+        GA["<b>执行体</b><br/>同一个 agent 的下一个 turn"]
+        GB["<b>状态放对话里</b><br/>历史累积重发，前缀可复用"]
+        GC["<b>驱动器判停</b><br/>持久状态，可 pause / resume"]
+    end
+
+    subgraph RA["Ralph：fresh-agent"]
+        RB["<b>执行体</b><br/>每轮一个全新 child session"]
+        RC["<b>状态放文件里</b><br/>工作区 + 一份有上限的报告"]
+        RD["<b>child 自己在报告里声明</b><br/>纯前台进程内，无 resume"]
+    end
+
+    GA --> GB --> GC
+    RB --> RC --> RD
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class GA,RB main
+    class GB,GC,RC,RD data
+```
 
 | 维度 | goal（same-session） | Ralph |
 |---|---|---|
