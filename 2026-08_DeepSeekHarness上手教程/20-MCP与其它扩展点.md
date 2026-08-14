@@ -12,6 +12,35 @@
 
 选落点最有效的一问不是"这算什么功能"，而是"模型看得见吗"。看得见就该往 `ctx.tools` 走，看不见就大概率是命令、是服务、是后台。
 
+按这一问劈开，落点只有三条去向：模型能点的、人能敲的、给别的代码用的。
+
+```mermaid
+flowchart TD
+    Q{"我要加的东西，模型看得见吗"}
+    T["<b>ctx.tools.register</b><br/>schema 常驻请求前缀"]
+    MCP["<b>dsh-mcp-client</b><br/>一台 server 一个实例，名字 mcp__server__tool"]
+    SK["<b>skill</b><br/>目录里只有名字和描述，正文按需拉"]
+    JB["<b>ctx.jobs</b><br/>活在后台，模型只见 job_output / job_list / job_kill"]
+    CM["<b>ctx.commands.register</b><br/>人敲斜杠，不产生模型消息"]
+    SV["<b>服务层 seam</b><br/>ctx.attachments 这类只换实现的抽象面"]
+    R["<b>想新造一个 ctx.xxx</b><br/>Definition、Provider、Consumer 缺一个都不算 seam"]
+
+    Q -- "看得见" --> T
+    Q -- "只露一层工具" --> JB
+    Q -- "看不见，人来敲" --> CM
+    Q -- "看不见，给别的代码用" --> SV
+    T --> MCP
+    T --> SK
+    SV -.-> R
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class T,MCP,SK,JB,CM,SV main
+    class Q entry
+    class R note
+```
+
 dsh 官方自己维护着两张对照表：`docs/architecture.md:108`–`127`（"Where new behavior goes"）和 `docs/cookbook/extension-cookbook.md:101`–`129`（"feature → mechanism map"）。下面这张是把它们按"教程读者真会问的问题"重排的版本，**本章负责的行加了粗**。
 
 | 我想要的效果 | 注册到哪 | 模型看得见吗 | 出处 |
@@ -36,6 +65,30 @@ dsh 官方自己维护着两张对照表：`docs/architecture.md:108`–`127`（
 ## MCP：一台 server 一个插件实例，工具是一等公民
 
 `@deepseek-ai/dsh-mcp-client` 连一台外部 MCP server，把它 `tools/list` 出来的工具逐个注册到 `ctx.tools`，模型看到的名字是 `mcp__<serverName>__<rawName>`（`packages/mcp/mcp-client/README.md:5`）。注册完就到此为止了——之后它和 `bash`、`read` 走的是同一条工具执行管线，同一套 waterfall，同一套审批。所谓"一等公民"就是这个意思：模型不知道它是外来的。
+
+从一条 YAML 到模型工具表，中间的环节是固定的，公开名要到倒数第二步才拼出来：
+
+```mermaid
+flowchart TD
+    Y["<b>cordis.yml 里一条 insert</b><br/>id、serverName、transport 三件套"]
+    P["<b>加载一个 dsh-mcp-client 实例</b><br/>先占住 serverName 这个命名空间"]
+    CN["<b>连上</b><br/>stdio 起子进程，或 streamable-http 连 URL"]
+    LS["<b>tools/list</b><br/>翻页取完，先在内存里攒出下一代定义"]
+    NM["<b>拼公开名</b><br/>serverName 与 rawName 的纯函数，得到 mcp__server__tool"]
+    RG["<b>注册进 ctx.tools</b><br/>整代一起换，冲突就整代回滚"]
+    MD["<b>模型工具表</b><br/>此后和 bash、read 同一条管线、同一套审批"]
+    DUP["<b>serverName 撞车</b><br/>不是静默覆盖，是后加载的那个实例加载失败"]
+
+    Y --> P --> CN --> LS --> NM --> RG --> MD
+    P -.-> DUP
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class P,CN,LS,NM,RG main
+    class Y,MD entry
+    class DUP danger
+```
 
 要接多台 server 就在 `cordis.yml` 里放多条，一条一个 `id`、一个 `serverName`（`README.md:9`）。
 
@@ -83,6 +136,25 @@ Schema 定义在 `packages/mcp/mcp-client/src/index.ts:107`–`128`，是一个�
 | `failOnStartupError` | 两者 | `false`（`src/index.ts:116`） | 为 `false` 时，连不上就"加载成功但零工具" |
 | `reconnect.*` | 两者 | `enabled: true` / `initialDelayMs: 500` / `maxDelayMs: 30000` / `maxAttempts: 10`（`src/connection.ts:40`–`45`） | 断线重连策略 |
 
+`reconnect.*` 那一行背后是一台状态机，按源码里的 supervisor 读出来是这个形状——一次掉线共用一份 attempt 预算，用光了就把这台 server 的工具全注销：
+
+```mermaid
+stateDiagram-v2
+    [*] --> Conn
+    Conn: 连接中
+    Live: 已连接 · 这一代工具在模型工具表里
+    Wait: 退避等待 · 一次掉线共用一份 attempt 预算
+    Gone: 放弃
+
+    Conn --> Live: connect 成功并同步完一代工具
+    Conn --> Wait: 首连失败 · failOnStartupError 为 false 时加载成功但零工具
+    Live --> Live: 收到 tool list changed 通知，重新同步
+    Live --> Wait: onclose 掉线
+    Wait --> Conn: 延时从 initialDelayMs 起翻倍，封顶 maxDelayMs
+    Wait --> Gone: 连续失败超过 maxAttempts
+    Gone --> [*]: 注销这台 server 的全部工具，只能重载插件或重启
+```
+
 顺带回应 [12 章](./12-写一个工具.md) 留的那个尾巴：那章说"除非你在桥接 MCP 这类外部 schema，否则一律用 `defineTool`"——MCP 就是那个例外的真身。server 给的是它自己的 JSON Schema，dsh 只能原样转注册，没有本地类型可推。
 
 ### 三处最容易栽跟头的地方
@@ -92,6 +164,35 @@ Schema 定义在 `packages/mcp/mcp-client/src/index.ts:107`–`128`，是一个�
 **`serverName` 撞车不是静默覆盖，是后加载的那个实例直接加载失败**（`packages/mcp/mcp-client/README.md:58`）。这个设计是刻意的：工具名是 `(serverName, rawName)` 的纯函数（`README.md:55`），连接顺序、重新同步、别的 server 都不会让一个工具改名——所以撞车必须在加载期就炸掉，否则模型历史里的工具名会失去稳定性。反过来说，改 `serverName` 等于把这台 server 的所有工具改名一遍。
 
 **只桥接了 Tools。** MCP 的 Resources 和 Prompts 没有消费方，明确 deferred（`README.md:111`）。图片、音频、resource 类返回块在模型上下文里会退化成占位符，完整 JSON 只留在执行期的 canonical value 里（`README.md:114`）。要是你看中的那台 server 主打 Resources，现在接进来等于什么都没接。
+
+所以一次 MCP 工具调用的往返，中间那段和原生工具完全一样，掉信息只掉在两头：
+
+```mermaid
+flowchart TD
+    MO["<b>模型调 mcp__server__tool</b>"]
+    WF["<b>工具执行管线</b><br/>和 bash 同一条 waterfall、同一套审批"]
+    CL["<b>executor 发 tools/call</b><br/>线上只用 rawName，公开名从不反解"]
+    CV["<b>执行期的 canonical value</b><br/>完整 JSON 留在这里"]
+    TX["<b>投影进模型上下文的文本</b>"]
+    PH["<b>图片、音频、resource 类返回块</b><br/>退化成占位符"]
+    DF["<b>不一样的只有两头</b><br/>入口 schema 原样转注册，出口非文本块掉信息"]
+
+    MO --> WF --> CL
+    CL -- "单次超时看 toolCallTimeoutMs" --> CV
+    CV -- "文本块拼起来" --> TX
+    CV -- "其余类型" --> PH
+    PH --> TX
+    WF -.-> DF
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class WF,CL main
+    class CV data
+    class MO,TX entry
+    class PH,DF note
+```
 
 ⚠️ 还有一处仓库内部打架，我没能判死：**断线到底自动不自动重连。** `packages/mcp/mcp-client/README.md:69` 描述了指数退避的重连 supervisor，`:48` 写明 `reconnect.enabled` 默认 `true`；而 `examples/mcp-memory/README.md:82` 写的是 "the current generic client does not auto-reconnect"。源码这边我确认了 `packages/mcp/mcp-client/src/connection.ts:40`–`45` 的 `RECONNECT_DEFAULTS.enabled = true`、`:192` 的 `scheduleReconnect()`、`:248` 的 `generation.onclose` 钩子，倾向于 example README 是旧文案，但没跑过验证。
 
@@ -116,6 +217,38 @@ Schema 定义在 `packages/mcp/mcp-client/src/index.ts:107`–`128`，是一个�
 | 花 token 吗 | schema 常驻请求前缀 | 零（`README.md:31`） |
 | 会开一轮 turn 吗 | 在 turn 里 | 不会；命令自己可以显式调 `Agent` 再去开（`README.md:15`） |
 | 留痕 | 工具调用与结果 | 日志里一对 `command/run` + `command/done`，不被任何 turn 包裹（`docs/subsystems/commands.md:143`–`146`） |
+
+把表里最后一行摊开：命令这条路从触发到留痕，全程都在 turn 外面。
+
+```mermaid
+flowchart TD
+    U["<b>人在 UI 里敲 /export</b>"]
+    HD["<b>handler 直接对着收到命令的 agent 跑</b><br/>不给模型发消息，零 token"]
+
+    subgraph LOG["会话事件日志"]
+        L1["command/run"]
+        L2["command/done"]
+    end
+
+    NT["<b>这一对不被任何 turn 包裹</b><br/>要开 turn 得命令自己显式调 Agent"]
+    AD["<b>没有 command adapter 就没有入口</b><br/>UI-less 的 demo spine 与 ACP 自动化不提供"]
+
+    U --> HD
+    HD -- "写" --> LOG
+    LOG -.-> NT
+    U -.-> AD
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class HD main
+    class L1,L2 data
+    class U entry
+    class NT note
+    class AD danger
+```
 
 最小完整插件长这样，是 `packages/session-query/session-log-export/src/index.ts:1`–`26` 的全文（26 行，去掉原注释）：
 
@@ -174,6 +307,43 @@ const id = jobs.start({
 
 准入有三道，都在真正 spawn 之前 fail。
 
+整条路串起来是这样，跑完之后按 owner 忙不忙决定怎么叫模型：
+
+```mermaid
+flowchart TD
+    ST["<b>生产者交一份 JobStart</b><br/>kind、label、run 必填"]
+    G1{"这个 agent 的组合里有 controller 吗"}
+    G2{"走 bash 这条路：enableRunInBackground"}
+    G3{"该 owner 的并发到上限了吗"}
+    NO["<b>三道闸都在真正 spawn 之前失败</b><br/>注册表不排队也不抢占"]
+    RN["<b>running</b><br/>run 交出 cancel / done / readOutput"]
+    FIN["<b>终态 first-wins</b><br/>一条终态记录、一轮监听器通知"]
+    W1["<b>owner 还忙</b><br/>结果注入下一步收件箱"]
+    W2["<b>owner 已 idle</b><br/>唤醒开一轮 turn，唤醒有预算"]
+    LF["<b>任务属于 owner 和后端</b><br/>热重载停不掉它，进程死了记录就没了"]
+
+    ST --> G1
+    G1 -- "没装 dsh-tool-jobs" --> NO
+    G1 -- "有" --> G2
+    G2 -- "置 false，硬调也被拒" --> NO
+    G2 -- "默认 true" --> G3
+    G3 -- "满了" --> NO
+    G3 -- "还有位" --> RN
+    RN --> FIN
+    FIN -- "忙" --> W1
+    FIN -- "idle" --> W2
+    RN -.-> LF
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class RN,FIN,W1,W2 main
+    class ST,G1,G2,G3 entry
+    class NO danger
+    class LF note
+```
+
 第一道是**必须先有 controller**。`dsh-tool-jobs` 加载时会调 `ctx.jobs.attachController('tool-jobs')`（`packages/jobs/tool-jobs/src/index.ts:260`）；某个 agent 的组合里没装它，`start()` 就报 `background jobs unavailable: no job controller serves this agent (load @deepseek-ai/dsh-tool-jobs in its composition)`（`packages/jobs/jobs-local/README.md:21`）。tool-bash 自己还额外挡了一层，`ctx.get('jobs')` 为空时抛 `background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs`（`packages/shell/tool-bash/src/index.ts:356`）。
 
 第二道是**部署方可以整个关掉后台 bash**。`enableRunInBackground` 默认 `true`（`packages/shell/tool-bash/src/index.ts:41`），置 `false` 会移除 `run_in_background` 参数，并在执行期拒绝强行调用（`:352`，`packages/shell/tool-bash/README.md:37`）。
@@ -199,6 +369,27 @@ declare module '@deepseek-ai/dsh-jobs' {
 skill 是**可选指令**，不是会话事件（`docs/subsystems/skills.md:5`）。它分两段：目录里只放 `name` + 描述常驻上下文，正文只在模型调 `skill({name})` 时才读进来（`docs/subsystems/skills.md:231`、`:235`）。这个两段式就是它存在的全部理由——不这么切，几十份说明书全塞进提示词，前缀立刻爆。
 
 四件套是 `dsh-skill`（定义）/ `dsh-skill-filesystem`（本地 provider）/ `dsh-skill-badge`（打包 provider）/ `dsh-tool-skill`（模型面工具）（`docs/subsystems/skills.md:5`）。其中第一、二、四个在 base bundle 默认开（`packages/bundle/base/cordis.patch.yml:237`、`:240`、`:247`），`skill-badge` 那条带 `disabled: true`（`:243`–`245`）。
+
+两段式的形状是：目录常驻，正文只有被点名时才进来。
+
+```mermaid
+flowchart TD
+    DIR["<b>六档目录按 rank 扫</b><br/>数字小的赢重名，代码塞进来的排 250"]
+    IDX["<b>常驻上下文的只有目录</b><br/>每条 skill 只露 name 与 description"]
+    CALL["<b>模型点名调 skill 工具</b>"]
+    BODY["<b>这时才把 SKILL.md 正文读进来</b>"]
+    DROP["<b>invocation 字段写成 camelCase</b><br/>整条 skill 从发现里丢掉，只打一条 warning"]
+
+    DIR --> IDX --> CALL --> BODY
+    DIR -.-> DROP
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class IDX,BODY main
+    class DIR,CALL entry
+    class DROP danger
+```
 
 ### 从哪几个目录发现
 
@@ -275,6 +466,32 @@ Use this skill to run relevant local evidence once before a `deepseek-harness` p
 ## attachment：二进制不进日志
 
 规则一句话：**先落盘，再写事件。** 生产者把校验过的字节交给 `ctx.attachments`，服务只在对象持久化之后才发出内容寻址引用；会话事件和模型可见的 `ImageBlock` 里只有这个引用和元数据，**没有** blob URL、临时路径、厂商 URL 或 base64（`docs/subsystems/attachment.md:5`）。落点是 `<DSH_HOME>/attachments/v1`（`docs/subsystems/attachment.md:7`），本地实现的具体路径是 `<DSH_HOME>/attachments/v1/objects/<sha256-prefix>/<sha256>`（`packages/attachment/attachment-local/README.md:5`）。
+
+落到调用上是这个顺序，事件永远排在落盘之后：
+
+```mermaid
+flowchart TD
+    SRC["<b>生产者交出字节</b>"]
+    VAL["<b>validateImage</b><br/>只校验不落盘，v1 只收 png / jpeg / webp / gif"]
+    SAVE["<b>saveImage</b><br/>校验并原子提交之后才返回引用"]
+    OBJ["<b>attachments/v1 下按 sha256 分目录存对象</b>"]
+    EV["<b>会话事件与模型看见的 ImageBlock</b><br/>只有内容寻址引用，没有路径、没有 base64"]
+    GC["<b>对象永久保留</b><br/>引用感知的垃圾回收明确 deferred"]
+
+    SRC --> VAL --> SAVE
+    SAVE -- "先落盘" --> OBJ
+    OBJ -- "提交之后才发引用" --> EV
+    OBJ -.-> GC
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class VAL,SAVE,EV main
+    class OBJ data
+    class SRC entry
+    class GC note
+```
 
 服务的抽象面是三个方法加一个只读属性：`validateImage()` 只校验不落盘，`saveImage()` 校验并原子提交后返回引用，`readImage()` 校验完整性后返回字节（`docs/subsystems/attachment.md:88`–`112`），外加 `imageLimits`（`packages/attachment/attachment/src/index.ts:35`）。v1 只收四种图片：`image/png` `image/jpeg` `image/webp` `image/gif`（`docs/subsystems/attachment.md:17`）。
 

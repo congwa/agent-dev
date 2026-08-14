@@ -15,6 +15,33 @@
 | Python SDK | `deepseek-harness-sdk` | 拉起上面那条运行时当子进程 | 由你的脚本决定 | 你的 Python 代码 |
 | ACP | `dsh-acp-demo [--config …]` | 常驻，stdio | **只有** ACP JSON-RPC 帧 | 支持 ACP 的客户端 |
 
+四条路的形状可以叠在一张里看：CLI 跑完就退，两条常驻服务把 stdout 整个让给协议，而 Python SDK 自己不说协议——它 spawn 的正是 JSON-RPC 那条运行时。
+
+```mermaid
+flowchart LR
+    CLI["<b>一次性 CLI</b><br/>跑完即退"]
+    JR["<b>JSON-RPC 运行时</b><br/>常驻 stdio"]
+    PY["<b>Python SDK</b><br/>你的脚本驱动"]
+    ACP["<b>ACP 服务端</b><br/>常驻 stdio"]
+
+    T1["<b>最后一条 assistant 文本 + 换行</b><br/>退出码只认 completed 为 0"]
+    T2["<b>stdout 就是协议本身</b><br/>诊断一律走 stderr"]
+    T3["<b>stdout 归你的脚本管</b><br/>子进程仍受铁律约束"]
+
+    CLI --> T1
+    JR --> T2
+    ACP --> T2
+    PY -- "spawn" --> JR
+    PY --> T3
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class CLI,JR,PY,ACP entry
+    class T1,T3 main
+    class T2 note
+```
+
 JSON-RPC 在这里就是"一行一条 JSON 消息"的远程调用约定：请求带 `id`+`method`，响应只带 `id`，通知只带 `method`（`packages/sdk/protocol/README.md:9`）。
 
 两条服务端路有同一条铁律，**stdout 就是协议本身**。JSON-RPC 服务端 README 把话说死了：部署方不得组合 stdout logger，诊断走 stderr（`packages/sdk/server/README.md:17`），ACP 侧同样（`packages/acp/acp/README.md:11`、`examples/acp-agent/README.md:16`）。这不是风格建议——插件树里混进一个往 stdout 打日志的插件，客户端的解析当场就碎，而**服务端插件不检查也不否决兄弟 logger**，两边都在"已知限制"里写明了这一点（`packages/sdk/server/README.md:47`、`packages/examples/acp-demo/README.md:58`）。Python SDK 的 stdout 归你的脚本管，但它 spawn 的正是 JSON-RPC 那条运行时，铁律照样压在头上。
@@ -37,7 +64,34 @@ pnpm dsh --profile headless "fix the failing test in this workspace"
 
 ### runner 做的九件事
 
-主流程是 `packages/bundle/headless/src/index.ts` 的 `run()`，第 96–134 行，读起来没什么弯弯绕。
+主流程是 `packages/bundle/headless/src/index.ts` 的 `run()`，第 96–134 行，读起来没什么弯弯绕。九步连成一条直线，中间那段被一个 seq 圈起来，就是本章反复要用的自有区间。
+
+```mermaid
+flowchart TD
+    L["<b>等插件树 settle</b><br/>loader.await()"]
+    C["<b>建全新持久化会话</b><br/>id 为 session-uuid，cwd 取进程当前目录"]
+    W1["<b>whenIdle 后记下 seq</b><br/>自有区间的起点"]
+
+    subgraph OWN["自有区间：起点 seq 之后的全部新增事件"]
+        F["<b>提交任务</b><br/>一条普通 user message"]
+        W2["<b>等整个 agent 静默</b>"]
+        FL["<b>flush 再读</b><br/>先落盘后取事件"]
+    end
+
+    S["<b>折叠成一个结论</b><br/>末条非空 assistant 文本 + 末个 turn/end"]
+    O["<b>stdout 只打这一行</b><br/>reason 是 error 时 stderr 多一行"]
+    E["<b>退出</b><br/>completed 为 0，其余一律 1"]
+
+    L --> C --> W1 --> F --> W2 --> FL --> S --> O --> E
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class C,W1,F,W2,S,O main
+    class FL data
+    class L entry
+    class E main
+```
 
 开机第一件事是等（`:99`）：`await ctx.get('loader')?.await()`，等整棵插件树 settle——每一行插件要么加载完，要么明确失败——然后才去建 Agent。接着通过 core registry 建一个全新的持久化会话（`:111-119`），id 形如 `session-<uuid>`（`:112`），cwd 取进程当前目录（`:113`）。
 
@@ -57,6 +111,34 @@ headless bundle 的 README 开门见山：
 > （`packages/bundle/headless/README.md:5`，同样的话也写在 `cordis.patch.yml:2` 的顶部注释里）
 
 四样东西一样不挂，直接后果是审批链条断了一半。base bundle 确实挂了审批服务，policy 默认是 `ask`（`packages/bundle/base/cordis.patch.yml:188-191`），所以服务在；缺的是**答复者**——全仓能应答 `approval/request` 的只有 host api-proxy 和 ACP 桥，headless 两个都没有。于是每一次需要审批的操作都会 fail closed 成 `unavailable`（`packages/interaction/user-approval/README.md:5`），模型收到的是 "no approval channel is available"。
+
+把这条断掉的链子摊开看，缺的不是服务，是应答的人：
+
+```mermaid
+flowchart TD
+    T["<b>模型要做需要审批的操作</b>"]
+    P["<b>base 挂了审批服务</b><br/>policy 默认 ask，服务是在的"]
+    Q{"<b>谁来应答 approval/request</b>"}
+    H["<b>host api-proxy</b><br/>headless 不挂 Host"]
+    A["<b>ACP 桥</b><br/>headless 不挂"]
+    F["<b>fail closed 成 unavailable</b><br/>模型收到没有可用审批通道"]
+    N["<b>policy 变成 never</b><br/>所有 ask 直接判拒"]
+
+    T --> P
+    P -- "默认 ask" --> Q
+    P -- "把 DSH_PERMISSION_MODE 开到 danger-full-access" --> N
+    Q --> H
+    Q --> A
+    H --> F
+    A --> F
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class T entry
+    class P,Q main
+    class H,A,F,N danger
+```
 
 这条链路的完整推导在 [13 章](./13-工具执行管线.md)和 [18 章](./18-沙箱审批与权限.md)，包括那个反直觉的坑：把 `DSH_PERMISSION_MODE` 开到 `danger-full-access` 反而让 policy 变成 `never`，所有 ask 直接判拒。在 CI 里的实际含义是：**别指望模型能靠审批拿到额外权限，需要什么就在配置里事先给足**。
 
@@ -82,6 +164,33 @@ dsh-jsonrpc-agent /abs/examples/jsonrpc-agent/cordis.yml
 两个都没给出可用文件时，打一行 usage 到 stderr 然后 exit 1（`packages/examples/jsonrpc-demo/README.md:9`、`packages/examples/jsonrpc-demo/src/runner.ts:25-36`）。仓库里没有对应的 npm script，从 checkout 起只能自己拼——`pnpm install` 之后跑 `node --import tsx packages/examples/jsonrpc-demo/src/bin.ts examples/jsonrpc-agent/cordis.yml`（argv 约定见 `runner.ts:26`，这种启动方式见 `package.json:139` 与 `python/sdk/tests/manual_sdk_agent_smoke.py:64`）。
 
 停止有三个入口：stdin EOF 与 `SIGTERM` 会 dispose 到静默后 exit 0，`SIGINT` 退 130（`packages/examples/jsonrpc-demo/src/runner.ts:51-53`、`packages/examples/jsonrpc-demo/README.md:15`）。但 **EOF 会砍掉在飞的回合**，要有序收尾就用协议级的 `shutdown`（`packages/examples/jsonrpc-demo/README.md:33`）：它会先把响应冲出去，再 dispose 根 context，然后 exit 0（`packages/sdk/server/README.md:21`）。
+
+四个停止入口最后都汇到同一个 dispose 上，区别在进门那一下和退出码：
+
+```mermaid
+flowchart TD
+    SD["<b>shutdown</b><br/>协议级，先把响应冲出去"]
+    TERM["<b>SIGTERM</b>"]
+    EOF["<b>stdin EOF</b>"]
+    INT["<b>SIGINT</b>"]
+    D["<b>dispose 根 context 到静默</b>"]
+    X0["<b>exit 0</b>"]
+    X130["<b>exit 130</b>"]
+
+    SD --> D
+    TERM --> D
+    EOF -- "砍掉在飞的回合" --> D
+    INT --> D
+    D -- "shutdown / SIGTERM / EOF" --> X0
+    D -- "SIGINT" --> X130
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class SD,TERM,INT entry
+    class EOF danger
+    class D,X0,X130 main
+```
 
 ### 三个请求，四个通知
 
@@ -117,7 +226,22 @@ dsh-jsonrpc-agent /abs/examples/jsonrpc-agent/cordis.yml
 
 **`session/prompt` 只返回入队回执。** `messageId` 标识排进 inbox 的那条 `UserMessage`，**不**标识后面的某条 assistant 消息、某次 turn 结束或某个 prompt 结果（`packages/sdk/protocol/README.md:25`、`packages/sdk/server/README.md:25`、`:46`）。
 
-**"一次运行"的区间边界得你自己定义。** 官方 Python 客户端的做法是：等自己的 `messageId` 出现在 `agent/inbox/spliced` 回执里，当作起点（判定见 `python/sdk/src/deepseek_harness/api.py:186-196`）；收到该 session 的 `session.status: idle`，当作终点（循环见 `:154-174`）。这跟 headless 的"自有区间"是同一个思路。
+**"一次运行"的区间边界得你自己定义。** 官方 Python 客户端的做法是：等自己的 `messageId` 出现在 `agent/inbox/spliced` 回执里，当作起点（判定见 `python/sdk/src/deepseek_harness/api.py:186-196`）；收到该 session 的 `session.status: idle`，当作终点（循环见 `:154-174`）。这跟 headless 的"自有区间"是同一个思路。这段来回摆开是这样：
+
+```mermaid
+sequenceDiagram
+    participant C as 客户端
+    participant RT as JSON-RPC 运行时
+    C->>RT: session/prompt 带 sessionId 与 contentBlocks
+    RT-->>C: 响应只有 messageId，是入队回执
+    Note over C: 回执不代表 turn 结束，不能当终点
+    RT--)C: session.event 里的 agent/inbox/spliced，inserted 含该 messageId
+    Note over C: 认这条为自有区间起点
+    RT--)C: session.status running
+    RT--)C: session.event 若干，运行时里每一个 session 都发，不过滤
+    RT--)C: session.status idle
+    Note over C: 认这条为终点，收束本次运行
+```
 
 **没有 cancel，也没有关单个 session 的方法。** 放弃一个回合 = 关掉运行时进程；SDK 创建的 agent 活到进程退出为止（`packages/sdk/protocol/README.md:38`、`packages/sdk/server/README.md:45`）。也没有协议版本协商（`packages/sdk/protocol/README.md:37`）。
 
@@ -192,11 +316,69 @@ print(result.final_response)
 | `base_url` | `DEEPSEEK_BASE_URL` | `:69-70` |
 | `api_key` | `DEEPSEEK_API_KEY` | `:71-72` |
 
+翻译方向是单向的：高层字段进去，子进程的环境变量出来，运行时只认后者；`cwd` 和 `runtime_cwd` 在这张图上分成了两条线，一条给 agent 当 workspace，一条给子进程当工作目录。
+
+```mermaid
+flowchart LR
+    CFG["<b>DeepSeekHarnessConfig</b><br/>你在 Python 里写的字段"]
+
+    subgraph ENVB["子进程环境变量"]
+        E1["DSH_SESSION_ROOT"]
+        E2["DSH_CORDIS_CONFIG"]
+        E3["DSH_CWD"]
+        E4["DEEPSEEK_BASE_URL"]
+        E5["DEEPSEEK_API_KEY"]
+    end
+
+    RT["<b>JSON-RPC 运行时子进程</b><br/>工作目录取 runtime_cwd，没给才回落到 cwd"]
+
+    CFG -- "session_root" --> E1
+    CFG -- "cordis" --> E2
+    CFG -- "cwd，先 resolve 成绝对路径" --> E3
+    CFG -- "base_url" --> E4
+    CFG -- "api_key" --> E5
+    ENVB --> RT
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class CFG entry
+    class E1,E2,E3,E4,E5 data
+    class RT main
+```
+
 `RunResult` 是 `session_id / final_response / finish_reason / events / notifications / session_root`（`api.py:39-45`）。关键语义写在 `python/sdk/README.md:45`：`final_response` 是**这段自有区间里最后一条已提交的 root session assistant 文本**，`finish_reason` 是区间里最后一个 `turn/end` 的 `kind`（README 举的例子是 `completed` / `max-tokens` / `error`），没有 turn 结束时为 `None`。两个字段描述的都是"区间"，不是"因果上属于这条 prompt 的输出"——跟 headless 那边是同一个陷阱，换了个壳。
 
 ### 零配置是怎么变出来的
 
-运行时二进制永远要求显式配置（`python/sdk-runtime/README.md:29`），所以"零配置"这件事完全发生在客户端侧：`deepseek_harness` 只在"用的是内置运行时 且 `DSH_CORDIS_CONFIG` 为空"时才注入内置默认配置；`runtime_bin` / `bridge_bin` / `launch_args_override` 任给一个就完全不注入（`python/sdk/src/deepseek_harness/client.py:438-454`、`python/sdk/README.md:49`）。
+运行时二进制永远要求显式配置（`python/sdk-runtime/README.md:29`），所以"零配置"这件事完全发生在客户端侧：`deepseek_harness` 只在"用的是内置运行时 且 `DSH_CORDIS_CONFIG` 为空"时才注入内置默认配置；`runtime_bin` / `bridge_bin` / `launch_args_override` 任给一个就完全不注入（`python/sdk/src/deepseek_harness/client.py:438-454`、`python/sdk/README.md:49`）。判定只有两道闸，两道都放行才轮得到注入：
+
+```mermaid
+flowchart TD
+    S["<b>准备拉起运行时子进程</b>"]
+    Q1{"<b>runtime_bin / bridge_bin / launch_args_override 给了任意一个</b>"}
+    Q2{"<b>DSH_CORDIS_CONFIG 非空</b>"}
+    NO["<b>完全不注入</b><br/>显式通道原样保留"]
+    KEEP["<b>不覆盖</b><br/>用你给的那份配置"]
+    INJ["<b>注入内置默认配置</b><br/>bundled_default_config_path"]
+    R["<b>运行时二进制永远要求显式配置</b><br/>零配置只发生在客户端侧"]
+
+    S --> Q1
+    Q1 -- "给了" --> NO
+    Q1 -- "都没给，用的是内置运行时" --> Q2
+    Q2 -- "非空" --> KEEP
+    Q2 -- "为空" --> INJ
+    NO --> R
+    KEEP --> R
+    INJ --> R
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class S entry
+    class Q1,Q2,NO,KEEP,INJ main
+    class R note
+```
 
 这三个字段里有个不对称容易翻车：只有 `runtime_bin` 和 `launch_args_override` 是高层 `DeepSeekHarnessConfig` 的字段（`api.py:30-31`），`bridge_bin` 只存在于低层 `HarnessConfig`（`client.py:29`）——高层构造函数收到这个关键字会直接报错。
 

@@ -43,6 +43,33 @@ Code Mode 的全部卖点就是这一句：把"多轮工具调用"折叠成"一�
 mode: z.union(['native', 'code', 'both'] as const).default('native'),
 ```
 
+分流点只有一个函数，它同时决定两件事：这一轮往 wire 上放哪些 schema，以及 prompt 里多不多出那两段。
+
+```mermaid
+flowchart TD
+    REG["<b>ctx.tools 注册表</b><br/>全部可见工具，外加保留的 run_code"]
+    WS["<b>wireSchemas 按 mode 分流</b><br/>顺带定下 prompt 里多什么"]
+    NA["<b>native（默认）</b><br/>每个可见工具的完整 schema"]
+    CO["<b>code</b><br/>schema 过滤到只剩 run_code"]
+    BO["<b>both</b><br/>全量 schema 再补一个 run_code"]
+    CP["<b>多两段</b><br/>tools:code-only（99）+ tools:sdk（150）"]
+    BP["<b>只多 tools:sdk</b><br/>tools:code-only 渲染成空串"]
+
+    REG --> WS
+    WS -- "native" --> NA
+    WS -- "code" --> CO
+    WS -- "both" --> BO
+    CO --> CP
+    BO --> BP
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class WS,NA,CO,BO main
+    class CP,BP data
+    class REG entry
+```
+
 | | 模型 wire 上看到的工具 | prompt 里多出的段落 | 模型能直接调什么 |
 |---|---|---|---|
 | `native`（默认） | 每个可见工具的完整 schema | — | 所有可见工具 |
@@ -65,6 +92,33 @@ return !nested && this.modeFor(scope) === 'code' && name !== RUN_CODE_NAME
 
 `!nested` 是关键。程序内部发出的子调用带着外层执行的 `parent` token，不算 model-direct，所以照样能调所有工具——收窄的只是模型直接说话的那一层。
 
+两条路进的是同一个判定，出的是两个结果：
+
+```mermaid
+flowchart TD
+    DIR["<b>模型直接发 read</b><br/>model-direct，没有 parent token"]
+    SUB["<b>程序里 await tools.read</b><br/>带外层 parent token，算 nested"]
+    JD{"<b>collapses 谓词</b><br/>非 nested 且 mode 是 code 且名字不是 run_code"}
+    NO["<b>就地判成 UNKNOWN_TOOL</b><br/>比 pre-execute、审批 ask、guard 都早"]
+    MSG["<b>拒绝话术特意写了回路</b><br/>叫它改从 run_code 程序里调这个名字"]
+    PIPE["<b>照常走完整工具管线</b><br/>六道关卡一道不少"]
+
+    DIR --> JD
+    SUB --> JD
+    JD -- "命中" --> NO
+    JD -- "不命中" --> PIPE
+    NO --> MSG
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class JD,PIPE main
+    class DIR,SUB entry
+    class NO danger
+    class MSG note
+```
+
 拒绝信息特意写了回路（`packages/core/tools/src/index.ts:1441`）：
 
 ```
@@ -80,6 +134,31 @@ only `run_code` is callable directly — call `<name>` from inside a `run_code` 
 ## 怎么把它打开
 
 要两样东西同时到位：一个非 native 的 `mode`，加一个挂上 `ctx.codeRuntime` 的运行时插件。少一样都不行。
+
+少哪一样、什么时候炸，形状是这样：
+
+```mermaid
+flowchart TD
+    CFG["<b>tools 的 mode 设成 code 或 both</b><br/>部署级默认，或用 presentAs 单给某个 agent"]
+    RTM["<b>挂一个 ctx.codeRuntime 实现</b><br/>仓库里只有 worker-thread 这一个"]
+    ON["<b>run_code 上 wire</b><br/>模型开始写程序"]
+    ERR["<b>prompt 装配时报错</b><br/>mode code requires a code runtime"]
+    LATE["<b>不走静态 inject</b><br/>ctx.tools 不被必须有 runtime 绑架"]
+
+    CFG --> ON
+    RTM --> ON
+    CFG -- "运行时缺席" --> ERR
+    ERR --> LATE
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class ON main
+    class CFG,RTM entry
+    class ERR danger
+    class LATE note
+```
 
 **官方 bundle 已经帮你挂好了运行时。** `dsh-web-app` 和 `dsh-headless` 两个 bundle 的 patch 里都 insert 了 worker-thread 运行时（`packages/bundle/web-app/cordis.patch.yml:47`–`:49`、`packages/bundle/headless/cordis.patch.yml:22`–`:25`），并且各留了一个环境变量开关（`packages/bundle/web-app/cordis.patch.yml:35`–`:41`）：
 
@@ -160,6 +239,31 @@ declare const tools: {
 }
 ```
 
+骨架里那两个 Map 是现填的，原料就是每个工具自己声明的 schema：
+
+```mermaid
+flowchart LR
+    TOOLS["<b>每个可见工具（run_code 除外）</b><br/>parameters 与 output.schema"]
+    SORT["<b>先按名字字典序排</b><br/>工具集不变就逐字节相同，prefix-cache 友好"]
+    GEN["<b>jsonSchemaToTs</b><br/>一个工具一行，名字不是合法标识符就加引号"]
+    ARG["<b>ToolArgsMap</b><br/>每个工具的入参类型"]
+    OUT["<b>ToolOutputMap</b><br/>每个工具的返回类型"]
+    DEC["<b>declare const tools</b><br/>骨架本身是源码里的字面量"]
+
+    TOOLS --> SORT --> GEN
+    GEN -- "parameters" --> ARG
+    GEN -- "output.schema" --> OUT
+    ARG --> DEC
+    OUT --> DEC
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class SORT,GEN main
+    class ARG,OUT,DEC data
+    class TOOLS entry
+```
+
 `ToolArgsMap` 和 `ToolOutputMap` 的成员由 `jsonSchemaToTs` 从每个工具的 `parameters` 和 `output.schema` 现生成（取值在 `packages/core/tools/src/index.ts:1239`–`:1253`，渲染在 `packages/core/tools/src/ts-types.ts:277`–`:280`），一个工具一行，名字不是合法标识符就加引号（`packages/core/tools/src/ts-types.ts:21`–`:24`），`run_code` 自己被排除在外（`packages/core/tools/src/index.ts:1241`）。[12 章](./12-写一个工具.md)里说 `output.schema` 只在 Code Mode 下才有人读，指的就是这里——native 模式下它一辈子也不会被投影出去。
 
 工具按名字**字典序**排，保证工具集不变时逐字节相同（`packages/core/tools/src/ts-types.ts:264`–`:268`、`:274`），官方把这条描述为 prefix-cache 友好（`packages/core/tools/README.md:122`）。
@@ -169,6 +273,32 @@ declare const tools: {
 > `run_code` is the only tool you can call directly — a tool call naming any other tool fails. Reach every tool the SDK declares below from inside the program.
 
 它排在 99 而不是别的数字是有讲究的。每个工具插件都会注册自己那段"怎么用我"的说明，落在 order 100–199 这一带（`read` 是 100、`glob` 是 103）。规则要是排在它们后面，模型就得先读完一整本工具手册，然后才被告知"这些你一个都不能直接调"（`packages/core/tools/src/index.ts:843`–`:850`）。
+
+两种排法下，模型的阅读顺序差在这里：
+
+```mermaid
+flowchart TD
+    subgraph GOOD["实际排法：规则在前"]
+        A1["<b>order 99 · tools:code-only</b><br/>只有 run_code 能直接调"]
+        A2["<b>order 100–199 · 各工具的使用说明</b><br/>read 是 100，glob 是 103"]
+        A3["<b>模型带着约束读手册</b>"]
+    end
+    subgraph BAD["排在手册后面会怎样"]
+        B1["<b>先读完一整本工具手册</b>"]
+        B2["<b>然后才被告知一个都不能直接调</b>"]
+        B3["<b>模型发 native 调用，收到 UNKNOWN_TOOL</b><br/>判定是部署坏了，不是该换写法"]
+    end
+
+    A1 --> A2 --> A3
+    B1 --> B2 --> B3
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A1,A2,A3 main
+    class B1,B2 note
+    class B3 danger
+```
 
 ---
 
@@ -210,6 +340,32 @@ worker 实际给到的是这几样：独立 isolate、空环境（`env: {}`，�
 
 `maxWallMs`（默认 600000）计的是墙钟，从不为任何事暂停。它兜的正是忙碌时间看不见的那种情况：await 一个永远不 resolve 的 promise，event loop 空闲得很，但这次 run 已经废了。
 
+两个预算同时起跑，各自盯着一种看不见的东西，第三条路根本不归它们管：
+
+```mermaid
+flowchart TD
+    RUN["<b>一次 run 开始</b><br/>两个预算同时起跑"]
+    CM["<b>computeMs（默认 60000）</b><br/>worker 实测的 event loop 忙碌时间"]
+    POLL["<b>每 25ms 采样一次</b><br/>死循环藏不住；await 慢 IO 一毫秒不扣"]
+    WM["<b>maxWallMs（默认 600000）</b><br/>墙钟，从不为任何事暂停"]
+    WHY["<b>兜住忙碌时间看不见的情况</b><br/>await 一个永远不 resolve 的 promise"]
+    FIN["<b>汇进同一个 finish()</b><br/>调 worker.terminate()，kind 是 timeout"]
+    OOM["<b>堆超了不走这条路</b><br/>表现为 worker 的 OOM 退出：worker-exit"]
+
+    RUN --> CM --> POLL --> FIN
+    RUN --> WM --> WHY --> FIN
+    RUN -- "另一条路" --> OOM
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class CM,POLL,WM,WHY main
+    class RUN entry
+    class FIN danger
+    class OOM note
+```
+
 两个到期分别在 `packages/code-runtime/code-runtime-worker-thread/src/index.ts:540`（消息是 `compute budget exhausted`）和 `:544`（`wall-clock ceiling reached`），最终都汇进同一个 `finish()`，由它调 `worker.terminate()`（`:424`、`:436`）。25ms 这个采样间隔是内部常量、故意不做成配置，代价是 `computeMs` 到期最多晚一个采样周期（`packages/code-runtime/code-runtime-worker-thread/src/index.ts:57`–`:63`）。`maxWallMs` 在加载时就检查不超过 `MAX_TIMER_DELAY_MS`（= `2147483647`，`packages/util/timeout/src/index.ts:25`），因为 `setTimeout` 会把更大的延迟直接压成 1ms，一个 25 天的上限反而会让 run 立刻超时（`packages/code-runtime/code-runtime-worker-thread/src/index.ts:264`–`:268`）。
 
 堆溢出不走 timeout 这条路，它表现为 worker 的 OOM 退出，即 `kind: 'worker-exit'`（`packages/code-runtime/code-runtime-worker-thread/README.md:27`）。
@@ -249,6 +405,31 @@ worker 实际给到的是这几样：独立 isolate、空环境（`env: {}`，�
 
 代码位置：bindings 构造在 `packages/core/tools/src/code-mode.ts:601`–`:620`（排除 `run_code` 在 `:607`），子调用 id 在 `:470`，两个日志事件分别在 `:535`（start）和 `:510`（settle），快照与管线的成文契约在 `packages/core/tools/README.md:123`。失败那一环分两半：host 侧只把结果 reject 成一个带 message 的普通 Error（`packages/core/tools/src/code-mode.ts:589`–`:592`），worker 侧再把它实例化成程序可见的 `ToolCallError`（`packages/code-runtime/code-runtime-worker-thread/src/bootstrap.ts:246`–`:259`）。
 
+把这棵树摊到四个参与方身上，能看清子调用是怎么跨出 worker 又跨回 host 的：
+
+```mermaid
+sequenceDiagram
+    participant MD as 模型
+    participant HS as host：run_code 执行体
+    participant RT as ctx.codeRuntime
+    participant WK as worker 线程
+    participant PL as 工具管线
+
+    MD->>HS: run_code({ code, description })
+    HS->>HS: 建 bindings，排除 run_code 自己
+    HS->>RT: run({ program, bindings, signal })
+    RT->>RT: 类型擦除；擦不掉就直接 exception，worker 不 spawn
+    RT->>WK: new Worker：空环境、不继承 loader flag、堆上限
+    WK->>WK: 构造 AsyncFunction，把程序当函数体跑
+    WK->>HS: await tools.foo(args) 跨 message port
+    HS->>PL: 子调用带 parent token，走完整管线
+    PL-->>HS: 结果
+    HS-->>WK: 成功给规范 JSON 值，失败 reject 出 ToolCallError
+    WK-->>RT: 完成值加已捕获的日志
+    RT-->>HS: CodeRunResult
+    HS-->>MD: 只有 print / return 的内容
+```
+
 有三条性质值得单独记住。
 
 **子调用不绕过任何策略。** 它走的是和 native 调用完全相同的管线，[13 章](./13-工具执行管线.md)讲的六道关卡、[18 章](./18-沙箱审批与权限.md)讲的审批与沙箱，在 `run_code` 程序里一条都不少。Code Mode 不是权限旁路。
@@ -262,6 +443,34 @@ worker 实际给到的是这几样：独立 isolate、空环境（`env: {}`，�
 ## 失败分成六类，去哪查
 
 运行时把失败当作**结果里的一个字段**返回，而不是 reject。`run()` 只在调用方违反 seam 契约时才 reject（`packages/code-runtime/code-runtime/src/index.ts:96`–`:97`；README 举的例子是"disposed 之后再提交 run"，`packages/code-runtime/code-runtime/README.md:13`）。六种 kind 定义在 `packages/code-runtime/code-runtime/src/types.ts:105`：
+
+这六个不是一条线上的深浅，是在三个不同位置报出来的：
+
+```mermaid
+flowchart TD
+    S0["<b>worker 还没起</b><br/>类型擦除阶段，或提交时 signal 已 aborted"]
+    S1["<b>worker 跑着</b><br/>程序体在 AsyncFunction 里执行"]
+    S2["<b>结果出炉那一刻</b><br/>序列化完成值与日志，过 output ledger"]
+    K0["<b>exception</b>（擦不掉的语法）<br/><b>abort</b>"]
+    K1["<b>exception</b> · <b>timeout</b><br/><b>abort</b> · <b>worker-exit</b>"]
+    K2["<b>invalid-output</b> · <b>output-limit</b>"]
+    RES["<b>都是 resolve 出来的结果字段</b><br/>run() 只在调用方违反 seam 契约时才 reject"]
+
+    S0 --> S1 --> S2
+    S0 -- "能报" --> K0
+    S1 -- "能报" --> K1
+    S2 -- "能报" --> K2
+    K0 --> RES
+    K1 --> RES
+    K2 --> RES
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class S0,S1,S2 main
+    class K0,K1,K2 danger
+    class RES data
+```
 
 | kind | 含义 | 常见触发 |
 |---|---|---|

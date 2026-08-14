@@ -12,6 +12,32 @@
 
 先把三个最容易混的词钉死，后面每一节都建立在它们的分工上。官方教程那句话说得很干脆：bundle 是你写的、profile 是用户启动的，**Nothing is both**（`docs/user/develop/basic/publish.md:13-16`）。
 
+三者的关系是一条指向链：profile 列出 bundle，bundle 的 patch 行指向 plugin；而它们各自被系统认出来的方式完全不同。
+
+```mermaid
+flowchart LR
+    PR["<b>profile</b><br/>一份可启动的组合"]
+    B["<b>bundle</b><br/>npm 包，附带一层配置补丁"]
+    P["<b>plugin</b><br/>一个导出 apply 的模块"]
+
+    RP["<b>靠目录位置被识别</b><br/>DSH_HOME 下的 profiles 目录里，有 package.json 就算"]
+    RB["<b>靠 package.json 里的 dsh.bundle.patch 被识别</b>"]
+    RN["<b>没有自己的识别方式</b><br/>配置行里的 name 指向它"]
+
+    PR -- "dsh.profile.bundles 列出" --> B
+    B -- "patch 行的 name 指向" --> P
+    PR --> RP
+    B --> RB
+    P --> RN
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class PR,B main
+    class RP,RB data
+    class P,RN entry
+```
+
 | | 是什么 | 靠什么被识别 | 住在哪 |
 |---|---|---|---|
 | **plugin** | 一个导出 `apply` 的模块 | 无（配置行里的 `name` 指向它） | 任意路径 / npm 包内 |
@@ -100,6 +126,40 @@ export function apply() {
 
 `loadProfile` 对 `dsh.profile.bundles` 里的每个名字做四件事（`packages/boot/app-boot/src/profile.ts:388-397`）：解析包目录，读它的 `package.json`，取出 `dsh.bundle.patch`，然后 `join(packageDir, declared)` 当成必需 overlay 解析。
 
+这条链是直的，但沿途有三个地方会当场抛错：
+
+```mermaid
+flowchart TD
+    A["<b>bundles 里的一个包名</b>"]
+    B["<b>resolveBundleDir</b><br/>解析出包目录"]
+    C["<b>读这个包的 package.json</b>"]
+    D{"<b>有 dsh.bundle.patch 吗</b>"}
+    E["<b>join 包目录 与 声明的路径</b><br/>普通文件路径，不走 exports 映射"]
+    F{"<b>文件读得到吗</b>"}
+    G{"<b>顶层是 YAML 数组吗</b>"}
+    OK["<b>这一层的 patch 条目</b>"]
+    X1["<b>declares no dsh.bundle</b>"]
+    X2["<b>failed to read overlay</b><br/>多半是 files 漏了这个文件"]
+    X3["<b>must be a top-level YAML array</b><br/>空文件和纯注释也算不是数组"]
+
+    A --> B --> C --> D
+    D -- "没有" --> X1
+    D -- "有" --> E --> F
+    F -- "读不到" --> X2
+    F -- "读到了" --> G
+    G -- "不是" --> X3
+    G -- "是" --> OK
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class B,C,D,E,F,G main
+    class OK data
+    class A entry
+    class X1,X2,X3 danger
+```
+
 这四步推出三个你迟早会撞上的事实。
 
 第一，`patch` 是**相对包根目录的普通文件路径**，走的是文件系统 `join`，**不走 `exports` 映射**。仓库自带 bundle 里那条 `"./cordis.patch.yml": "./cordis.patch.yml"` 导出（`packages/bundle/base/package.json:25`）跟 profile 加载没关系——2026-08-14 全仓 grep 过，没有任何代码 import 这个子路径。你的包不写这条导出照样能被加载。
@@ -122,6 +182,67 @@ export function apply() {
 | `- id: X` 但树里没有 X | 告警 `patch: entry "X" not found`，跳过 | `:110-113` |
 | 没有 `id` 又没有 `insert` | 告警 `patch: id is required for non-insert patches` | `:105-107` |
 | `- id: X` + `name: Y`（Y ≠ 现有 name） | **整条跳过**并告警 name mismatch | `:116-119` |
+
+这张表其实是一棵判定树，分岔口就是有没有 `insert`。带 `insert` 的走这一支：
+
+```mermaid
+flowchart TD
+    P["<b>带 insert 的条目</b>"]
+    Q{"<b>同时写了 id 吗</b>"}
+    A1["<b>追加到根 entry 列表末尾</b><br/>base 把核心行一次铺开用的就是这种"]
+    Q2{"<b>那行存在，而且是 group 吗</b>"}
+    A2["<b>插进这个 group 的 config 里</b>"]
+    X["<b>只告警跳过</b><br/>not found 或 is not a group"]
+    IDX["<b>插进来的行登记进索引</b><br/>靠后的层可以按 id 改它"]
+
+    P --> Q
+    Q -- "没写" --> A1
+    Q -- "写了" --> Q2
+    Q2 -- "是" --> A2
+    Q2 -- "否" --> X
+    A1 --> IDX
+    A2 --> IDX
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class Q,Q2,A1,A2 main
+    class IDX data
+    class P entry
+    class X danger
+```
+
+不带 `insert` 的走另一支，覆盖真正落下去之前要连过三道关卡：
+
+```mermaid
+flowchart TD
+    P["<b>不带 insert 的条目</b>"]
+    Q1{"<b>写了 id 吗</b>"}
+    X1["<b>id is required for non-insert patches</b>"]
+    Q2{"<b>树里找得到这个 id 吗</b>"}
+    X2["<b>patch: entry X not found</b>"]
+    Q3{"<b>写了 name，而且跟现有的对不上</b>"}
+    X3["<b>整条跳过并告警 name mismatch</b><br/>确认没改错目标的保险"]
+    A["<b>逐键覆盖到那一行</b><br/>config 是一整个键，整体替换不深合并"]
+
+    P --> Q1
+    Q1 -- "没写" --> X1
+    Q1 -- "写了" --> Q2
+    Q2 -- "找不到" --> X2
+    Q2 -- "找到了" --> Q3
+    Q3 -- "对不上" --> X3
+    Q3 -- "没写 name 或对得上" --> A
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class Q1,Q2,Q3 main
+    class A data
+    class P entry
+    class X1,X2,X3 danger
+```
 
 最后一条是个好用的保险。写上 `name` 等于声明"我确认这行确实是那个插件才改"，改错目标时它会明说，而不是默默生效在一行你根本没想动的配置上。
 
@@ -165,6 +286,35 @@ export function apply() {
 
 ## `dsh plugin` 其实是 pnpm 的转发器
 
+一条 `add` 命令的全程是这个形状：初始化、转发、按结果决定要不要回写那张表。
+
+```mermaid
+flowchart TD
+    C["<b>dsh plugin --profile n add pkg</b>"]
+    R["<b>相对路径参数先重写成绝对路径</b><br/>按你敲命令时所在的目录，file: 与 link: 前缀保留"]
+    I["<b>没有 package.json 就 initProfile</b><br/>用同名模板，没模板退到 dsh-base"]
+    S["<b>以 profile 目录为 cwd 跑 pnpm</b><br/>stdio inherit，add remove why update 原样可用"]
+    Q{"<b>pnpm 退出码是 0 吗</b>"}
+    RC["<b>reconcile</b><br/>按安装后的实际状态重算 bundles"]
+    PJ["<b>profile 的 package.json</b>"]
+    F["<b>什么都不同步</b><br/>只多打一句是哪一个 pnpm-workspace.yaml"]
+
+    C --> I --> S --> Q
+    R -- "参数" --> S
+    Q -- "是" --> RC
+    Q -- "否" --> F
+    RC -- "写" --> PJ
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class I,S,Q,RC main
+    class PJ data
+    class C,R entry
+    class F danger
+```
+
 `dsh plugin --profile <name> <args...>` 只做三步（`apps/cli/src/plugin.ts:120-158`）。profile 目录没有 `package.json` 就先 `initProfile`，用同名模板，没模板就退到 `['@deepseek-ai/dsh-base']`（`apps/cli/src/plugin.ts:121-125`，常量在 `packages/boot/app-boot/src/profile.ts:114-117` 与 `:125`）。然后以 **profile 目录为 cwd** 执行 `spawnSync('pnpm', args)`，`stdio: 'inherit'`（`apps/cli/src/plugin.ts:129-133`），所以 `add` / `remove` / `why` / `update` 这些 pnpm 动词原样可用（`apps/cli/src/args.ts:175`、`apps/cli/reference/README.md:43`）；pnpm 不在 PATH 上会直接退 127 并给提示（`apps/cli/src/plugin.ts:136-138`）。最后，**只有 pnpm 退出码为 0** 才做 reconcile（`apps/cli/src/plugin.ts:143-144`）。
 
 reconcile 的口径是关键：它按**安装后的实际状态**算，不按命令行参数 diff（`apps/cli/src/plugin.ts:59-91`）。遍历 `dependencies`，凡是能解析到、且 manifest 里有 `dsh.bundle.patch` 的包，就追加进 `dsh.profile.bundles`；本次新增却没有 `dsh.bundle` 的包，打一次告警：
@@ -174,6 +324,37 @@ dsh: warning: <pkg> declares no dsh.bundle — installed as a plain dependency, 
 ```
 
 （`apps/cli/src/plugin.ts:71-74`）反过来，依赖被删了、或者新版本拿掉了 `dsh.bundle`，那一层自动退出（`:77-87`）。两个顺带的推论：`update` 到一个新增了 `dsh.bundle` 的版本会自动激活它（`apps/cli/src/plugin.ts:7-9`）；而模板自带的 in-box bundle 不是 dependency，永远不会被摘掉（`:79-81`）。
+
+这段口径摊平就是一次遍历、三种落点，判据全在"这个包现在长什么样"上：
+
+```mermaid
+flowchart TD
+    D["<b>遍历安装后的 dependencies</b>"]
+    Q1{"<b>能解析到，且有 dsh.bundle.patch 吗</b>"}
+    A1["<b>追加进 dsh.profile.bundles</b>"]
+    Q2{"<b>是本次新增的吗</b>"}
+    W["<b>告警一次 declares no dsh.bundle</b><br/>装成了普通依赖，不是层"]
+    N["<b>不动</b>"]
+    B2["<b>曾是依赖、现在不再是 bundle</b><br/>那一层自动退出"]
+    T["<b>模板自带的 in-box bundle 不是 dependency</b><br/>永远不会被摘掉"]
+
+    D --> Q1
+    Q1 -- "是" --> A1
+    Q1 -- "否" --> Q2
+    Q2 -- "是" --> W
+    Q2 -- "否" --> N
+    D --> B2
+    B2 -- "不适用" --> T
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class Q1,Q2,B2 main
+    class A1 data
+    class D entry
+    class W,N,T note
+```
 
 还有一处不显眼但少了就要出事的处理：相对路径参数会先按**你敲命令时所在的目录**重写成绝对路径（`apps/cli/src/plugin.ts:104-112`，cwd 取自 `:129`）。没有这一步，`add .` 会因为 cwd 已经是 profile 目录，把 profile 自己链接给自己。`file:` / `link:` 前缀则保留原样，因为 pnpm 对这两者的 link-vs-copy 语义不同。
 
@@ -228,6 +409,33 @@ for (const anchor of [installAnchor, join(profileDir, 'package.json')]) {
 ```
 
 `installAnchor` 是 dsh 自己那个包的 `package.json` 绝对路径（`apps/cli/src/profile-boot.ts:54`）。这个顺序就是契约：**in-box bundle（随 dsh 安装包一起发出去的那三个）永远来自"正在运行的这个 dsh"，不会被 profile 目录里的同名副本顶掉**（`packages/boot/app-boot/src/profile.ts:332-343`、`apps/cli/reference/README.md:11`）。你写 bundle 时可以放心假定 `@deepseek-ai/dsh-base` 一定在，而且版本跟 dsh 对得上（`docs/user/develop/basic/publish.md:128`）。
+
+写成图就是一条两级回退链，先后顺序决定了谁赢：
+
+```mermaid
+flowchart TD
+    N["<b>bundles 里的一个包名</b>"]
+    A1{"<b>锚点一：dsh 自己那个包的 package.json</b>"}
+    H1["<b>用它</b><br/>in-box bundle 永远来自正在运行的这个 dsh"]
+    A2{"<b>锚点二：profile 目录的 package.json</b>"}
+    H2["<b>用它</b><br/>pnpm 装进 profile 的外部 bundle"]
+    X["<b>cannot resolve profile bundle</b><br/>报错里直接给出该跑的 install 命令"]
+
+    N --> A1
+    A1 -- "找到" --> H1
+    A1 -- "没找到" --> A2
+    A2 -- "找到" --> H2
+    A2 -- "没找到" --> X
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class A1,A2 main
+    class H1,H2 data
+    class N entry
+    class X danger
+```
 
 两个锚点都落空时的报错会直接告诉你下一步跑什么（`packages/boot/app-boot/src/profile.ts:351-354`），就是 `dsh plugin --profile <name> install`。
 
