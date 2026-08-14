@@ -1,4 +1,4 @@
-# 25 · Goal 模式
+# 26 · Goal 模式
 
 > 基于 `deepseek-ai/deepseek-harness` v0.1.0-rc.5（commit `47f9438`），2026-08-14 核对。本章讲 dsh 的 goal（目标）模式：怎么让 agent 在**同一个会话**里持续朝一个目标推进，以及支撑它的四个包、一台状态机、一套并发栅栏。
 
@@ -184,7 +184,7 @@ agent → idle
   │        └─ 抛错 → block(queue-failed)                        ……… :192-204
   │
   ▼
-agent/pre-step（waterfall = 洋葱中间件，见第 10 章；声明在
+agent/pre-step（waterfall = 洋葱中间件，见第 11 章；声明在
                 packages/core/agent/src/runtime-types.ts:229-231）
   │
   ├─ 校验 #1（进 next() 之前）  validReservation：fiber 活着 ∧ attempt.phase==='claimed'
@@ -203,7 +203,7 @@ agent/pre-step（waterfall = 洋葱中间件，见第 10 章；声明在
   └─ 严格重放此时才推进 roundsStarted                            ……… fold.ts:321-331
 ```
 
-（图里的 `fiber` 是这个插件所在的 Cordis 生命周期单元，概念见第 04 章。）三个必须记住的点：
+（图里的 `fiber` 是这个插件所在的 Cordis 生命周期单元，概念见第 05 章。）三个必须记住的点：
 
 1. **前后各校验一次**，是为了防住"下游某个 async 监听器在 `await` 期间把目标 pause / edit 掉了，旧 prompt 却照样进去"（`.agents/notes/.../same-session-goal-round-driver.md:25`）。
 2. **只有真正落成 `user/message` 的那一轮才扣号**。被判 stale 的预留不消耗轮次号（`packages/goal/goal-round-driver/README.md:24`），因为轮次计数完全由 `fold.ts:321-331` 从日志里数出来 —— 进程内的预留根本不是事实。
@@ -333,13 +333,13 @@ Web 端另有一条 GoalBar：据包 README（`packages/client/ui-goal/README.md
 
 ### 8.3 在日志里看 `goal/change`
 
-会话日志默认落在 `~/.dsh/sessions`（`packages/bundle/base/cordis.patch.yml:98-101`，`root: !!js dshHomePath('sessions')`；`~/.dsh` 这个缺省值见 `packages/util/home-paths/src/index.ts:12`），布局是 `<root>/--<归一化 cwd>--/<编码后的 session id>/session.jsonl.zstd`（`packages/session/session-persistence-jsonl/README.md:9-15`）。默认是 zstd 压缩，直接 `grep` 是看不见的；要用行式文本读，得先把持久化配成 `compression: 'none'`（`packages/session/session-persistence-jsonl/README.md:28`、`:74`）——这跟第 15 章讲的是同一个日志。
+会话日志默认落在 `~/.dsh/sessions`（`packages/bundle/base/cordis.patch.yml:98-101`，`root: !!js dshHomePath('sessions')`；`~/.dsh` 这个缺省值见 `packages/util/home-paths/src/index.ts:12`），布局是 `<root>/--<归一化 cwd>--/<编码后的 session id>/session.jsonl.zstd`（`packages/session/session-persistence-jsonl/README.md:9-15`）。默认是 zstd 压缩，直接 `grep` 是看不见的；要用行式文本读，得先把持久化配成 `compression: 'none'`（`packages/session/session-persistence-jsonl/README.md:28`、`:74`）——这跟第 16 章讲的是同一个日志。
 
 找的是 `type` 为 `goal/change` 的行，负载就是第 4.2 节那两种形状之一。轮次则记在 `user/message` 事件的 `source` 上：`{ kind: 'goal', goalId, revision, round }`（`packages/goal/goal/src/domain.ts:46-53`）。
 
 ### 8.4 写一个插件
 
-监听目标变化 —— `goal/changed` 是 emit 模式（五种派发模式见第 09 章），按 agent 做 scope 过滤，监听器抛错会被容纳（`packages/goal/goal/src/domain.ts:104-115`）：
+监听目标变化 —— `goal/changed` 是 emit 模式（五种派发模式见第 10 章），按 agent 做 scope 过滤，监听器抛错会被容纳（`packages/goal/goal/src/domain.ts:104-115`）：
 
 ```ts
 import type { Context } from '@deepseek-ai/cordis'

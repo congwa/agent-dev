@@ -1,4 +1,4 @@
-# 06 · Service：能力从哪来
+# 07 · Service：能力从哪来
 
 > 基于 `deepseek-ai/deepseek-harness` v0.1.0-rc.5（commit `47f9438`），2026-08-14 核对。本章只讲一件事：`ctx.tools` / `ctx.llm` / `ctx.fs` 这类挂在 `ctx` 上的能力是谁注册的、你怎么拿到它、拿不到时报错怎么读。事件系统（`ctx.on`、waterfall）在第 09、10 章。
 
@@ -122,7 +122,7 @@ export class TokenMeter extends Service {
 }
 ```
 
-节选自 `packages/llm/token-meter/src/index.ts:74,81-82`（省略了 `static Config`、私有字段和构造函数其余语句）。`Service` 构造函数的最后一步是 `self.ctx.reflect.provide(name, self, this[symbols.check])`（`vendor/cordis/src/service.ts:57`，其后只剩 `return self`）——注册本身是一次 effect（一个自带反向操作的注册动作，`vendor/cordis/src/reflect.ts:278`），插件卸载时自动注销（第 07 章）。`Service` 子类本身就是一个插件（`docs/cordis-tutorial/03-services.md:42`），`ctx.plugin(TokenMeter)` 或在 yml 里写一行都能挂载——TokenMeter 就是 `export default`（`packages/llm/token-meter/src/index.ts:313`），配置里按包名挂在 `packages/bundle/base/cordis.patch.yml:282`。
+节选自 `packages/llm/token-meter/src/index.ts:74,81-82`（省略了 `static Config`、私有字段和构造函数其余语句）。`Service` 构造函数的最后一步是 `self.ctx.reflect.provide(name, self, this[symbols.check])`（`vendor/cordis/src/service.ts:57`，其后只剩 `return self`）——注册本身是一次 effect（一个自带反向操作的注册动作，`vendor/cordis/src/reflect.ts:278`），插件卸载时自动注销（第 08 章）。`Service` 子类本身就是一个插件（`docs/cordis-tutorial/03-services.md:42`），`ctx.plugin(TokenMeter)` 或在 yml 里写一行都能挂载——TokenMeter 就是 `export default`（`packages/llm/token-meter/src/index.ts:313`），配置里按包名挂在 `packages/bundle/base/cordis.patch.yml:282`。
 
 服务可以依赖服务：`ToolRuntime` 用 `static inject = ['systemPrompt']`（`packages/core/tools/src/index.ts:788`），于是 `ctx.tools` 只在 `ctx.systemPrompt` 就位后才出现。
 
@@ -251,7 +251,7 @@ dsh: 1 entry did not activate
 
 | 症状 | 原因 | 怎么查 |
 |---|---|---|
-| `waiting for service: X` 且配置里确实没有 X 的 provider | 忘了挂 provider 包 | `dsh web --dump-config` 看合成后的配置里有没有那一行（非 web profile 用 `dsh --profile <name> --dump-config`；裸 `dsh --dump-config` 会因为缺 `--profile` 直接报错，`apps/cli/src/args.ts:133,138-140,164`；第 02 章） |
+| `waiting for service: X` 且配置里确实没有 X 的 provider | 忘了挂 provider 包 | `dsh web --dump-config` 看合成后的配置里有没有那一行（非 web profile 用 `dsh --profile <name> --dump-config`；裸 `dsh --dump-config` 会因为缺 `--profile` 直接报错，`apps/cli/src/args.ts:133,138-140,164`；第 03 章） |
 | `waiting for service: X` 但 provider 明明写了 | provider 自己也 PENDING/FAILED（它的依赖没齐），或者你和它不在同一个 realm | 看报错里有没有第二行；再看第 7 节的 realm |
 | `waiting for services: unknown` | `missing` 算出来是空列表（`:713` 的 `\|\| 'unknown'` 兜底） | 见下 |
 
@@ -291,7 +291,7 @@ dsh: 1 entry did not activate
       name: '@deepseek-ai/dsh-tool-str-replace-editor'
 ```
 
-（`!!js` 是 loader 的惰性表达式，第 08 章讲；这里当普通配置看就行。）**这里最容易踩的**：realm 是加在 group 上的，provider 和 consumer 必须一起被包进这个 group。编辑器 `str-replace-editor` 和 `fs-local` 写在同一个 `config` 列表里不是排版习惯——落在 group 外面的消费者会解析到 host 那份实例，或者干脆没人提供而 PENDING。`standard` preset 的注释把这条写死了："a consumer left outside would resolve a host registry this preset does not populate"（`apps/cli/config/agent-presets/standard/agent.cordis.yml:166-167`）。`cordis:group` 这个内置行的存在理由就是"把 provider 和它的 consumer 一起放进同一个 realm"（`packages/boot/app-boot/README.md:30`）。
+（`!!js` 是 loader 的惰性表达式，第 09 章讲；这里当普通配置看就行。）**这里最容易踩的**：realm 是加在 group 上的，provider 和 consumer 必须一起被包进这个 group。编辑器 `str-replace-editor` 和 `fs-local` 写在同一个 `config` 列表里不是排版习惯——落在 group 外面的消费者会解析到 host 那份实例，或者干脆没人提供而 PENDING。`standard` preset 的注释把这条写死了："a consumer left outside would resolve a host registry this preset does not populate"（`apps/cli/config/agent-presets/standard/agent.cordis.yml:166-167`）。`cordis:group` 这个内置行的存在理由就是"把 provider 和它的 consumer 一起放进同一个 realm"（`packages/boot/app-boot/README.md:30`）。
 
 **什么时候该开**：这份 preset 里三个 realm 各自给了理由——`planMode` 因为计划状态天然是 per-agent 的（`:102-108`）、`compaction` 连同 `toolResultPruner` 一起隔离，因为 `compaction-basic` 用 `this.ctx.get('toolResultPruner')` 读 pruner（`packages/compaction/compaction-basic/src/index.ts:281`，服务注册在 `packages/compaction/compaction-tool-result-pruner/src/index.ts:59`），不同 realm 就读不到（`:128-142`；顺带一提，preset 注释里把服务名写成了 `toolResultPrune`，少个 r，以 `isolate` 那两行和代码为准）、`workflowEngine` 因为没有 agent 之外的东西读它（`:166-178`）。反例同样写得很清楚：`tokenMeter` 故意留在 host 平面，因为浏览器要跨会话读它的投影单元，塞进 realm 会随 preset 挂载来去（`:131-136`）。
 

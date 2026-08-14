@@ -37,7 +37,7 @@ README 开门见山就把边界划清了：`Plan mode is soft guidance; sandbox 
 | projection unit | `plan` → `{ active, pending }`，`stateVersion: 1` | `src/index.ts:244-266`，仅当 `ctx.sessionProjections` 已挂载 |
 | 伴生插件 | `./invariant`（`plan-mode-invariant`） | `src/invariant.ts:20-26`，只校验 `plan/mode.active` 是不是 boolean；默认 bundle 的 patch.yml 里没有这一行 |
 
-`agent/pre-step` 的 waterfall 派发方与消费方名单见 `docs/event-producer-consumer.md:18`。派发模式的通用讲法见 [10 章 waterfall 专章](../10-waterfall专章.md)。
+`agent/pre-step` 的 waterfall 派发方与消费方名单见 `docs/event-producer-consumer.md:18`。派发模式的通用讲法见 [11 章 waterfall 专章](../11-waterfall专章.md)。
 
 ## 配置项
 

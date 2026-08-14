@@ -1,4 +1,4 @@
-# 07 · effect 与生命周期
+# 08 · effect 与生命周期
 
 > 基于 `deepseek-ai/deepseek-harness` v0.1.0-rc.5（commit `47f9438`），2026-08-14 核对。本章讲 dsh 底座 Cordis 的一条核心机制：**注册即 effect，卸载即逆序回滚**，以及由它派生出来的热重载与失败回滚语义。
 
@@ -183,7 +183,7 @@ export function apply(ctx: Context) {
   name: './heartbeat.ts'
 ```
 
-在 dsh 里则是往 patch 层的 `insert:` 列表里加同样两行——patch 文件就是一个顶层 YAML 数组，元素是"按 id 覆盖 config"或 `insert` 列表（`packages/boot/app-boot/src/index.ts:268`–`271`），形状照抄 `packages/bundle/base/cordis.patch.yml:15`–`17`。四层叠加的细节见第 02 章，挂载走查见第 05 章。
+在 dsh 里则是往 patch 层的 `insert:` 列表里加同样两行——patch 文件就是一个顶层 YAML 数组，元素是"按 id 覆盖 config"或 `insert` 列表（`packages/boot/app-boot/src/index.ts:268`–`271`），形状照抄 `packages/bundle/base/cordis.patch.yml:15`–`17`。四层叠加的细节见第 03 章，挂载走查见第 06 章。
 
 三处对着源码的说明：
 
@@ -249,7 +249,7 @@ Schema 里声明的字段有四个（`vendor/hmr/src/index.ts:560`–`570`）：
 expect(ctx.fiber.getEffects().map(effect => effect.label)).toContain('store.order')
 ```
 
-这就是**给每个 effect 起 label 的实际收益**：`agentLoop.lifecycle(<sessionId>)`（`packages/core/agent-loop/src/index.ts:530`）、`schedule.runtime()`（`packages/schedule/schedule/src/index.ts:65`）、`tools.presentAs()` 这类名字在诊断输出里能一眼定位是谁没退干净。反过来，插件没反应但也不报错，多半是 fiber 停在 PENDING（缺依赖），排查脚本见 `docs/cordis-tutorial/06-composition-and-hmr.md:67`–`83`，更系统的诊断留到第 24 章。
+这就是**给每个 effect 起 label 的实际收益**：`agentLoop.lifecycle(<sessionId>)`（`packages/core/agent-loop/src/index.ts:530`）、`schedule.runtime()`（`packages/schedule/schedule/src/index.ts:65`）、`tools.presentAs()` 这类名字在诊断输出里能一眼定位是谁没退干净。反过来，插件没反应但也不报错，多半是 fiber 停在 PENDING（缺依赖），排查脚本见 `docs/cordis-tutorial/06-composition-and-hmr.md:67`–`83`，更系统的诊断留到第 25 章。
 
 > 想知道这一点上 Pi / Codex / LangChain 怎么做，见 [五个 agent 系统源码解剖](../2026-08_五个agent系统源码解剖/00-总览与阅读指南.md)。
 

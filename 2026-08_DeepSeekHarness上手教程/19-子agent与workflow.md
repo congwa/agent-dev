@@ -1,4 +1,4 @@
-# 18 · 子 agent 与 workflow
+# 19 · 子 agent 与 workflow
 
 > 基于 `deepseek-ai/deepseek-harness` v0.1.0-rc.5（commit `47f9438`），2026-08-14 核对。本章讲 dsh 把活派出去的两条路：一次委派一个子 agent，和让模型写一段 JavaScript 脚本一口气调度几十个子 agent。
 
@@ -15,7 +15,7 @@
 
 ## 1. 从一个具体场景开始：十五个文件要审一遍
 
-你让 agent 审十五个文件。它可以自己一个个读——十五份文件内容全部堆进这一个会话的上下文，读到后面就要触发压缩（阈值由部署配置决定，见第 16 章）。dsh 给了两条别的路：
+你让 agent 审十五个文件。它可以自己一个个读——十五份文件内容全部堆进这一个会话的上下文，读到后面就要触发压缩（阈值由部署配置决定，见第 17 章）。dsh 给了两条别的路：
 
 ```
 父 agent 的一条 assistant message
@@ -309,7 +309,7 @@ console.log(result.stopReason, result.agentsStarted, result.value)
 
 为什么是这个设计：dsh 的 workflow 脚本契约刻意对齐 Claude Code 的 dynamic workflows 词表（`.agents/notes/implemented/feature/2026-07-05-dynamic-workflows.md:9`、`:17`），所以 CC 那边有、这边没实现的选项会真的被人写出来。而这个仓库明令禁止"接受然后忽略"：一个拼错的选项如果变成一个 `null`，就和"子 agent 运行失败"完全无法区分——这正是 `parallel` / `pipeline` **重新抛出** fatal 而不是把该项置 `null` 的原因（`:19`）。`effort` / `isolation` / `agentType` 与"嵌套 `workflow()`"、"token `budget`"一起被列为 deferred，各自报错时都点名自己（`:62`）。
 
-顺带分清两个容易混的东西：workflow 脚本里没有 `isolation`，而 `ctx.codeRuntime`（第 20 章的 Code Mode）确实有一个 `isolation` 描述符，取值 `'worker-thread' | 'process' | 'container'`——但文档明写它**只是诊断标签，不构成安全承诺**（`docs/subsystems/code-runtime.md:161`）。
+顺带分清两个容易混的东西：workflow 脚本里没有 `isolation`，而 `ctx.codeRuntime`（第 21 章的 Code Mode）确实有一个 `isolation` 描述符，取值 `'worker-thread' | 'process' | 'container'`——但文档明写它**只是诊断标签，不构成安全承诺**（`docs/subsystems/code-runtime.md:161`）。
 
 ---
 

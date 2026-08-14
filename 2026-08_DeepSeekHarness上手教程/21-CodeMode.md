@@ -1,4 +1,4 @@
-# 20 · CodeMode
+# 21 · CodeMode
 
 > 基于 `deepseek-ai/deepseek-harness` v0.1.0-rc.5（commit `47f9438`），2026-08-14 核对。本章只讲 `run_code` 这一条路线：三种呈现模式的语义、TypeScript / Python 两个运行时、隔离边界到底在哪一层、以及开它要付什么代价。
 
@@ -128,7 +128,7 @@ DSH_TOOLS_MODE=code npx @deepseek-ai/dsh web
 
 这四个字段就是 worker-thread 运行时的全部可调项，写的值即默认值（`packages/code-runtime/code-runtime-worker-thread/src/index.ts:239`–`:244`；README 明写 "there are no other tunables"，`packages/code-runtime/code-runtime-worker-thread/README.md:19`）。
 
-如果你的 profile 已经 insert 过 `code-runtime`（web / headless 都是），就**只留 `- id: tools` 那一段**——`insert` 的语义是往配置里新增行，不是幂等覆盖（`docs/architecture.md:27`）。另外按 patch 层的整体替换语义，`- id: tools` 的 `config` 会**替换**而不是深合并上一层的 config（`docs/user/develop/basic/publish.md:123`）——四层叠加的机制见第 02 章。
+如果你的 profile 已经 insert 过 `code-runtime`（web / headless 都是），就**只留 `- id: tools` 那一段**——`insert` 的语义是往配置里新增行，不是幂等覆盖（`docs/architecture.md:27`）。另外按 patch 层的整体替换语义，`- id: tools` 的 `config` 会**替换**而不是深合并上一层的 config（`docs/user/develop/basic/publish.md:123`）——四层叠加的机制见第 03 章。
 
 ### 3.3 只让某一个 agent 用 code 模式
 
@@ -277,7 +277,7 @@ worker 实际提供的东西是这几样：独立 isolate、空环境（`env: {}
 
 三条值得单独记住的性质：
 
-1. **子调用不绕过任何策略。** 它走的是和 native 调用完全相同的管线，所以第 12 章讲的六道关卡、第 17 章讲的审批与沙箱，在 `run_code` 程序里一条都不少。CodeMode 不是权限旁路。
+1. **子调用不绕过任何策略。** 它走的是和 native 调用完全相同的管线，所以第 13 章讲的六道关卡、第 18 章讲的审批与沙箱，在 `run_code` 程序里一条都不少。CodeMode 不是权限旁路。
 2. **并发沿用 native 的调度契约。** 连续的"并发安全"调用最多重叠 `maxParallelSubCalls` 个（默认 10，见 `packages/core/tools/src/index.ts:792`；设成 `1` 就退回严格串行），独占调用会清空池子、单独跑、并把 barrier 一直持有到它的 post-execute 完成（`packages/core/tools/src/code-mode.ts:343`–`:357` 那段长注释）。第 1 节的例子里 `glob` 没声明并发安全所以独占，`read` 声明了 `isConcurrencySafe: () => true`（`packages/fs/tool-fs/src/read.ts:135`）所以能并发。
 3. **结算纪律。** run 一旦结束（正常、超时、外层取消都算），bridge 会 abort 所有在飞的子调用并**排空队列后才返回**，保证每一条 `tool/code-dispatch` 都落在这个还开着的 turn 里（`packages/core/tools/src/code-mode.ts:623`–`:629`）。
 

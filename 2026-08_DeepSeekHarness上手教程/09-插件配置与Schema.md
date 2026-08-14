@@ -1,4 +1,4 @@
-# 08 · 插件配置与 Schema
+# 09 · 插件配置与 Schema
 
 > 基于 `deepseek-ai/deepseek-harness` v0.1.0-rc.5（commit `47f9438`），2026-08-14 核对。本章只讲一件事：`cordis.yml` 里那个 `config:` 块，是怎么变成 `apply(ctx, config)` 第二个参数的——中间经过哪几道手续，任何一道出错时你在终端上看到什么。
 
@@ -85,7 +85,7 @@ Cordis 认的不是 Schemastery，而是 **Standard Schema**——一个跨校�
 顺序是硬编码的：先跑 `internal/config` waterfall（`!!js` 插值就挂在这上面），再跑 schema。
 
 > waterfall 是 Cordis 的洋葱式事件派发：一串监听器依次拿到值、可以改写后再传给下一个，第 09、10 章展开。这里只需要知道它是"配置在到达 schema 之前经过的一道可改写管道"。
-> fiber 是一个插件实例的运行期句柄（第 04 章），下面几张状态名都挂在它身上。
+> fiber 是一个插件实例的运行期句柄（第 05 章），下面几张状态名都挂在它身上。
 
 ```
 fiber 创建
@@ -105,7 +105,7 @@ apply(ctx, config)
 - 没导出 `Config` 的插件：`resolveConfig` 第一行 `if (!runtime.Config) return config` 原样放行（`vendor/cordis/src/fiber.ts:51`）。**没有 schema = 没有校验，也没有默认值**。
 - 官方文档对这一步的说法是"schema 在插件加载期间运行，非法配置以可操作的错误让加载失败"（`docs/user/develop/basic/config.md:74`）。
 
-改一次配置等于一次 HMR（hot module replacement，热替换）：框架卸载旧实例、加载新实例；因为注册都是 effect，旧实例的注册不会残留（`docs/user/develop/basic/config.md:100`，effect 机制见第 07 章）。
+改一次配置等于一次 HMR（hot module replacement，热替换）：框架卸载旧实例、加载新实例；因为注册都是 effect，旧实例的注册不会残留（`docs/user/develop/basic/config.md:100`，effect 机制见第 08 章）。
 
 ## 4. 配错了长什么样
 
@@ -263,7 +263,7 @@ for (const [key, value] of Object.entries(overrides)) {
 三条自保措施：
 
 1. **重述你要保留的字段，连 `!!js` 一起抄过来**——表达式节点在 patch 里同样合法（`packages/boot/app-boot/README.md:16-17`），原样写回去即可。
-2. **改完用 `dsh --dump-config` 对一眼**：它用 include 自己的解析器和 patch 算法离线合成，并把 `!!js` **逐字**渲染出来（`packages/boot/app-boot/README.md:22`，flag 说明见 `apps/cli/README.md:41`，逐条语义见 `apps/cli/reference/README.md:39`）。表达式还在就是还在，变成字面量就是被抹了。四层叠加的完整规则见第 02 章。
+2. **改完用 `dsh --dump-config` 对一眼**：它用 include 自己的解析器和 patch 算法离线合成，并把 `!!js` **逐字**渲染出来（`packages/boot/app-boot/README.md:22`，flag 说明见 `apps/cli/README.md:41`，逐条语义见 `apps/cli/reference/README.md:39`）。表达式还在就是还在，变成字面量就是被抹了。四层叠加的完整规则见第 03 章。
 3. **别用 patch 去"微调"一行**，宁可整行 `insert` 一个你自己的插件。
 
 顺带记住另一个静默失败：patch 的 `id` 在树里找不到时只是一条警告、不是错误——`applyEntryPatches` 把诊断丢给 `warn` sink（`vendor/include/src/index.ts:110-113`），include 把这个 sink 接到 loader logger 上（`vendor/include/src/index.ts:267-270`）；README 直接称之为 "a stderr warning"（`packages/boot/app-boot/README.md:43`）。
@@ -316,7 +316,7 @@ export function apply(ctx: Context, config: Config) {
         intervalMs: !!js Number(process.env.HEARTBEAT_MS ?? 5000)
 ```
 
-**跑**（源码路径的启动方式见第 01 章；这条命令行与 `docs/user/develop/basic/index.md:61` 一致，`--patch <path>` 的定义在 `apps/cli/src/args.ts:132`）：
+**跑**（源码路径的启动方式见第 02 章；这条命令行与 `docs/user/develop/basic/index.md:61` 一致，`--patch <path>` 的定义在 `apps/cli/src/args.ts:132`）：
 
 ```sh
 pnpm dsh web --patch ./scratch-plugin/cordis.yml

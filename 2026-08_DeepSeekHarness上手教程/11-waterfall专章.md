@@ -1,4 +1,4 @@
-# 10 · waterfall 专章
+# 11 · waterfall 专章
 
 > 基于 `deepseek-ai/deepseek-harness` v0.1.0-rc.5（commit `47f9438`），2026-08-14 核对。本章只讲一件事：`ctx.waterfall` 这十行代码，以及 dsh 全仓 13 个建立在它之上的拦截点。
 
@@ -27,7 +27,7 @@ ctx.on('tools/pre-execute', async (exec, next) => {
 
 形状抄自仓库里的真实桥接插件 `packages/hooks/hooks-claude-code/src/index.ts:238-244`。
 
-（工具这一层还有一个**不走 waterfall** 的拒绝通道：`ctx.tools.guard()` 注册的同步 guard，跑在 `tools/pre-execute` 之后，只能拒不能放行 —— `packages/core/tools/src/index.ts:1101-1110`。它属于工具管线的业务语义，归第 12 章。）
+（工具这一层还有一个**不走 waterfall** 的拒绝通道：`ctx.tools.guard()` 注册的同步 guard，跑在 `tools/pre-execute` 之后，只能拒不能放行 —— `packages/core/tools/src/index.ts:1101-1110`。它属于工具管线的业务语义，归第 13 章。）
 
 这段代码里藏着两个必须先搞清的问题：**`return { kind: 'deny' }` 为什么能顶掉整条链？`return next()` 又把控制权交给了谁？** 答案全在 Cordis 的十行实现里。
 

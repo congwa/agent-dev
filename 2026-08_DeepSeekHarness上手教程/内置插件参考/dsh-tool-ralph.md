@@ -6,7 +6,7 @@
 
 **一句话**：一个 `ralph` 工具，前台跑一段**编译期写死的 workflow 脚本**，把同一个不可变 objective 交给一串全新的 child agent，一轮一个，轮间只传一份有大小上限的结构化 handoff。
 
-README:5 把它的定位说得很清楚：`It demonstrates a specialized orchestration policy as an ordinary plugin over ctx.workflowEngine and ctx.subagents: no Ralph mode or fresh-agent loop is added to agent-loop, and the same-session goal domain remains independent.` —— 也就是说，Ralph 不是 agent 循环的一个模式，它就是一个普通插件。教程正文见 [26 章 RalphLoop](../26-RalphLoop.md)，同 session 的长任务对照见 [25 章 Goal 模式](../25-Goal模式.md)。
+README:5 把它的定位说得很清楚：`It demonstrates a specialized orchestration policy as an ordinary plugin over ctx.workflowEngine and ctx.subagents: no Ralph mode or fresh-agent loop is added to agent-loop, and the same-session goal domain remains independent.` —— 也就是说，Ralph 不是 agent 循环的一个模式，它就是一个普通插件。教程正文见 [27 章 RalphLoop](../27-RalphLoop.md)，同 session 的长任务对照见 [26 章 Goal 模式](../26-Goal模式.md)。
 
 ## 它在树上长什么样
 

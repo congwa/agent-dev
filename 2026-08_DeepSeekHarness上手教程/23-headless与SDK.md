@@ -1,4 +1,4 @@
-# 22 · headless 与 SDK
+# 23 · headless 与 SDK
 
 > 基于 `deepseek-ai/deepseek-harness` v0.1.0-rc.5（commit `47f9438`），2026-08-14 核对。本章讲不开 Web UI 的四条路：一次性 CLI、JSON-RPC 运行时、Python SDK、ACP；外加把 dsh 当库嵌进自己的程序，以及 `BENCHMARK.md` 推荐的评测跑法。
 
@@ -38,7 +38,7 @@ dsh --profile headless "run the tests"
 pnpm dsh --profile headless "fix the failing test in this workspace"
 ```
 
-凭据来自环境或仓库根的 gitignored `.env`：`DEEPSEEK_API_KEY`，可选 `DEEPSEEK_BASE_URL`（`examples/headless-agent/README.md:10-12`）。完整优先级是"继承环境 → `$DSH_HOME/.credentials.yaml` → 调用目录 `.env` → `$DSH_HOME/.env`"（`apps/cli/reference/README.md:76`），归第 03 章。
+凭据来自环境或仓库根的 gitignored `.env`：`DEEPSEEK_API_KEY`，可选 `DEEPSEEK_BASE_URL`（`examples/headless-agent/README.md:10-12`）。完整优先级是"继承环境 → `$DSH_HOME/.credentials.yaml` → 调用目录 `.env` → `$DSH_HOME/.env`"（`apps/cli/reference/README.md:76`），归第 04 章。
 
 `headless` profile 首次使用会从内置模板自动初始化，层是 base + headless（`apps/cli/reference/README.md:13`）；调用目录就是默认 workspace 根（`apps/cli/README.md:16`）。
 
@@ -236,7 +236,7 @@ pnpm run demo:acp
 pnpm run demo:code-mode
 ```
 
-前者是 `node --import tsx packages/examples/acp-demo/src/bin.ts --config examples/acp-agent/cordis.yml`（`package.json:139`）；后者走 `scripts/demo-code-mode.mjs:9-15`，同一个 bin、同一套协议，配置换成 `examples/acp-agent/code-mode.cordis.yml`（Code Mode 工具传输，见第 20 章）。
+前者是 `node --import tsx packages/examples/acp-demo/src/bin.ts --config examples/acp-agent/cordis.yml`（`package.json:139`）；后者走 `scripts/demo-code-mode.mjs:9-15`，同一个 bin、同一套协议，配置换成 `examples/acp-agent/code-mode.cordis.yml`（Code Mode 工具传输，见第 21 章）。
 
 bin 形态是 `dsh-acp-demo [--config path-to-cordis.yml]`（短写 `-c`，默认 `./cordis.yml`）；`DSH_SNAPSHOT=replay` 会选同目录的 `cordis.snapshot.yml`（`packages/examples/acp-demo/README.md:45`）。
 
@@ -257,7 +257,7 @@ bin 形态是 `dsh-acp-demo [--config path-to-cordis.yml]`（短写 `-c`，默�
 - 输出是**已提交消息**，故意牺牲逐 token 延迟换干净结果；未提交的 provider chunk 和重试文本不会泄漏出来（`:34`）。
 - 每个 `session/new` 自带绝对 `cwd`，沙箱的 `workspace-write` 按该 session cwd 解析，所以并发 session 可以各用各的项目根；`DSH_PERMISSION_MODE` 选 `workspace-write` 还是 `danger-full-access`（`examples/acp-agent/README.md:22`）。`workspace-write` 下模型要更大权限会触发 `session/request_permission`，**客户端不答或答不了就按拒绝处理**（`:24`）。
 
-反向的"dsh 当 ACP 客户端去调别人"是另一个包 `packages/subagent/subagent-acp`（`packages/acp/README.md:5`），归第 18 章。
+反向的"dsh 当 ACP 客户端去调别人"是另一个包 `packages/subagent/subagent-acp`（`packages/acp/README.md:5`），归第 19 章。
 
 ## 6. 把 dsh 当库嵌进自己的程序：`boot()`
 

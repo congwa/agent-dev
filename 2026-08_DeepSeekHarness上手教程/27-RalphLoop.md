@@ -1,4 +1,4 @@
-# 26 · RalphLoop
+# 27 · RalphLoop
 
 > 基于 `deepseek-ai/deepseek-harness` v0.1.0-rc.5（commit `47f9438`），2026-08-14 核对。本章讲 dsh 自带的 `ralph` 工具：把一个**不可变目标**交给一串**全新的**子 agent，一轮一个，直到有人报完成、报阻塞，或者用光轮次。
 

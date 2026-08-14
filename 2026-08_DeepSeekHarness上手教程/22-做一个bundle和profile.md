@@ -1,4 +1,4 @@
-# 21 · 做一个 bundle 和 profile
+# 22 · 做一个 bundle 和 profile
 
 > 基于 `deepseek-ai/deepseek-harness` v0.1.0-rc.5（commit `47f9438`），2026-08-14 核对。本章讲怎么把你写好的插件从"只有你本机能加载"变成"别人 `dsh plugin --profile <name> add` 一句话就能装上"。
 
@@ -10,7 +10,7 @@
 - 说清 bundle 名字的两段式解析顺序，以及 `$DSH_HOME/profiles/node_modules` 那个扁平符号链接目录为什么必须存在；
 - 走完一遍从空目录到 `pnpm publish` 的完整流程，并避开 git 安装的 `allowBuilds` 陷阱。
 
-> 四层 patch 叠加的原理（bundle → profile → home → `--patch`）在 [02 章](./02-配置的四层结构.md) 已经讲过，本章只讲"怎么把自己塞进第一层"。
+> 四层 patch 叠加的原理（bundle → profile → home → `--patch`）在 [03 章](./03-配置的四层结构.md) 已经讲过，本章只讲"怎么把自己塞进第一层"。
 
 ## 1. 三个名词，三种交付物
 
@@ -139,7 +139,7 @@ export function apply() {
 
 ### 3.3 如果你的 bundle 是一个"界面"
 
-带自己命令行的 surface bundle（提供一个可运行 app 的 bundle，像 `dsh-headless` 那样）额外插一行 provider 插件。真实样板就是 headless 自己的 startup 插件：`export const inject = ['cmdlineArgs']`、用 `@deepseek-ai/dsh-cmdline` 的 `parseCmdline` 解析自己的 commander program、再把结果 `ctx.provide` 成服务（`packages/bundle/headless/src/startup.ts:16`、`:56`、`:10`）。需要这些 flag 的行 inject 该服务，并在 `!!js` 惰性表达式里读它（`!!js` 是 loader 的延迟求值标签，见 [08 章](./08-插件配置与Schema.md)）：
+带自己命令行的 surface bundle（提供一个可运行 app 的 bundle，像 `dsh-headless` 那样）额外插一行 provider 插件。真实样板就是 headless 自己的 startup 插件：`export const inject = ['cmdlineArgs']`、用 `@deepseek-ai/dsh-cmdline` 的 `parseCmdline` 解析自己的 commander program、再把结果 `ctx.provide` 成服务（`packages/bundle/headless/src/startup.ts:16`、`:56`、`:10`）。需要这些 flag 的行 inject 该服务，并在 `!!js` 惰性表达式里读它（`!!js` 是 loader 的延迟求值标签，见 [09 章](./09-插件配置与Schema.md)）：
 
 ```yaml
 - insert:

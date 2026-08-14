@@ -1,4 +1,4 @@
-# 19 · MCP 与其它扩展点
+# 20 · MCP 与其它扩展点
 
 > 基于 `deepseek-ai/deepseek-harness` v0.1.0-rc.5（commit `47f9438`），2026-08-14 核对。本章把"工具"和"事件"之外剩下的注册面一次讲完：MCP、`ctx.commands`、`ctx.jobs`、skill、schedule、attachment。
 
@@ -26,10 +26,10 @@ dsh 官方自己维护着这张表，两处：`docs/architecture.md:108`–`127`
 | **定时提醒，到点开一轮新对话** | **装 `@deepseek-ai/dsh-schedule` 插件** | 是：`schedule_create` 等三个工具 | `packages/schedule/schedule/README.md:5`、`:29` |
 | **图片二进制不写进会话日志** | **`ctx.attachments`（抽象 seam）** | 消息里只有内容寻址引用 | `docs/subsystems/attachment.md:5` |
 | **接外部 MCP server 的工具** | **每个 server 一个 `dsh-mcp-client` 实例** | 是，名字是 `mcp__<server>__<tool>` | `packages/mcp/mcp-client/README.md:5` |
-| 拦截/否决一次工具调用 | `tools/*` waterfall（第 12 章） | 取决于你的决策 | `docs/architecture.md:119` |
-| 改系统提示词里的一段 | `ctx.systemPrompt.section()`（第 14 章） | 是 | `docs/cookbook/extension-cookbook.md:109` |
-| 委派给子 agent | `ctx.subagents` 提供者注册表（第 18 章） | 通过 `dsh-tool-subagent` | `docs/cookbook/extension-cookbook.md:120` |
-| 接一个新模型厂商 | `ctx.llm` 上 `registerAdapter`（第 03 章） | 否 | `docs/cookbook/extension-cookbook.md:128` |
+| 拦截/否决一次工具调用 | `tools/*` waterfall（第 13 章） | 取决于你的决策 | `docs/architecture.md:119` |
+| 改系统提示词里的一段 | `ctx.systemPrompt.section()`（第 15 章） | 是 | `docs/cookbook/extension-cookbook.md:109` |
+| 委派给子 agent | `ctx.subagents` 提供者注册表（第 19 章） | 通过 `dsh-tool-subagent` | `docs/cookbook/extension-cookbook.md:120` |
+| 接一个新模型厂商 | `ctx.llm` 上 `registerAdapter`（第 04 章） | 否 | `docs/cookbook/extension-cookbook.md:128` |
 | 让模型自己写并运行插件 | `ctx.dynamicCordisRunner` | 间接：模型面工具在 `dsh-tool-cordis` | `docs/subsystems/extensions.md:69`、`packages/extensions/cordis-host-runner/README.md:5` |
 
 判断"要不要新造一个 `ctx.xxx`"的官方口径：一个 **seam** 必须凑齐三个角色——Service Definition（接口）、Service Provider（实现）、Consumer（通常是模型能调的工具），只有一个角色不算 seam（`docs/architecture.md:100`）。本章里 jobs、skill、attachment 都是标准三件套，schedule 故意**不**开放 service，commands 只有注册表没有模型面。
@@ -96,7 +96,7 @@ Schema 定义在 `packages/mcp/mcp-client/src/index.ts:107`–`128`，是一个�
 
 ### 2.4 反方向：dsh 当 MCP server —— 不支持
 
-我在全仓库检索 `@modelcontextprotocol/sdk`（含 `native/`、`python/`、`website/`、`apps/`），server 侧的 `McpServer` / `StdioServerTransport` / `StreamableHTTPServerTransport` **只出现在 mcp-client 自己的测试夹具里**（`packages/mcp/mcp-client/tests/fixture-server.ts:8`–`9`、`tests/mcp-client.e2e.ts:18`–`19`），产品代码一处都没有；`packages/mcp/README.md:9` 的包清单里也只有 `mcp-client/` 一行。所以 rc.5 里 **没有"把 dsh 暴露成 MCP server"这个扩展点**，别去找配置项。要让外部程序驱动 dsh，走的是另一条路：ACP（`packages/acp/acp`）或 JSON-RPC（`examples/jsonrpc-agent`），见第 22 章。
+我在全仓库检索 `@modelcontextprotocol/sdk`（含 `native/`、`python/`、`website/`、`apps/`），server 侧的 `McpServer` / `StdioServerTransport` / `StreamableHTTPServerTransport` **只出现在 mcp-client 自己的测试夹具里**（`packages/mcp/mcp-client/tests/fixture-server.ts:8`–`9`、`tests/mcp-client.e2e.ts:18`–`19`），产品代码一处都没有；`packages/mcp/README.md:9` 的包清单里也只有 `mcp-client/` 一行。所以 rc.5 里 **没有"把 dsh 暴露成 MCP server"这个扩展点**，别去找配置项。要让外部程序驱动 dsh，走的是另一条路：ACP（`packages/acp/acp`）或 JSON-RPC（`examples/jsonrpc-agent`），见第 23 章。
 
 ---
 

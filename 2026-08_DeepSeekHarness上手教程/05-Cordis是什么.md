@@ -1,4 +1,4 @@
-# 04 · Cordis 是什么
+# 05 · Cordis 是什么
 
 > 基于 `deepseek-ai/deepseek-harness` v0.1.0-rc.5（commit `47f9438`），2026-08-14 核对。本章只讲 Cordis 的心智模型——它是什么、几个核心概念怎么咬合、为什么 dsh 非要垫这一层；具体 API 怎么写留给 05–10 章。
 
@@ -86,7 +86,7 @@
 ctx.tools
  ├─ :144  先造好错误对象：cannot get property "tools" without inject
  ├─ :152  你在根 ctx 上（fiber.runtime === null）？→ 直接查表，不要求 inject
- ├─ :153  否则进 internal/get waterfall（一种可被插件层层包住的派发方式，第 10 章专讲）
+ ├─ :153  否则进 internal/get waterfall（一种可被插件层层包住的派发方式，第 11 章专讲）
  ├─ :154  key = 根 ctx 的 isolate 表里 'tools' 那一格的 Symbol
  └─ :155  从你的 ctx（带 shadow 时用 shadow 的）的 fiber 开始往上爬：
        :157  fiber.store['tools'] 有 → :158 返回 getTraceable(你的ctx, 值)
@@ -100,7 +100,7 @@ ctx.tools
 
 1. **不 `inject` 就读不到。** `fiber.store` 是 fiber 激活时对"我声明的依赖"的快照（`fiber.ts:647` 建、`:687` 清），自己 `provide` 的服务随后补写进去（`reflect.ts:293`）。没声明的名字爬到根就抛 `without inject`，**不是返回 `undefined`**。
 2. **另有一条不检查 inject 的旁路**：`ctx.get(name)`（`reflect.ts:233`，混入见 `:219`）。它按 isolate 键直查表，`strict` 默认 `true`，只返回提供方 fiber 处于 ACTIVE 的实现（`reflect.ts:237-243`）。`packages/` 里有 376 处 `ctx.get('…')`（当场 grep），dsh 里"有就用、没有算了"的可选依赖走的就是它——例如 `packages/core/tools/src/index.ts:1020` 读 `codeRuntime`、`packages/core/agent-loop/src/index.ts:359` 读 `sessionPersistence`。
-3. **两条报错文案区分两种失败**：`without inject` = 你压根没声明；`in inactive context` = 你声明了但提供方此刻不可用。第 24 章会把这两条接进诊断流程。
+3. **两条报错文案区分两种失败**：`without inject` = 你压根没声明；`in inactive context` = 你声明了但提供方此刻不可用。第 25 章会把这两条接进诊断流程。
 
 ### 4.3 你拿到的服务，是一个"绑在你身上的影子"
 
@@ -124,7 +124,7 @@ return this.layers.effect(
 
 > 你在自己的插件里调 `ctx.tools.register(...)`，这个工具注册成了**你这个 fiber 的 effect**；你的插件卸载，工具自动消失。你不写一行清理代码，`tools` 服务也不需要知道你是谁。
 
-事件监听同理，`ctx.on()`（`events.ts:288`）走到 `register()`，里面就是 `this.ctx.fiber.effect(...)`（`events.ts:254-260`）。这就是"注册即 effect、卸载即逆序回滚"的物理基础——不是靠约定，是靠 `ctx` 的身份被 Proxy 全程携带。`packages/` 下有 189 处 `ctx.effect(` 调用点，算上 `apps/` 与 `vendor/` 共 212 处（当场 grep），怎么写见第 07 章。
+事件监听同理，`ctx.on()`（`events.ts:288`）走到 `register()`，里面就是 `this.ctx.fiber.effect(...)`（`events.ts:254-260`）。这就是"注册即 effect、卸载即逆序回滚"的物理基础——不是靠约定，是靠 `ctx` 的身份被 Proxy 全程携带。`packages/` 下有 189 处 `ctx.effect(` 调用点，算上 `apps/` 与 `vendor/` 共 212 处（当场 grep），怎么写见第 08 章。
 
 ## 5. fiber：一次插件加载的运行时实例
 
@@ -141,7 +141,7 @@ return this.layers.effect(
 
 迁移不靠调度器，靠一个 epoch 字符串（`fiber.ts:611-639`）：`_refresh()` 把每个依赖的提供方 fiber uid 拼成 `":3:7"` 这样的串，任一依赖缺失就写成 `__INACTIVE__`；`_setEpoch()` 看到从 `__INACTIVE__` 变成别的就 `_reload()`（`:631-633`），其余任何变化——包括从一个非 `__INACTIVE__` 串变成另一个——都走 `_unload()`（`:634-637`），而 `_unload()` 收尾时若 epoch 已不是 `__INACTIVE__`，会再自动 `_reload()` 回来（`fiber.ts:688-694`）。后果值得记住：
 
-- **依赖的提供方换了一个 fiber（uid 变了），epoch 就变，你的插件会被完整卸载重装。** 这不是 bug，是热重载能干净工作的原因（第 07 章）。
+- **依赖的提供方换了一个 fiber（uid 变了），epoch 就变，你的插件会被完整卸载重装。** 这不是 bug，是热重载能干净工作的原因（第 08 章）。
 - `effect()` 自己的 disposer 是严格**逆序**串行执行的（`fiber.ts:431` 的 `.reverse()`）；fiber 整体 `_unload()` 时把 `_disposables.clear()` 拿到的逆序列表（`utils.ts:27-31` 的 `values.reverse()`）交给 `Promise.all` 并发跑（`fiber.ts:676`）——逆序决定的是启动顺序，不是串行等待。
 
 ## 6. plugin tree：`cordis.yml` 的一行 = 树上一个节点
@@ -151,7 +151,7 @@ Cordis 本体不认识 YAML，是 loader 插件把配置翻译成 `ctx.plugin()`
 ```
 root Context                                             app-boot/src/index.ts:764
 └── Loader                                                                  :771
-    └── Include(id: include)  ← 四层配置叠加后的那份清单，见第 02 章    :518-523
+    └── Include(id: include)  ← 四层配置叠加后的那份清单，见第 03 章    :518-523
         ├── llm      @deepseek-ai/dsh-llm      provide 'llm'    base patch:24
         ├── session  @deepseek-ai/dsh-session  provide 'sessions'         :27
         ├── agent    @deepseek-ai/dsh-agent    provide 'agents'           :58
@@ -223,7 +223,7 @@ root:  isolate = { fs: Symbol(fs), tools: Symbol(tools) }
 | 归属判定 | 靠调用方自觉 | — | 服务方法里的 `this.ctx` 就是调用方（`utils.ts:176`） |
 | 同名多实现 | 手工 qualifier / token | — | isolate realm，配置一行（`isolate.ts:77-89`） |
 | 拓扑 | 类依赖图 | 一维数组 | 作用域树 |
-| 拦截 | AOP 装饰器 | 全局一条 `next()` 链 | 具名 waterfall 事件（第 10 章有全表） |
+| 拦截 | AOP 装饰器 | 全局一条 `next()` 链 | 具名 waterfall 事件（第 11 章有全表） |
 
 > 表里"传统 DI 容器 / 洋葱中间件"两列是通用常识对照，不是从本仓库验证出来的；Cordis 那一列每格都有行号。
 
