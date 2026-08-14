@@ -5,6 +5,40 @@
 
 ---
 
+三种手段先并排看一眼形状,再逐个展开细节:
+
+```mermaid
+flowchart LR
+    subgraph LOCK["悲观锁"]
+        L1["<b>核心思路</b><br/>假设一定冲突,直接排队"]
+        L2["<b>遇到并发</b><br/>后来者等待,依次执行"]
+        L3["<b>代价</b><br/>并发度退化为1,锁内忌网络IO"]
+        L1 --> L2 --> L3
+    end
+    subgraph CASG["CAS"]
+        C1["<b>核心思路</b><br/>随意读改,提交时比对旧值"]
+        C2["<b>遇到并发</b><br/>后来者比对失败,重试"]
+        C3["<b>代价</b><br/>需要重试循环,防ABA"]
+        C1 --> C2 --> C3
+    end
+    subgraph INC["原子增量"]
+        I1["<b>核心思路</b><br/>把算式交给数据库"]
+        I2["<b>遇到并发</b><br/>数据库行级自动排队"]
+        I3["<b>代价</b><br/>仅限可交换操作"]
+        I1 --> I2 --> I3
+    end
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class L1,C1,I1 entry
+    class L2,C2,I2 main
+    class L3 danger
+    class C3,I3 note
+```
+
 ## 2.1 路线一:悲观锁——先把门锁上
 
 ```go
@@ -26,6 +60,31 @@ lock.Unlock()                 // 开锁
 2. **持锁期间做慢操作 = 灾难**。锁内夹一次网络调用(几百毫秒~几秒),所有等锁者陪跑;上游一超时,等待队伍雪崩
 3. **死锁**。A 持锁 1 等锁 2,B 持锁 2 等锁 1,双方永远僵住
 4. **持有者崩溃的善后**。需要设计锁超时;超时后原持有者又恢复了怎么办——分布式锁的经典难题
+
+把这四条代价摆到一条链路上看:
+
+```mermaid
+flowchart TD
+    A["<b>100 个并发请求</b><br/>同一用户同时发起"]
+    B["<b>抢锁</b><br/>只有一个能进入"]
+    C["<b>串行执行</b><br/>并发度退化为 1"]
+    D["<b>锁内夹网络调用</b><br/>几百毫秒到几秒"]
+    E["<b>等待队伍雪崩</b><br/>上游一超时,连锁失败"]
+    F["<b>获取顺序不一致</b><br/>A等锁2,B等锁1,双方僵住"]
+
+    A --> B --> C
+    C -- "锁内做慢操作" --> D --> E
+    C -- "两把锁交叉获取" --> F
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,C main
+    class D,E,F danger
+```
 
 由此得出锁的使用纪律:**范围越小越好,锁内绝不做网络 IO,能不用就不用。**
 
@@ -111,6 +170,32 @@ for {
 }
 ```
 
+画成流程图,失败之后回到哪一步就一目了然:
+
+```mermaid
+flowchart TD
+    S["<b>进入循环</b><br/>读当前值 old"]
+    N["<b>计算 new</b><br/>基于 old 算出新值"]
+    T["<b>CAS 位置,old,new</b><br/>原子比较并交换"]
+    OK["<b>成功</b><br/>跳出循环"]
+    FAIL["<b>失败</b><br/>说明有人插队"]
+
+    S --> N --> T
+    T -- "位置值仍是 old" --> OK
+    T -- "位置值已变" --> FAIL
+    FAIL -- "用最新值重算" --> S
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class S entry
+    class N,T main
+    class OK data
+    class FAIL note
+```
+
 ### 2.2.5 CAS 的四个坑
 
 **坑 1:ABA 问题。** CAS 比较的是"值",不是"有没有被动过":
@@ -122,6 +207,23 @@ B 把 100 改成 200
 C 把 200 又改回 100
    ...A 恢复...
 A 的 CAS(100 → 150) → 成功(但世界其实已被动过两次)
+```
+
+换成三个执行者的时序看,更容易看出 A 完全不知道中间发生过什么:
+
+```mermaid
+sequenceDiagram
+    participant Ta as 线程A
+    participant Tb as 线程B
+    participant Tc as 线程C
+    participant V as 共享值
+
+    Ta->>V: 读到 100
+    Note over Ta: 被挂起,准备做 CAS
+    Tb->>V: 改成 200
+    Tc->>V: 又改回 100
+    Ta->>V: CAS 100 换 150
+    V-->>Ta: 成功,但值已被悄悄改过两次
 ```
 
 对纯数字加减通常无害;但当值代表某种"身份"或"版本"(如令牌)时会出大事。
@@ -180,6 +282,36 @@ UPDATE users SET balance = balance - 3 WHERE id = 2
            (sub2api 只在优惠码核销这类低频场景使用)
 ```
 
+同一条决策链画成判定树,分支条件更好对照:
+
+```mermaid
+flowchart TD
+    Q1["<b>操作可交换吗</b><br/>纯加减,顺序无关"]
+    R1["<b>选原子增量</b><br/>UPDATE设x=x+δ,无失败分支"]
+    Q2["<b>能否检测冲突</b><br/>靠值变了没判断"]
+    Q3["<b>冲突频繁吗</b><br/>中间要做慢操作吗"]
+    R2["<b>选CAS</b><br/>快照,慢慢干,回来验货"]
+    R3["<b>选锁</b><br/>冲突极频繁,重试不如排队"]
+    R4["<b>选锁</b><br/>必须独占,锁内禁止网络IO"]
+
+    Q1 -- "是" --> R1
+    Q1 -- "否" --> Q2
+    Q2 -- "能" --> Q3
+    Q2 -- "不能" --> R4
+    Q3 -- "冲突罕见或有慢操作" --> R2
+    Q3 -- "冲突极频繁" --> R3
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class Q1,Q2,Q3 entry
+    class R1 data
+    class R2 main
+    class R3,R4 danger
+```
+
 再补一条铁律:
 
 > **中间要调外部 API 的流程,绝对不能用锁,只能用 CAS。**
@@ -189,6 +321,28 @@ UPDATE users SET balance = balance - 3 WHERE id = 2
 ## 2.5 附:CAS 在进程内的四种日常形态
 
 CAS 不只用于钱。sub2api 的 Go 代码里,进程内 atomic CAS 有四种常见用法:
+
+```mermaid
+flowchart TD
+    C0["<b>进程内 atomic CAS</b><br/>四种常见用法"]
+    P1["<b>①单飞守卫</b><br/>0→1抢执行权,防重入"]
+    P2["<b>②单调最大值</b><br/>只许变大,不能直接Store"]
+    P3["<b>③日志降频</b><br/>谁抢到时间窗谁打日志"]
+    P4["<b>④状态机流转</b><br/>抢占任务所有权,避免重复处理"]
+
+    C0 --> P1
+    C0 --> P2
+    C0 --> P3
+    C0 --> P4
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class C0 entry
+    class P1,P2,P3,P4 main
+```
 
 **① 单飞守卫(0→1 抢执行权)**——定时任务防重入:
 

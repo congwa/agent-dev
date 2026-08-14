@@ -32,6 +32,35 @@ access_token 快过期时,要拿 refresh_token 去上游换一对新的。这个
 
 只剩一条路:**拍快照 → 无锁地打上游 → 回来 CAS 写回。**
 
+两条路摆在一起看,分岔点就是"要不要在打上游期间攥着锁":
+
+```mermaid
+flowchart TD
+    A["<b>发现token快过期</b><br/>access_token即将失效"]
+    B["<b>锁方案</b><br/>SELECT...FOR UPDATE锁住该行"]
+    C["<b>持锁打上游</b><br/>几百毫秒到几秒"]
+    D["<b>全部并发请求排队</b><br/>连接池耗干,30秒连锁堵塞"]
+    E["<b>快照方案</b><br/>读出当前凭证,不加锁"]
+    F["<b>无锁打上游</b><br/>换新凭证"]
+    G["<b>CAS写回</b><br/>WHERE credentials=出发时快照"]
+
+    A --> B
+    A --> E
+    B --> C --> D
+    E --> F --> G
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,C main
+    class D danger
+    class E,F main
+    class G data
+```
+
 ## 5.2 没有 CAS:两种事故
 
 裸写法:
@@ -60,6 +89,25 @@ t6                                      B 的错误处理:
 ```
 
 t6 的荒谬之处:**数据库里躺着一份完全健康的新凭证,但 B 基于自己的过期视角,把好端端的账号打成了砖。**
+
+换成消息视角看谁给谁发了什么:
+
+```mermaid
+sequenceDiagram
+    participant WA as Worker A
+    participant WB as Worker B
+    participant DB as 数据库
+    participant UP as 上游OAuth
+
+    WA->>DB: 读取凭证 rt_111
+    WB->>DB: 读取凭证 rt_111
+    WA->>UP: 用 rt_111 换新凭证
+    UP-->>WA: 成功返回 rt_222,rt_111同时作废
+    WA->>DB: 无条件覆盖写入 rt_222
+    WB->>UP: 用 rt_111 换新凭证
+    UP-->>WB: 失败 invalid_grant
+    WB->>DB: 直接标记 status=error
+```
 
 ### 事故二:写入顺序随机,结果随机
 
@@ -105,6 +153,28 @@ t7                                      发现 DB 里钥匙已从 rt_111 变成 
                                           是有人抢先刷新成功了"
 t8                                      按成功处理,直接用 DB 里的
                                         新凭证返回 ✓                  {rt_222} 完好
+```
+
+同一段时序换成消息视角,能看清"只有一个赢"这件事具体发生在哪一步:
+
+```mermaid
+sequenceDiagram
+    participant WA as Worker A
+    participant WB as Worker B
+    participant DB as 数据库
+    participant UP as 上游OAuth
+
+    WA->>DB: 快照凭证 rt_111
+    WB->>DB: 快照凭证 rt_111
+    WA->>UP: 用 rt_111 换新凭证
+    UP-->>WA: 成功返回 rt_222
+    WA->>DB: CAS写入,WHERE credentials=快照
+    DB-->>WA: 匹配成功,影响1行,赢
+    WB->>UP: 用 rt_111 换新凭证
+    UP-->>WB: 失败 invalid_grant
+    WB->>DB: 回读最新凭证
+    DB-->>WB: 钥匙已变成 rt_222
+    WB->>WB: 判定为竞争,不是账号损坏
 ```
 
 ### t6-t8:同一个错误,先回读再定性
@@ -153,6 +223,32 @@ SELECT ... FROM updated                     -- 只有 CAS 赢了才会产生这�
 
 **赢家才产生失效事件,且两者同生共死**(一条语句,天然同事务)。这解决了经典裂缝:"数据改成功了,但通知缓存失效的消息丢了"。
 
+三个配套细节拼起来,就是"expected 该有多宽"加"赢了之后要不要顺带通知别人":
+
+```mermaid
+flowchart TD
+    A["<b>出发前拍快照</b><br/>credentials+_token_version+proxy_id"]
+    B["<b>CAS写回条件</b><br/>WHERE三者与快照完全一致"]
+    C["<b>匹配成功</b><br/>写入新凭证"]
+    D["<b>同一条SQL插入</b><br/>scheduler_outbox失效事件"]
+    E["<b>不匹配</b><br/>0行受影响,本次结果作废"]
+
+    A --> B
+    B -- "CAS赢" --> C
+    C --> D
+    B -- "CAS输" --> E
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B main
+    class C,D data
+    class E danger
+```
+
 ## 5.5 CAS 落空的另一个分支:结果不明时宁可停手
 
 还有一条极保守的路径:CAS 执行时**数据库报错**(不是输,是不知道成没成):
@@ -178,6 +274,35 @@ sub2api 在"打上游"之前还有三道闸门:
 1. Redis 分布式锁               ← 拦多实例之间的并发
 2. 拿到锁后:重读 DB + 二次检查   ← ★ 排完队先确认还需不需要刷新
 3. 都过了才打上游 → CAS 写回
+```
+
+摊成完整流程看:判断快过期后先过两道锁,拿到锁还要重读一次 DB 才决定要不要真的打上游:
+
+```mermaid
+flowchart TD
+    A["<b>判断即将过期</b><br/>access_token快过期"]
+    B["<b>进程内互斥锁</b><br/>拦同进程并发"]
+    C["<b>Redis分布式锁</b><br/>拦多实例并发"]
+    D["<b>拿到锁后重读DB</b><br/>二次检查是否还需要刷新"]
+    E["<b>仍需要刷新</b><br/>打上游+CAS写回"]
+    F["<b>已被别人刷新过</b><br/>直接复用DB里的新凭证"]
+    G["<b>其余请求排队等待</b><br/>抢锁失败,阻塞在锁上"]
+
+    A --> B --> C --> D
+    D -- "需要刷新" --> E
+    D -- "不需要刷新" --> F
+    C -- "抢锁失败" --> G
+    G --> D
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,C,D main
+    class E,F data
+    class G note
 ```
 
 正常路径下重放:
@@ -220,6 +345,32 @@ B 又拿 rt_111 来请求           ← 上游判定:疑似盗用
 ---
 
 ## 本章要点(高危场景 CAS 完整套路)
+
+八条要点收敛成一条主线:识别出高危场景后,锁和 CAS 各管一半,谁也不替代谁:
+
+```mermaid
+flowchart TD
+    A["<b>一次性资源+中间夹慢IO</b><br/>如OAuth refresh_token轮换"]
+    B["<b>禁止持锁打外部API</b><br/>快照→干活→CAS写回"]
+    C["<b>expected覆盖全部依赖状态</b><br/>凭证+版本号+proxy_id"]
+    D["<b>错误先回读再定性</b><br/>invalid_grant未必是账号坏了"]
+    E["<b>锁只管性能</b><br/>把上游调用压到1次"]
+    F["<b>CAS只管正确性</b><br/>锁全坏也不影响最终状态对"]
+
+    A --> B --> C --> D
+    B --> E
+    B --> F
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B main
+    class C,D note
+    class E,F data
+```
 
 ```
 ① 识别:一次性资源 + 中间夹慢 IO → 禁止持锁,只能"快照→干活→CAS 写回"

@@ -30,6 +30,35 @@
 >
 > 实用判据:**看写回的是表达式(`balance - $1`)还是应用算好的字面量(`97`)。前者安全,后者必有缝。**
 
+两条路径拆成分叉图,能看清缝隙具体卡在哪一步:
+
+```mermaid
+flowchart LR
+    subgraph S1 ["应用层读-改-写(有缝)"]
+        A1["<b>SELECT balance</b><br/>读到 100,快照留在应用侧"]
+        A2["<b>应用算减法</b><br/>100-3=97,缝隙在此"]
+        A3["<b>UPDATE 写死值</b><br/>无条件覆盖成 97"]
+        A1 --> A2 --> A3
+    end
+
+    subgraph S2 ["单条 UPDATE(无缝)"]
+        B1["<b>发送表达式</b><br/>balance = balance - 3"]
+        B2["<b>引擎锁行</b><br/>锁内读到最新值"]
+        B3["<b>锁内求值写回</b><br/>读改写压成一步"]
+        B1 --> B2 --> B3
+    end
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A1 entry
+    class A2,A3 danger
+    class B1 entry
+    class B2,B3 main
+```
+
 ## 3.2 逐帧:两个 UPDATE 撞在同一行
 
 A 扣 3、B 扣 2,初始余额 100:
@@ -50,6 +79,28 @@ t5                                       被唤醒,拿到锁
 t6                                       COMMIT                        95 ✓
 ```
 
+换成时序图看谁在什么时刻拿到什么值:
+
+```mermaid
+sequenceDiagram
+    participant TxA as 事务A
+    participant TxB as 事务B
+    participant Row as 数据行(balance)
+
+    TxA->>Row: UPDATE balance-3,加排他锁
+    Note over Row: 100,A持锁
+    TxB->>Row: UPDATE balance-2,尝试加锁
+    Note over TxB: 阻塞排队
+    TxA->>Row: 锁内读100,算97,写新版本
+    TxA->>Row: COMMIT,释放锁
+    Note over Row: 97
+    Row-->>TxB: 被唤醒
+    Note over TxB: 重新读最新值97,不是排队前的100
+    TxB->>Row: 算97-2=95,写入
+    TxB->>Row: COMMIT
+    Note over Row: 95,最终结果
+```
+
 **t5 的"重新读最新值"是全部问题的答案。** B 被唤醒后,PostgreSQL 不会使用 B 排队前看到的旧快照,而是**基于 A 提交后的最新版本重新求值**——连 WHERE 条件也重新检查一遍。这个机制叫 **EvalPlanQual(EPQ 重验)**,是 READ COMMITTED 隔离级别下 UPDATE 的标准行为。
 
 最终 100 - 3 - 2 = 95,分毫不差。无论多少并发,效果等价于全部串行执行。
@@ -67,6 +118,32 @@ t1   A 锁行,验 WHERE: 4>=3 ✓,扣成 1,提交
 t2   B 醒来拿锁,EPQ 用最新值重验 WHERE: 1>=3 ✗
      → 条件不满足 → 这条 UPDATE 影响 0 行
 t3   B 的代码看到"影响 0 行",走余额不足的分支
+```
+
+拆成判定树,B 醒来后走的是哪条分支一目了然:
+
+```mermaid
+flowchart TD
+    W1["<b>B 被唤醒</b><br/>拿到行锁"]
+    W2["<b>EPQ 重验 WHERE</b><br/>用最新值重新判断,不用排队前的旧值"]
+    W3["<b>条件仍然满足</b><br/>正常执行减法"]
+    W4["<b>条件不再满足</b><br/>最新余额已不够扣"]
+    W5["<b>正常写回</b><br/>影响 1 行"]
+    W6["<b>这条 UPDATE 影响 0 行</b><br/>不写回任何值"]
+    W7["<b>应用看到影响 0 行</b><br/>走余额不足分支"]
+
+    W1 --> W2
+    W2 -- "满足" --> W3 --> W5
+    W2 -- "不满足" --> W4 --> W6 --> W7
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class W1,W2 entry
+    class W3,W5 data
+    class W4,W6,W7 danger
 ```
 
 B **不可能**基于旧值 4 通过检查、再把余额扣穿而不自知——**守卫和减法在同一把锁内,是一体的**。这条 SQL 等价于一个"条件版原子减法":满足谓词才减,判断与减之间无缝。
@@ -108,6 +185,27 @@ B **不可能**基于旧值 4 通过检查、再把余额扣穿而不自知—�
    xmax 会留在行上直到事务结束——释放锁也不需要回来擦除(见下)
 ```
 
+四层锁串成一条链,能看清"加行锁"到底发生在哪一层:
+
+```mermaid
+flowchart TD
+    L1["<b>①表级锁</b><br/>ROW EXCLUSIVE,只挡DDL"]
+    L2["<b>②页级buffer锁</b><br/>保护读写8KB内存页,微秒级"]
+    L3["<b>③行级检查xmax</b><br/>为空就写入当前xid,这就是加行锁"]
+    L4["<b>④无需保持动作</b><br/>xmax留到事务结束,释放不用回来擦除"]
+
+    L1 --> L2 --> L3 --> L4
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class L1,L2 entry
+    class L3 main
+    class L4 note
+```
+
 ### 撞锁的一方如何等待、如何唤醒
 
 B(xid=1002)撞上 A(xid=1001)锁着的行:
@@ -121,6 +219,26 @@ t3   ★ 等在哪里?不是等"行锁",而是——
 t4   A 提交 → A 的事务锁自动释放 → B 立刻被唤醒
 t5   B 顺着旧行头的指针找到 A 写的新版本行(97)
      EPQ 重验 WHERE → 通过 → 把新版本行的 xmax 写成 1002 → 造自己的新版本(95)
+```
+
+B 到底等在谁身上,用时序图把那一跳间接关系画出来:
+
+```mermaid
+sequenceDiagram
+    participant TxA as 事务1001
+    participant TxB as 事务1002
+    participant Row as 目标行
+
+    TxB->>Row: 读行头,发现xmax=1001
+    TxB->>TxA: 查询事务1001是否存活
+    Note over TxA: 存活中
+    TxB->>TxA: 尝试获取事务1001的事务锁
+    Note over TxB: 必然阻塞,等在这把锁上
+    TxA->>TxA: COMMIT
+    Note over TxA: 事务锁自动释放
+    TxA-->>TxB: 立刻唤醒
+    TxB->>Row: 顺指针找到A写的新版本行
+    TxB->>Row: EPQ重验WHERE通过,写入xmax=1002
 ```
 
 精确表述:**PostgreSQL 里"等行锁"的实现是"等在持有者的事务锁上"**。这个间接一跳非常聪明——不管 A 锁了 100 万行,所有等待者都只等 A 那一把事务锁,A 提交的瞬间统一唤醒,无需逐行通知。
@@ -165,6 +283,28 @@ t5   B 顺着旧行头的指针找到 A 写的新版本行(97)
 PostgreSQL:  单条 UPDATE          → 行锁 + EPQ 保证语句内原子
 Redis:       Lua 脚本              → 单线程引擎,脚本执行期间不插入任何其他命令
 Go 进程内:   atomic.AddInt64       → CPU 的 LOCK XADD 指令,硬件保证
+```
+
+三个化身并排收敛到同一个原则:
+
+```mermaid
+flowchart LR
+    P["<b>PostgreSQL</b><br/>单条UPDATE,行锁+EPQ"]
+    R["<b>Redis</b><br/>Lua脚本,单线程引擎不插队"]
+    G["<b>Go进程内</b><br/>atomic.AddInt64,CPU的LOCK XADD指令"]
+    U["<b>统一原则</b><br/>应用只发意图,不发结果"]
+
+    P --> U
+    R --> U
+    G --> U
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class P,R,G main
+    class U data
 ```
 
 原则统一:**不把"读"暴露给应用层。由持有串行化能力的那一层(引擎/单线程/CPU 指令)自己完成读-改-写;应用层只发"意图"(减 3),不发"结果"(=97)。**

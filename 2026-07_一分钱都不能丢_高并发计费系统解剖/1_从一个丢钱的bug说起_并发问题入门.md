@@ -5,6 +5,33 @@
 
 ---
 
+两个概念背后是同一个病根,先画一张图搭个框架,细节后面逐段展开:
+
+```mermaid
+flowchart TD
+    A["<b>读-改-写分离</b><br/>读和写之间留了缝隙"]
+    B["<b>丢失更新</b><br/>各自读旧值 写回时互相覆盖"]
+    C["<b>TOCTOU</b><br/>检查时对 动手时已过期"]
+    D["<b>病根</b><br/>基于过期认知做写入"]
+    E["<b>解法方向</b><br/>把读改写焊成原子整体"]
+
+    A --> B
+    A --> C
+    B --> D
+    C --> D
+    D --> E
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,C danger
+    class D note
+    class E data
+```
+
 ## 1.1 一段看起来完全没问题的代码
 
 以充值系统为例。账户余额 100 元,用户存入 50 元。最直接的实现:
@@ -37,6 +64,23 @@ writeBalance(balance)         // ③ 写:把 150 写回数据库
 
 **50 元凭空消失。** 这个现象称为**丢失更新(Lost Update)**。
 
+把这张表格换成时序图,两个线程和数据库之间的交互更清楚:
+
+```mermaid
+sequenceDiagram
+    participant ThreadA as 线程 A
+    participant ThreadB as 线程 B
+    participant DB as 数据库余额
+
+    ThreadA->>DB: 读余额 100
+    ThreadB->>DB: 读余额 100
+    Note over ThreadA: 算出 150
+    Note over ThreadB: 算出 150
+    ThreadA->>DB: 写入 150
+    ThreadB->>DB: 写入 150
+    Note over DB: 应为200 实际150 50元丢失
+```
+
 ### 丢失的原因
 
 关键在时刻 2:线程 B 读到的 100,在它写回(时刻 6)时**已经过期**——A 在时刻 5 已把余额改成 150。B 并不知情,拿着自己在时刻 2 拍下的"旧照片"算出 150,整体覆盖上去,把 A 的成果抹掉了。
@@ -64,6 +108,31 @@ if 余额 >= 3 {      // ① 检查:够
 ```
 
 **同样的病。** 两个并发请求都在①看到"余额 4 元,够扣 3 元",随后都执行②,余额变成 -2——检查形同虚设。
+
+画成图,两条并发路径怎么绕开检查就一目了然:
+
+```mermaid
+flowchart TD
+    A["<b>请求一 检查</b><br/>看到余额4元 够扣3元"]
+    B["<b>请求二 检查</b><br/>看到余额4元 够扣3元"]
+    C["<b>请求一 动手</b><br/>执行扣3元"]
+    D["<b>请求二 动手</b><br/>执行扣3元"]
+    E["<b>结果</b><br/>检查形同虚设 余额变为负数"]
+
+    A --> C
+    B --> D
+    C --> E
+    D --> E
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A,B entry
+    class C,D main
+    class E danger
+```
 
 这种"检查时是对的,动手时已经不对了"的问题有专门的名字:
 
@@ -102,6 +171,42 @@ TOCTOU 的变体无处不在,后续每一章都会遇到:
 路线 1:悲观锁 —— 上锁,不许别人进来,做完再开门(堵住缝)
 路线 2:CAS   —— 各自随意做,但提交时检查"读到的旧值还作数吗"(检测插队)
 路线 3:原子增量 —— 不把"算好的结果"写回去,把"算式"交给数据库,由它排队执行(消灭应用层的读)
+```
+
+画成图,三条路线堵缝隙的方式差在哪一眼能看出来:
+
+```mermaid
+flowchart LR
+    subgraph R1["路线一 悲观锁"]
+        direction TB
+        L1["上锁独占"]
+        L2["其他人等待"]
+        L3["解锁后放行"]
+        L1 --> L2 --> L3
+    end
+    subgraph R2["路线二 CAS"]
+        direction TB
+        C1["各自先做"]
+        C2["提交时检查旧值是否仍作数"]
+        C3["不作数就重试"]
+        C1 --> C2 --> C3
+    end
+    subgraph R3["路线三 原子增量"]
+        direction TB
+        M1["不算结果只交算式"]
+        M2["数据库排队执行"]
+        M3["天然无缝隙"]
+        M1 --> M2 --> M3
+    end
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class L1,C1,M1 entry
+    class L2,C2,M2 main
+    class L3,C3,M3 data
 ```
 
 三条路线没有绝对优劣,只有场景匹配。整本书的案例,本质都在演示"什么场景配什么武器"。
