@@ -288,7 +288,7 @@ Use this skill to run relevant local evidence once before a `deepseek-harness` p
 
 上面这些行都没有 `config:` 块，所以本章引的默认值（`toolCallTimeoutMs: 60000`、`maxConcurrentJobsPerOwner: 10`、`maxConsecutiveWakes: 3`、`enableRunInBackground: true`、`reconnect.*`）就是 shipped 组合的实际生效值。
 
-> 想知道这一点上 Pi / Codex / LangChain 怎么做，见 [三个 agent 系统源码解剖](../2026-08_三个agent系统源码解剖/00-总览与阅读指南.md)。
+> 想知道这一点上 Pi / Codex / LangChain 怎么做，见 [五个 agent 系统源码解剖](../2026-08_五个agent系统源码解剖/00-总览与阅读指南.md)。
 
 ---
 

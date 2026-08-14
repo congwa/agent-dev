@@ -48,7 +48,7 @@ harness 的主干能力都能追到一行 `super(ctx, '<名字>')`——`package
 
 抽象那三行是重点：`FileSystem`、`ShellExecutor`、`JobRegistry` 自己不干活，只定义契约；子类的 `super(ctx)` 把自己注册成 `ctx.fs` / `ctx.shell` / `ctx.jobs`。换沙箱实现只需要在配置里换一行，所有消费者不动。`JobRegistry` 还多挡了一道：`abstract` 在运行时会被擦掉，所以它在构造函数里检查 `new.target`，把抽象包直接写进配置会当场抛 `@deepseek-ai/dsh-jobs is the abstract job registry seam; load an implementation such as @deepseek-ai/dsh-jobs-local instead`（`packages/jobs/jobs/src/index.ts:67-69`）。
 
-> 想知道这一点上 Pi / Codex / LangChain 怎么做，见 [三个 agent 系统源码解剖](../2026-08_三个agent系统源码解剖/00-总览与阅读指南.md)。
+> 想知道这一点上 Pi / Codex / LangChain 怎么做，见 [五个 agent 系统源码解剖](../2026-08_五个agent系统源码解剖/00-总览与阅读指南.md)。
 
 ## 2. 消费：`inject` 是开关，不是文档
 

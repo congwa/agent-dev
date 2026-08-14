@@ -402,7 +402,7 @@ export function apply(ctx: Context): void {
 
 术语表把这条边界写死了：Ralph 是"面向不可变目标的前台全新 agent 工作流"，**不是**同会话目标（`docs/glossary.md:43`）；而驱动器 README 反过来声明自己"故意不 spawn 新 agent、不 fork 会话前缀、不实现 Ralph 式独立尝试"（`packages/goal/goal-round-driver/README.md:61`）。选哪个的判据很简单：**上下文是资产就用 goal，上下文是包袱就用 Ralph。**
 
-> 想知道这一点上 Pi / Codex / LangChain 怎么做，见 [三个 agent 系统源码解剖](../2026-08_三个agent系统源码解剖/00-总览与阅读指南.md)。
+> 想知道这一点上 Pi / Codex / LangChain 怎么做，见 [五个 agent 系统源码解剖](../2026-08_五个agent系统源码解剖/00-总览与阅读指南.md)。
 
 ## 11. 本章未确认
 

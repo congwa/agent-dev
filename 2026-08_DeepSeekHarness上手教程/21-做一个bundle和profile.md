@@ -278,7 +278,7 @@ allowBuilds:
 - **scoped 包**：公开发布需要 `"publishConfig": { "access": "public" }`，自带 bundle 都这么写（`packages/bundle/base/package.json:5-7`）。
 - **README**：仓库对**自己的** workspace 包有一套强制模板——末尾必须是 `## Model Experience`（下含 `What the model sees` / `Token effect` / `KV Cache effect`）接 `## Known Limitations and Deferred Work`（见 `docs/cookbook/adding-a-package.md:73-107`，由 `scripts/verify-package-readme-model-experience.ts` 与 `scripts/verify-package-readme-limitations.ts` 校验）。这套模板**只约束仓库内部包**，对外部插件没有任何强制；但其中"这个包让模型多看到什么 / 花多少 token / 会不会打断 KV cache / 有哪些已知缺口"几个问题恰好是别人装你插件前最想知道的，值得照抄结构。至于"我这个 bundle 插了哪些 id、覆盖了哪些 id、每行 config 有哪些字段"——文档没规定要写，但从第 3.2 节的覆盖规则看，用户想改你的行就必须知道 id，不写等于让人去翻 `cordis.patch.yml`。
 
-> 想知道这一点上 Pi / Codex / LangChain 怎么做，见 [三个 agent 系统源码解剖](../2026-08_三个agent系统源码解剖/00-总览与阅读指南.md)。
+> 想知道这一点上 Pi / Codex / LangChain 怎么做，见 [五个 agent 系统源码解剖](../2026-08_五个agent系统源码解剖/00-总览与阅读指南.md)。
 
 ## 9. 常见报错对照
 

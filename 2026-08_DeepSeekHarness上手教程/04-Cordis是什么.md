@@ -241,7 +241,7 @@ root:  isolate = { fs: Symbol(fs), tools: Symbol(tools) }
 
 少任何一条，"一切皆插件"都会退化成"一堆插件加一个不能动的核"。
 
-> 想知道这一点上 Pi / Codex / LangChain 怎么做，见 [三个 agent 系统源码解剖](../2026-08_三个agent系统源码解剖/00-总览与阅读指南.md)。
+> 想知道这一点上 Pi / Codex / LangChain 怎么做，见 [五个 agent 系统源码解剖](../2026-08_五个agent系统源码解剖/00-总览与阅读指南.md)。
 
 ## 10. 三个最容易踩的坑
 

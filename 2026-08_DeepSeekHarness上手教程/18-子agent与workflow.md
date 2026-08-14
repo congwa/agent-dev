@@ -69,7 +69,7 @@
 
 **第三层：preset 决定子 agent 看得见哪些工具。** 子 agent **不会**重新挂载 preset，而是通过 `composeFrom()` 绑到父正在跑的那份 **standing composition**（父这次会话实际跑着的那棵插件树）上（`packages/preset/agent-presets/README.md:35`）。所以父在 `minimal` preset 下，子也在 `minimal` 下。而 `apps/cli/config/agent-presets/minimal/agent.cordis.yml` 全文 62 行、`subagent` 与 `workflow` 一个字都没有——从 minimal 出发的会话根本没有委派工具。
 
-> 想知道这一点上 Pi / Codex / LangChain 怎么做，见 [三个 agent 系统源码解剖](../2026-08_三个agent系统源码解剖/00-总览与阅读指南.md)。
+> 想知道这一点上 Pi / Codex / LangChain 怎么做，见 [五个 agent 系统源码解剖](../2026-08_五个agent系统源码解剖/00-总览与阅读指南.md)。
 
 ### 最小可用配置
 

@@ -251,7 +251,7 @@ expect(ctx.fiber.getEffects().map(effect => effect.label)).toContain('store.orde
 
 这就是**给每个 effect 起 label 的实际收益**：`agentLoop.lifecycle(<sessionId>)`（`packages/core/agent-loop/src/index.ts:530`）、`schedule.runtime()`（`packages/schedule/schedule/src/index.ts:65`）、`tools.presentAs()` 这类名字在诊断输出里能一眼定位是谁没退干净。反过来，插件没反应但也不报错，多半是 fiber 停在 PENDING（缺依赖），排查脚本见 `docs/cordis-tutorial/06-composition-and-hmr.md:67`–`83`，更系统的诊断留到第 24 章。
 
-> 想知道这一点上 Pi / Codex / LangChain 怎么做，见 [三个 agent 系统源码解剖](../2026-08_三个agent系统源码解剖/00-总览与阅读指南.md)。
+> 想知道这一点上 Pi / Codex / LangChain 怎么做，见 [五个 agent 系统源码解剖](../2026-08_五个agent系统源码解剖/00-总览与阅读指南.md)。
 
 ## 10. 本章未确认
 
