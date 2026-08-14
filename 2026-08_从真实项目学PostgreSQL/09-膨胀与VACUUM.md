@@ -23,6 +23,36 @@ VACUUM FULL 之后     27 MB    4408 kB   1368 kB      ← 全部回到初始
 2. **`VACUUM` 不缩小文件。** 它只是把死元组的空间标记为"可以被后续写入复用"。
 3. **只有 `VACUUM FULL` / `REINDEX` / `pg_repack` 能真正把空间还给操作系统**，而它们都要重写数据。
 
+把这三条事实串起来看，膨胀的根子还是第 2 篇讲过的 MVCC：UPDATE 不覆盖旧行，而是新开一份版本。
+
+```mermaid
+flowchart TD
+    A["<b>UPDATE 一行</b><br/>并不覆盖原行"]
+    B["<b>写一份完整新版本</b><br/>MVCC 多版本机制（第2篇）"]
+    C["<b>旧版本变成死元组</b><br/>回收前谁都不能复用这块空间"]
+    D["<b>索引也要维护</b><br/>v列有索引→HOT失效，插新项"]
+    E["<b>反复UPDATE 5轮</b><br/>死元组不断累积"]
+    F["<b>表从27MB涨到162MB</b><br/>涨了6倍"]
+    G["<b>VACUUM只标记可复用</b><br/>大小不变，仍是162MB"]
+    H["<b>VACUUM FULL / REINDEX</b><br/>重写后回到27MB"]
+
+    A --> B --> C --> E --> F
+    C -- "该列有索引" --> D --> F
+    F --> G --> H
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,E main
+    class C,F danger
+    class D note
+    class G note
+    class H data
+```
+
 ---
 
 ## 二、`VACUUM` 到底做了什么、没做什么
@@ -35,6 +65,36 @@ VACUUM FULL 之后     27 MB    4408 kB   1368 kB      ← 全部回到初始
 | 额外磁盘 | 不需要 | **需要一份完整副本** |
 | 索引 | 清理索引项 | 全部重建 |
 | 能否在线跑 | ✅ 可以 | ❌ 生产上基本不能 |
+
+两条路径的锁和代价差得这么远，落到生产上就是两条完全不同的操作路线：
+
+```mermaid
+flowchart LR
+    subgraph VA["VACUUM：不阻塞"]
+        VA1["<b>标记死元组空间</b><br/>可被后续写入复用"]
+        VA2["<b>表文件大小不变</b><br/>ShareUpdateExclusiveLock"]
+        VA1 --> VA2
+    end
+
+    subgraph VF["VACUUM FULL：阻塞一切"]
+        VF1["<b>重写整张表</b><br/>需要一份完整副本"]
+        VF2["<b>AccessExclusiveLock</b><br/>生产上基本不能跑"]
+        VF1 --> VF2
+    end
+
+    PR["<b>pg_repack</b><br/>触发器同步变更，只在切换文件时短暂加锁"]
+
+    VF2 -. "生产替代方案" .-> PR
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class VA1,VA2 main
+    class VF1,VF2 danger
+    class PR data
+```
 
 **`VACUUM FULL` 在生产环境几乎不可用**：一张 500 GB 的表，它需要额外 500 GB 磁盘、锁表几十分钟到几小时。
 
@@ -56,6 +116,32 @@ VACUUM 的回收水位线是**全局的**，被最老的活跃事务钉住。实
   READ COMMITTED   有写入=False: VACUUM 后残留死元组 0      → 没有拖住
   READ COMMITTED   有写入=True:  VACUUM 后残留死元组 20000  → 拖住了回收
   REPEATABLE READ  有写入=False: VACUUM 后残留死元组 20000  → 拖住了回收
+```
+
+这条水位线是全局唯一的一根线，四个嫌疑人钉的是同一个地方：
+
+```mermaid
+flowchart TD
+    S["<b>VACUUM回收水位线</b><br/>被最老的活跃事务钉住，全局唯一"]
+    A["<b>长事务/idle in transaction</b><br/>最常见"]
+    B["<b>未消费的复制槽</b><br/>最容易忘，还会撑爆pg_wal"]
+    C["<b>残留的prepared transaction</b><br/>最少见"]
+    D["<b>autovacuum参数太保守</b><br/>追不上，最容易调"]
+    R["<b>死元组无法回收</b><br/>表和索引持续膨胀"]
+
+    S --> A --> R
+    S --> B --> R
+    S --> C --> R
+    S --> D --> R
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class S entry
+    class A,B,C,D note
+    class R danger
 ```
 
 ### 嫌疑人 1：长事务 / idle in transaction
@@ -156,6 +242,38 @@ autovacuum_vacuum_cost_limit    = 200      ← 限速：干一点就歇一会儿
 - 而 `cost_limit = 200` 的限速让它更慢；
 - 期间业务还在继续产生死元组，可能**永远追不上**。
 
+把触发条件和大表这条链路画成判定树，问题出在哪一步一目了然：
+
+```mermaid
+flowchart TD
+    A["<b>死元组占比持续上升</b><br/>n_dead_tup累积"]
+    B{"<b>占比超过threshold+scale_factor×行数？</b><br/>默认scale_factor=0.2"}
+    D["<b>继续累积</b><br/>等下一轮naptime检查"]
+    C["<b>触发autovacuum</b><br/>开始清理死元组"]
+    E{"<b>是不是大表</b><br/>比如10亿行"}
+    F["<b>已经晚了</b><br/>要死2亿行才触发，此时已涨到约1.2倍"]
+    G["<b>cost_limit限速+业务仍在写</b><br/>清理可能永远追不上"]
+    H["<b>大表必须单独调参</b><br/>降scale_factor、提cost_limit、加max_workers"]
+    I["<b>默认参数够用</b><br/>小表清理很快"]
+
+    A --> B
+    B -- "否" --> D --> B
+    B -- "是" --> C --> E
+    E -- "是" --> F --> G --> H
+    E -- "否" --> I
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,E,C main
+    class D note
+    class F,G danger
+    class H,I data
+```
+
 **✅ 大表和高频更新表必须单独调参**：
 
 ```sql
@@ -245,6 +363,31 @@ SELECT * FROM pgstatindex('usage_logs_pkey');
 ⑤ 复制：WAL 通过网络发到所有备库
 ```
 
+五步串起来，一次看似"只改一个字段"的 UPDATE 实际走了多远：
+
+```mermaid
+flowchart TD
+    A["<b>UPDATE一行</b><br/>比如只改balance列"]
+    B["<b>①堆</b><br/>写完整新行，不是只写改动列"]
+    C["<b>②索引</b><br/>被索引的列插新项+标记旧项；否则HOT不动索引"]
+    D["<b>③WAL</b><br/>上面所有改动都要写一遍日志"]
+    E["<b>④FPI</b><br/>checkpoint后首次改这页→整个8KB页写入WAL"]
+    F["<b>⑤复制</b><br/>WAL通过网络发到所有备库"]
+    G["<b>实际WAL量远大于改动本身</b><br/>用EXPLAIN(ANALYZE,WAL)定位"]
+
+    A --> B --> C --> D --> E --> F --> G
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,C,D,F main
+    class E note
+    class G data
+```
+
 ### 第 ④ 点值得展开：Full Page Write
 
 为了防止"页写到一半断电"（torn page），Postgres 在每次 checkpoint 之后**第一次**修改某个页时，会把整个 8KB 页写进 WAL。
@@ -261,6 +404,34 @@ checkpoint_completion_target = 0.9
 ```
 
 代价是崩溃恢复时间变长（要重放更多 WAL）。
+
+判定逻辑就是"这一页在这轮 checkpoint 里有没有被写过"：
+
+```mermaid
+flowchart TD
+    A["<b>checkpoint发生</b><br/>WAL重放起点归零"]
+    B{"<b>这是checkpoint后</b><br/>第一次修改这个页吗？"}
+    C["<b>写整个8KB页到WAL</b><br/>防止torn page，FPI+1"]
+    D["<b>只写改动的增量</b><br/>WAL量小很多"]
+    E["<b>checkpoint越频繁</b><br/>FPI越多，WAL量越大"]
+    F["<b>调优方向</b><br/>调大checkpoint_timeout和max_wal_size"]
+
+    A --> B
+    B -- "是" --> C --> E --> F
+    B -- "否" --> D
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B main
+    class C danger
+    class D data
+    class E note
+    class F main
+```
 
 ### 实测写放大的方法
 
@@ -282,6 +453,39 @@ EXPLAIN (ANALYZE, BUFFERS, WAL) UPDATE users SET balance = balance - 1 WHERE id 
 ## 六、TOAST：大字段的另一套存储
 
 一行数据不能跨页（8 KB）。所以当一行超过约 2 KB 时，Postgres 会把大字段**压缩**，还放不下就**切片存到一张影子表（TOAST 表）里**，主表只留一个指针。
+
+这条路径走下来，`SELECT *` 为什么贵、贵在哪一步，看图就清楚了：
+
+```mermaid
+flowchart TD
+    A["<b>一行数据要写入</b><br/>一行不能跨页，页大小8KB"]
+    B{"<b>行大小超过约2KB？</b><br/>TOAST阈值"}
+    C["<b>正常存主表</b><br/>不触发TOAST"]
+    D["<b>先压缩大字段</b><br/>默认STORAGE EXTENDED"]
+    E{"<b>压缩后还放不下？</b><br/>"}
+    F["<b>切片存入TOAST表</b><br/>主表只留一个指针"]
+    G["<b>SELECT *命中TOAST字段</b><br/>要读切片+解压缩"]
+    H["<b>117倍I/O差距实测</b><br/>37个buffer vs 15060个buffer"]
+
+    A --> B
+    B -- "否" --> C
+    B -- "是" --> D --> E
+    E -- "是" --> F
+    E -- "否" --> C
+    F --> G --> H
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,E,D main
+    class C data
+    class F danger
+    class G note
+    class H danger
+```
 
 实测（`labs/exp23_bloat.sql`，5000 行，每行一个 640 KB 的随机字符串）：
 

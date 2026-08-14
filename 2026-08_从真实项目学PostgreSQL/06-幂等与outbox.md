@@ -87,6 +87,42 @@ if errors.Is(err, sql.ErrNoRows) {
 }
 ```
 
+把抢占键、比对指纹、执行副作用这几步画成一张图：
+
+```mermaid
+flowchart TD
+    A["<b>请求进来</b><br/>带 request_id 与内容指纹"]
+    B["<b>INSERT 幂等键</b><br/>ON CONFLICT DO NOTHING"]
+    C["<b>抢占成功</b><br/>RETURNING 出新 id"]
+    D["<b>已存在记录</b><br/>说明是重放"]
+    E["<b>比对 fingerprint</b><br/>查已存的指纹"]
+    F["<b>指纹相同</b><br/>静默跳过"]
+    G["<b>指纹不同</b><br/>返回冲突错误"]
+    H["<b>执行业务副作用</b><br/>扣钱/加配额/记流水/写outbox"]
+    I["<b>同事务 COMMIT</b><br/>原子提交"]
+
+    A --> B
+    B -- "抢占成功" --> C
+    B -- "已存在" --> D
+    C --> H
+    H --> I
+    D --> E
+    E -- "同请求重放" --> F
+    E -- "撞车或攻击" --> G
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,C,H main
+    class I data
+    class D,E note
+    class F data
+    class G danger
+```
+
 这段代码有 **4 个设计决策**值得逐一拆解。
 
 ---
@@ -101,6 +137,35 @@ if errors.Is(err, sql.ErrNoRows) {
 
 [B2] 没有唯一索引，只靠应用代码里的 SELECT 判断
    余额 920（应为 990）  幂等表行数 8              ❌ 重复扣款 8 次
+```
+
+画成对比图，一眼就能看出两条路径的分野：
+
+```mermaid
+flowchart LR
+    subgraph B1["唯一索引方案"]
+        B1a["8个并发事务<br/>INSERT ON CONFLICT"]
+        B1b["数据库物理层拦截<br/>7个被挡下"]
+        B1c["余额990<br/>只扣一次"]
+        B1a --> B1b --> B1c
+    end
+
+    subgraph B2["先查后插方案"]
+        B2a["8个并发事务<br/>先SELECT查重"]
+        B2b["未提交的INSERT互相不可见<br/>8个都判定没记录"]
+        B2c["余额920<br/>重复扣款8次"]
+        B2a --> B2b --> B2c
+    end
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class B1a,B2a entry
+    class B1b,B2b note
+    class B1c data
+    class B2c danger
 ```
 
 **❓ 为什么"先 SELECT 查重再 INSERT"必然漏？**
@@ -142,6 +207,35 @@ if 插入成功 {
 
 - **进程在两个事务之间崩溃** → 幂等键留下了，但钱没扣。重试时被幂等键挡住 → **永久漏账**。
 - 反过来先扣钱后写键 → 崩溃时钱扣了键没写 → 重试时**重复扣款**。
+
+把两种崩溃时机画出来，对比就很直观：
+
+```mermaid
+flowchart TD
+    S["<b>分两个独立事务提交</b><br/>幂等键和扣款不在一起"]
+    P1["<b>先写键后扣钱</b><br/>之间进程崩溃"]
+    P2["<b>先扣钱后写键</b><br/>之间进程崩溃"]
+    Bad1["<b>键已存在钱未扣</b><br/>永久漏账"]
+    Bad2["<b>钱已扣键未写</b><br/>重复扣款"]
+    Same["<b>同一个事务提交</b><br/>键与副作用绑在一起"]
+    Good["<b>要么都成功要么都回滚</b><br/>没有中间态"]
+
+    S --> P1
+    S --> P2
+    P1 --> Bad1
+    P2 --> Bad2
+    Same --> Good
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class S,Same entry
+    class P1,P2 note
+    class Bad1,Bad2 danger
+    class Good data
+```
 
 只有放在**同一个事务**里，才有"要么全成功、要么全回滚"的保证。这也是 outbox 模式的核心思想（下面会讲）。
 
@@ -207,6 +301,34 @@ CREATE TABLE IF NOT EXISTS usage_billing_dedup_archive (
 
 热表只留最近 N 天，老的挪到归档表。检查幂等时先查热表、再查归档表——**慢一点，但不丢历史去重能力**。
 
+查询路径和清理路径画成一张图：
+
+```mermaid
+flowchart TD
+    Req["<b>幂等检查请求</b><br/>进来一个 request_id"]
+    Hot["<b>热表查询</b><br/>窄表 + BRIN 索引"]
+    Cold["<b>归档表查询</b><br/>冷数据按主键查"]
+    Done["<b>返回判定结果</b>"]
+    Job["<b>定时清理任务</b><br/>按 BRIN 定位过期范围"]
+
+    Req --> Hot
+    Hot -- "命中" --> Done
+    Hot -- "未命中" --> Cold
+    Cold --> Done
+    Job -- "扫描过期范围" --> Hot
+    Job -- "老数据迁移" --> Cold
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class Req entry
+    class Hot,Cold main
+    class Done data
+    class Job note
+```
+
 **❓ 问题：幂等键能不能设个 TTL 直接删掉？**
 
 **✅ 可以，但 TTL 必须显著大于"重试可能发生的最长时间"。**
@@ -234,6 +356,41 @@ mq.Publish(event)          // 如果这里失败了呢？
 - 更糟：**把 `redis.Del` 放进事务里** → 事务持有行锁的时间被网络 I/O 拉长，热点行被锁成串行（回到第 2 篇讲的长事务问题）。
 
 **这是分布式系统里的"双写问题"：两个存储系统，没有共同的事务。**
+
+先看没有 outbox 时会发生什么，再看加上 outbox 之后的样子：
+
+```mermaid
+sequenceDiagram
+    participant App as 业务代码
+    participant DB as 数据库
+    participant Cache as Redis缓存
+
+    App->>DB: UPDATE users 扣款
+    DB-->>App: COMMIT 成功
+    App->>Cache: 删除缓存
+    Cache-->>App: 网络超时，删除失败
+    Note over App,Cache: 事务已提交无法回滚，缓存清理没有兜底
+    Note over Cache: 缓存里仍是旧余额，用户读到脏数据
+```
+
+```mermaid
+sequenceDiagram
+    participant App as 业务代码
+    participant DB as 数据库
+    participant Worker as 后台Worker
+
+    App->>DB: 开启事务
+    App->>DB: UPDATE users 扣款
+    App->>DB: INSERT outbox 消息
+    DB-->>App: COMMIT 原子提交
+    Note over App,DB: 改库和写消息绑在同一个事务里
+
+    Worker->>DB: 轮询领取待投递消息
+    DB-->>Worker: 返回消息
+    Worker->>Worker: 投递消息，清缓存/发通知
+    Worker->>DB: 标记完成
+    Note over Worker: 投递失败会退避重试，不影响已提交的业务事务
+```
 
 ### 解法：把"要发的消息"也写进数据库
 
@@ -282,6 +439,37 @@ tx.Begin()
 tx.Commit()                          // ← 原子的：要么都成功，要么都没发生
 
 // 另一个后台 worker 独立地把 outbox 里的消息投递出去，失败就重试
+```
+
+画成一张流程图更直观：
+
+```mermaid
+flowchart TD
+    Tx["<b>业务事务开始</b>"]
+    U["<b>UPDATE 业务表</b><br/>扣款/改状态"]
+    O["<b>INSERT outbox 消息</b><br/>同一个事务里"]
+    Commit["<b>COMMIT</b><br/>原子提交"]
+    Worker["<b>独立 worker 轮询</b>"]
+    Claim["<b>FOR UPDATE SKIP LOCKED</b><br/>领取一批消息"]
+    Deliver["<b>投递消息</b><br/>清缓存/发通知"]
+    Mark["<b>标记完成</b>"]
+    Retry["<b>退避重试</b><br/>租约过期可被重领"]
+
+    Tx --> U --> O --> Commit
+    Commit --> Worker --> Claim --> Deliver
+    Deliver -- "成功" --> Mark
+    Deliver -- "失败" --> Retry
+    Retry --> Claim
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class Tx entry
+    class U,O,Worker,Claim,Deliver main
+    class Commit,Mark data
+    class Retry note
 ```
 
 消费侧（`backend/internal/repository/auth_cache_invalidation_outbox_repo.go`）：
@@ -338,6 +526,23 @@ sub2api 的 outbox 清理代码里有一段注释，值得单独拎出来讲（`
   ❌ 消费者把水位线推进到 2，认为 <= 2 的都处理过了
   慢事务提交后表里: [(1, '慢事务的消息'), (2, '快事务的消息')]
   → id=1 这条消息【永远不会被消费】，因为水位线已经越过它了
+```
+
+把这个时间线画出来会更清楚：
+
+```mermaid
+sequenceDiagram
+    participant Slow as 慢事务
+    participant Fast as 快事务
+    participant Consumer as 消费者水位线
+
+    Slow->>Slow: INSERT 拿到 id等于1，未提交
+    Fast->>Fast: INSERT 拿到 id等于2，已提交
+    Consumer->>Consumer: 查询可见数据，只看到 id等于2
+    Consumer->>Consumer: 水位线推进到2
+    Slow->>Slow: 事务提交，id等于1 落盘
+    Note over Consumer: 水位线已经越过 id等于1
+    Note over Consumer: 这条消息永远不会被消费
 ```
 
 **根因**：`bigserial` 背后是一个 sequence，而 **sequence 的取值不受事务控制**（它必须如此，否则并发插入就要互相排队）。所以：
