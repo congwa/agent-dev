@@ -37,7 +37,28 @@ dsh 给了两条别的路：
 
 ## 一个子 agent 是三层拼出来的
 
-如果你用过那种"一个 markdown 文件定义一个子 agent"的设计，先把它忘掉，dsh 里没有这个东西。一个子 agent 的形态由三层决定，改哪一层的效果完全不同。
+如果你用过那种"一个 markdown 文件定义一个子 agent"的设计，先把它忘掉，dsh 里没有这个东西。一个子 agent 的形态由三层决定，改哪一层的效果完全不同。三层从上往下的关系是：preset 挑出模型看得见哪些委派工具，每个工具实例绑一个 provider，provider 决定子跑在哪。
+
+```mermaid
+flowchart TD
+    P3["<b>第三层 preset</b><br/>父正在跑的 standing composition，子不重挂"]
+    P2["<b>第二层 delegation tool 实例</b><br/>一个实例 = 一个 provider + 一个工具名"]
+    P1["<b>第一层 provider</b><br/>子跑在哪、走什么传输"]
+    T["<b>模型看见的工具</b><br/>subagent / subagent_fork / …"]
+    N["<b>minimal preset 里一条委派工具都没有</b><br/>从 minimal 出发的会话根本没得派活"]
+
+    P3 -- "挑哪些实例在线" --> P2
+    P2 -- "带策略 persona / toolFilter / maxDepth" --> P1
+    P2 --> T
+    P3 -.-> N
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class P1,P2,P3 main
+    class T entry
+    class N note
+```
 
 **第一层是 provider，决定这个子 agent 跑在哪、用什么传输。** `ctx.subagents` 是按名字注册的**多实例**注册表——和只允许一个实现的 bash 执行器不同，多个 provider 可以同时在线（`docs/subsystems/subagent.md:5`）。
 
@@ -65,6 +86,34 @@ dsh 给了两条别的路：
 | `maxDepth` | `3` | `0` = 禁止再委派；`'provider-managed'` = 不下发上限 |
 
 表里有两格值得展开。`enableRunInBackground` 关掉之后不只是参数从 schema 里消失，显式硬塞一个 `run_in_background: true` 也会在执行期被拒（`src/index.ts:254`–`255`）——它不是一个建议性的开关。`toolFilter` 过滤掉的工具是**既从 prompt 里消失也拒绝执行**，两头都堵死。
+
+`enableRunInBackground` 和 `backgroundMode` 合起来决定一次委派落成哪种形态，四种形态后面几节会反复出现：
+
+```mermaid
+flowchart TD
+    A["<b>模型调用委派工具</b>"]
+    B{"enableRunInBackground"}
+    C{"backgroundMode"}
+    D1["<b>前台 one-shot</b><br/>父 await，工具返回子的最终文本"]
+    D2["<b>后台 one-shot</b><br/>注册普通 Task，job_output 收、job_kill 停"]
+    D3["<b>continuable</b><br/>返回持久子 id，send_message 续聊"]
+    R["<b>关掉后硬塞 run_in_background</b><br/>执行期被拒，不是建议性开关"]
+
+    A --> B
+    B -- "false，schema 里没有这个参数" --> D1
+    B -- "true" --> C
+    C -- "one-shot，默认前台" --> D1
+    C -- "one-shot 且请求后台" --> D2
+    C -- "continuable，默认后台" --> D3
+    B -.-> R
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class D1,D2,D3 main
+    class A,B,C entry
+    class R danger
+```
 
 **第三层是 preset，决定子 agent 看得见哪些工具。** 这一层最反直觉：子 agent **不会**重新挂载 preset，它是通过 `composeFrom()` 绑到父正在跑的那份 **standing composition**（父这次会话实际跑着的那棵插件树）上的（`packages/preset/agent-presets/README.md:35`）。父在 `minimal` preset 下，子也就在 `minimal` 下，没有第二种可能。而 `apps/cli/config/agent-presets/minimal/agent.cordis.yml` 全文 62 行，`subagent` 和 `workflow` 一个字都没有——从 minimal 出发的会话根本没有委派工具可用。
 
@@ -103,6 +152,34 @@ dsh 给了两条别的路：
 ## spawn 和 fork 只差一件事：种子
 
 `fork` 与 `spawn` 共用同一个 run driver，唯一的行为差异是会话种子（`packages/subagent/subagent-fork-in-process/README.md:5`）。
+
+这条差异全落在一刀切在哪里：
+
+```mermaid
+flowchart TD
+    subgraph LOG["父会话日志"]
+        T1["turn 1 · 到 turn/end 收尾"]
+        T2["turn 2 · 到 turn/end 收尾"]
+        T3["当前 turn · 有 assistant 的工具调用<br/>没有 tool result，也没有 turn/end"]
+    end
+    CUT["<b>切到最后一个 turn/end 为止的连续前缀</b>"]
+    F["<b>fork 子会话</b><br/>种子 = 这段前缀，header 上写 seedLength"]
+    S["<b>spawn 子会话</b><br/>种子为空；父还没跑完一个 turn 时 fork 也退化成它"]
+    X["<b>种子只搬对话历史</b><br/>全新扁平注册作用域，不继承工具限制与权限"]
+
+    T1 --> T2 --> T3
+    T2 -- "边界在这里" --> CUT
+    CUT --> F
+    F -.-> X
+    S -.-> X
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class CUT,F,S main
+    class T1,T2,T3 data
+    class X note
+```
 
 有意思的是种子的边界怎么划。父起子 agent 的那一刻，父自己的 turn 还开着：日志里有 assistant 的工具调用，但没有对应的 tool result，也没有 `turn/end`。直接把当前历史抄过去，子拿到的会是一个不平衡的非法会话。所以 fork 取的是**到最后一个 `turn/end` 为止的连续前缀**（`README.md:9`–`11`）。父还没跑完一个完整 turn 时种子为空，fork 就退化成了 spawn。
 
@@ -147,6 +224,22 @@ dsh 给了两条别的路：
 
 这是整章最容易糊涂的一节。三条通道彼此独立，可能同时发生，而且父每一条都要付 token。
 
+把三条摆在同一条时间线上，谁开口、谁付账就清楚了：
+
+```mermaid
+sequenceDiagram
+    participant P as 父会话
+    participant C as 子会话
+    participant M as runtime 结算管理器
+    P->>C: 前台 one-shot 委派
+    C-->>P: 通道一 tool result，只有最终文本，不额外起 turn
+    P->>C: continuable 委派，先拿到持久子 id
+    C-->>P: 通道二 report，子主动调，默认 wakeup 起一个新 turn
+    C->>M: Activation 结算
+    M-->>P: 通道三 settlement notice，无条件发，不看子报没报
+    Note over P: 既 report 又结算的子，父两笔都付
+```
+
 **第一条是前台 tool result，父自己 `await` 出来的。** 父看到的只有子的最终文本；子的停止原因不是 `completed` 时，这个返回会变成 `Error: <message>`，残留文本附在停止原因后面。它不额外起 turn，因为它就是这次工具调用的返回值（`packages/subagent/tool-subagent/README.md:11` 与 `:54`）。
 
 **第二条是 `report` 工具，子主动调的。** 父会看到 `Background subagent <child-id> reported:` 加上子的 `output` 原文。
@@ -168,6 +261,30 @@ dsh 给了两条别的路：
 ## 列出、发消息、中止
 
 三个控制类工具由 `@deepseek-ai/dsh-tool-subagent-control` 注册一次，而不是每个委派工具各注册一份。根插件只注册 `send_message` 和 `interrupt_agent`，`list_agents` 在它单独可加载的 `./list-agents` 子插件里（`packages/subagent/tool-subagent-control/README.md:5`）。
+
+三个工具各自能作用到谁，取决于目标在委派树上的位置：
+
+```mermaid
+flowchart TD
+    R["<b>父</b>"]
+    C1["<b>depth 1 的 continuable 子</b><br/>list_agents 默认列它"]
+    C2["<b>depth 2 的孙</b><br/>只有 descendants 范围看得见"]
+    O["<b>one-shot 子</b><br/>不出现在 list_agents 里"]
+    N["<b>interrupt 只停当前那个 turn</b><br/>排队消息保留，孙子继续跑，子还能继续对话"]
+
+    R -- "send_message 只能发给 depth 1" --> C1
+    R -- "interrupt_agent 任何活祖先都能停后代" --> C2
+    R --> O
+    C1 --> C2
+    C2 -.-> N
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class C1,C2 main
+    class R,O entry
+    class N note
+```
 
 `send_message(subagent_id, message)` 把消息变成子的**下一个** FIFO turn。它不能改写正在跑的 turn，也不返回子的回答，失败就意味着"没送到"（`docs/tool-catalog.md:1556`）。
 
@@ -194,6 +311,31 @@ dsh 给了两条别的路：
 
 现在说本节最要紧的一条：**这两个 provider 不在任何 shipped 组合里。**
 
+这句话的后果要沿着注册链走一遍才看得清，它断在中间那一环：
+
+```mermaid
+flowchart TD
+    A["<b>preset 里那行委派工具</b><br/>写着 disabled: true，注释教你复制一份 preset 再删掉它"]
+    B["<b>删掉 disabled</b>"]
+    Q{"provider 行在不在"}
+    D["<b>tool-subagent 只在它的 provider 存在时注册</b>"]
+    E["<b>工具永远不会出现</b><br/>base / web-app / apps-cli 里都没有这两行，连 npm 依赖都不是"]
+    OK["<b>工具注册成功</b><br/>能力全零，maxDepth 必须写 provider-managed"]
+    FIX["<b>两段式挂载</b><br/>先 insert 两个 provider 行，再 insert 两个委派工具行"]
+
+    A --> B --> Q
+    Q -- "不在，默认发行版就是这样" --> D --> E
+    Q -- "在" --> OK
+    E -- "怎么补" --> FIX --> Q
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class B,OK,FIX main
+    class A,Q entry
+    class D,E danger
+```
+
 三个 preset 确实各带一行 `disabled: true` 的委派工具（以 `apps/cli/config/agent-presets/code/agent.cordis.yml:204`–`220` 为例，`standard` 在 `:203`/`:212`、`cordis` 在 `:191`/`:200`），preset 注释也确实教你"复制一份 preset 再删掉 `disabled`"（`:201`–`:203`）。但光删 `disabled` 不够。`@deepseek-ai/dsh-subagent-codex` / `-claude-code` 这两个 **provider 行**在 base bundle、web-app bundle、`apps/cli` 里都不存在，连 npm 依赖都不是——`packages/bundle/base/tests/base.spec.ts:38`–`41` 是一条专门断言它们缺席的测试。而 `tool-subagent` 只在它的 provider 存在时才注册（`packages/subagent/tool-subagent/README.md:9`），provider 行缺了，那个工具就永远不会出现。两份包 README 里的 "shipped profiles load this provider once on the host"（codex `:30`、claude-code `:34`）与仓库配置对不上。
 
 要真的用起来，仓库里唯一能找到的完整形状是 `examples/acp-agent/product-subagent-both.cordis.yml:9`–`27`：**先 insert 两个 provider 行，再 insert 两个委派工具行**。两个包各自 README 的挂载片段（`subagent-codex/README.md:32`–`47`、`subagent-claude-code/README.md:36`–`51`）也是这个两段式，配置项只有 `env` 与 `disposeGraceMs` 两项。
@@ -215,6 +357,35 @@ dsh 给了两条别的路：
 
 拆线程的首要目的只有一个：同步的脚本循环不能堵住 harness 的事件循环，而一个无视取消的脚本可以连 worker 一起被 terminate。
 
+脚本和子 agent 分居两侧，中间只有一套类型化协议：
+
+```mermaid
+flowchart LR
+    subgraph WK["worker thread（一次运行一个）"]
+        VM["<b>node:vm context</b><br/>塑形 API 的手段，不是安全边界"]
+        G["<b>脚本能用的六样</b><br/>agent / parallel / pipeline / phase / log / args"]
+    end
+    subgraph HO["host 进程"]
+        EG["<b>ctx.workflowEngine</b><br/>一个 context 只允许一个引擎"]
+        SA["<b>ctx.subagents</b><br/>子 agent 仍然留在 host 上"]
+        CH["<b>子 Session × N</b>"]
+    end
+
+    EG -- "起 worker，送 meta / script / args" --> VM
+    VM --> G
+    G -- "agent() 跨线程调用，structured-clone + 纯 JSON 校验" --> SA
+    SA --> CH
+    CH -- "结果回传" --> G
+    G -- "脚本 return 的东西，过 materializeFromRealm" --> EG
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class VM,G main
+    class CH data
+    class EG,SA entry
+```
+
 **它不是安全沙箱。** `node:vm` 在这里是"塑形 API"的手段，逃逸出去的脚本能拿到宿主进程的权限（`README.md:9`、`:13`、`:120`）。它给的是有用的**收容**而非隔离：CPU 自旋不影响 host，`worker.terminate()` 是真的终点，worker 以空环境启动（除去未构建时的 loader 管线）所以环境变量里的凭据不会漏过去，跨线程消息走 structured-clone 并在脚本边界做纯 JSON 校验（`:15`–`:20`）。
 
 脚本里能用的全部东西就六样，`packages/workflow/workflow-worker-thread/src/runtime.ts:100`–`113` 把它们作为数据属性写进 vm context：
@@ -224,6 +395,28 @@ dsh 给了两条别的路：
 `parallel(thunks)` 并发跑一组零参函数并 **全部** await。它本质是一道栅栏，只在某一阶段真的需要全部前序结果时才该用。单个 thunk 抛异常那一项变 `null`，fatal 透传（`runtime.ts:413`–`424`）。
 
 `pipeline(items, ...stages)` 让每个 item 独立走完所有 stage，**阶段之间没有栅栏**，stage 收到的是 `(prev, item, index)`。普通异常会让该 **item** 变成 `null` 并跳过它剩下的 stage，fatal 同样透传（`runtime.ts:443`–`457`）。
+
+两个组合子的形状差别就在有没有那道栅栏：
+
+```mermaid
+flowchart LR
+    subgraph PA["parallel(thunks) · 一道栅栏"]
+        A1["thunk 1"]
+        A2["thunk 2"]
+        BAR["<b>全部 await 完才往下</b>"]
+        A1 --> BAR
+        A2 --> BAR
+    end
+    subgraph PI["pipeline(items, stages) · 阶段之间没有栅栏"]
+        I1["item 1"] --> S1["stage A"] --> S2["stage B"]
+        I2["item 2"] --> S3["stage A"] --> S4["stage B"]
+    end
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class BAR,S1,S2,S3,S4 main
+    class A1,A2,I1,I2 entry
+```
 
 `phase(title)` 是纯进度分组，**没有任何执行语义**，`meta.phases` 只是一张标题词表（`docs/subsystems/workflow.md:41`）。传非空字符串以外的东西是 fatal（`runtime.ts:470`–`477`）。
 
@@ -316,6 +509,34 @@ console.log(result.stopReason, result.agentsStarted, result.value)
 ## isolation 为什么会把脚本直接打死
 
 脚本里写 `agent(prompt, { isolation: 'container' })`，得到的不是"被忽略"，是脚本**当场死亡**。机制在 `packages/workflow/workflow-worker-thread/src/runtime.ts`：第 39 行列出全部受支持选项 `label / phase / schema / provider / model`，第 41 行单独列出一组 deferred 选项 `effort / isolation / agentType`，第 371 行给这组专门的报错文本——该选项是 deferred、本引擎不支持——与第 373 行"该选项无法识别"区分开。两者都是 `UNSUPPORTED_OPTION`，两处都没传 `fatal`，而 `WorkflowError` 的 `fatal` 默认就是 `true`（`packages/workflow/workflow/src/index.ts:137`），所以都会杀掉脚本。
+
+什么变成 `null`、什么当场杀掉脚本，分界线在这里：
+
+```mermaid
+flowchart TD
+    E["<b>脚本跑着出事了</b>"]
+    Q{"是哪一类"}
+    N1["<b>子 agent 自己运行失败</b><br/>agent() 返回 null，所以脚本里常写 filter(Boolean)"]
+    N2["<b>阶段内的普通脚本错误</b><br/>parallel 把该项、pipeline 把该 item 置 null"]
+    D1["<b>fatal 的 WorkflowError</b><br/>参数不对 / 未知选项 / schema 越界 / 撞上限 / seam 启动失败 / 取消"]
+    D2["<b>parallel 与 pipeline 重新抛出</b><br/>脚本当场死亡"]
+    ISO["<b>deferred 选项</b><br/>effort / isolation / agentType，报错点名自己"]
+
+    E --> Q
+    Q -- "子运行失败" --> N1
+    Q -- "普通异常" --> N2
+    Q -- "hook 误用" --> D1 --> D2
+    ISO --> D1
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class N1,N2 main
+    class E,Q entry
+    class D1,D2 danger
+    class ISO note
+```
 
 为什么要这么狠？因为 dsh 的 workflow 脚本契约刻意对齐了 Claude Code 的 dynamic workflows 词表（`.agents/notes/implemented/feature/2026-07-05-dynamic-workflows.md:9`、`:17`），CC 那边有、这边没实现的选项，读者是真的会写出来的。而这个仓库明令禁止"接受然后忽略"：一个拼错的选项如果只是变成一个 `null`，它就和"子 agent 运行失败"完全无法区分——这正是 `parallel` / `pipeline` 选择**重新抛出** fatal 而不是把该项置 `null` 的同一个理由（`:19`）。`effort` / `isolation` / `agentType` 与"嵌套 `workflow()`"、"token `budget`"一起被列为 deferred，各自报错时都会点名自己（`:62`）。
 
