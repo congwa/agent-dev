@@ -18,6 +18,25 @@
 | 6 | **Prompt cache 友好设计** | 前缀 append-only，把变动内容排到断点之后 |
 | 7 | **专用记忆系统** | 向量/图/文件三种流派，争议最大的一块 |
 
+七种手法不是各自为政，按处理方式能分成几类：
+
+```mermaid
+flowchart TD
+    P["<b>上下文是稀缺资源</b><br/>没有项目靠拉长窗口解决"]
+    P --> C1["<b>省着用</b><br/>Compaction 摘要压缩"]
+    P --> C2["<b>省着用</b><br/>分层清理 Microcompaction"]
+    P --> C3["<b>搬出去</b><br/>Offload 到文件系统"]
+    P --> C4["<b>隔离</b><br/>Sub-agent 独立窗口"]
+    P --> C5["<b>按需取</b><br/>Just-in-time 检索"]
+    P --> C6["<b>别浪费</b><br/>Prompt cache 友好设计"]
+    P --> C7["<b>搬出去</b><br/>专用记忆系统"]
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    class P entry
+    class C1,C2,C3,C4,C5,C6,C7 main
+```
+
 **最反直觉的两个发现**：
 
 - **7 个主流 CLI 编码 Agent（Claude Code、Codex、Gemini CLI、Qwen Code、opencode、goose、crush）全部使用 grep/glob 按需读，没有任何一个用向量索引做代码检索。** 向量索引只存在于 IDE 插件系（Continue、Kilo Code、已归档的 Roo-Code）。
@@ -96,7 +115,50 @@
 1. **比例 vs 剩余量。** crush 是唯一按"剩余绝对量"触发的：`contextWindow > 200_000` 时固定剩 20k 才压。理由很实在——1M 窗口用 80% 触发意味着白白浪费 200k 可用空间。
 2. **主动 vs 被动。** crewAI 是唯一的被动派：`is_context_length_exceeded()` 捕获 LLM 报错后才 `handle_context_length()`，否则直接 `SystemExit`。没有任何提前量。生产环境这意味着每次压缩前都先浪费一次失败请求。
 
+两条分歧点摆在一起看：
+
+```mermaid
+flowchart LR
+    subgraph G1["比例 vs 剩余量"]
+        A1["<b>按比例触发</b><br/>如 90% 窗口占比"]
+        A2["<b>按剩余绝对量</b><br/>crush：固定剩 20k 才压"]
+        A1 -- "vs" --> A2
+    end
+    subgraph G2["主动 vs 被动"]
+        B1["<b>主动监控</b><br/>提前跟踪 token 用量"]
+        B2["<b>被动触发</b><br/>crewAI：报错后才摘要"]
+        B1 -- "vs" --> B2
+    end
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class A1,A2,B1 main
+    class B2 danger
+```
+
 ### 2.2 保留多少尾部：三种流派
+
+三种流派放在一起对比：
+
+```mermaid
+flowchart LR
+    subgraph SA["A 保留一段尾部"]
+        A1["<b>主流做法</b><br/>gemini-cli/Cline/opencode 等"]
+    end
+    subgraph SB["B 什么都不留"]
+        B1["<b>Fresh start</b><br/>Roo-Code/crush/qwen-code"]
+    end
+    subgraph SC["C 重新读回原文件"]
+        C1["<b>qwen-code</b><br/>丢尾部，按预算注回原始文件"]
+    end
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A1 main
+    class B1 note
+    class C1 data
+```
 
 **A. 保留一段尾部（主流）**
 
@@ -205,6 +267,25 @@ grep_max_count                         = 1_000
 
 超限的 tool result 写到 `{root}/large_tool_results/{tool_call_id}`，消息体换成提示 + 路径；agent 用 `read_file(path, offset, limit)` 分页回读或 `grep` 该目录（工具描述里写死了这条指引）。sandbox 场景还支持 **capture-at-source**：`execute_with_offload(max_inline_bytes = 4 × 20000)`，超限内容压根不进程序内存。逐出时用 `_create_content_preview(head_lines=5, tail_lines=5)` 保留头尾预览。
 
+deepagents 这条链路的每一步：
+
+```mermaid
+flowchart TD
+    O["<b>Tool 执行完毕</b><br/>产出一段输出"]
+    O --> CHK["<b>超过阈值？</b><br/>按 4 字符/token 折算 20000"]
+    CHK -- "否，未超限" --> INL["<b>内联保留</b><br/>正常进入上下文"]
+    CHK -- "是，超限" --> WR["<b>写盘</b><br/>large_tool_results 目录"]
+    WR --> PV["<b>消息体换成预览</b><br/>头尾各 5 行加文件路径"]
+    PV --> RD["<b>按需回读</b><br/>read_file 分页或 grep 该目录"]
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class O entry
+    class CHK,PV,RD main
+    class WR,INL data
+```
+
 camel 的 `tool_log_dir` 是残缺版：完整输出落盘，但**模型读不回来**，只是给人看的日志。
 
 ### 4.2 指令文件与长期记忆：各家的字节预算
@@ -300,9 +381,45 @@ gemini-cli 的 `codebase_investigator` 是个好范例：`maxTurns: 50`、`maxTi
 
 **源码层面的实证完全吻合这条判据**：handoff/接力型（agent-framework、openai-agents）传全量；fan-out/委派型（deepagents、crewAI、agno、camel、Cline）只传任务描述。
 
+把 5.1–5.4 的判据收进一张图：
+
+```mermaid
+flowchart TD
+    Q["<b>子 agent 任务类型？</b><br/>读任务 vs 写任务"]
+    Q -- "读任务，可并行" --> ISO["<b>隔离派</b><br/>只传 task 描述，零历史"]
+    Q -- "写任务，防冲突" --> FULL["<b>传全量派</b><br/>接力共享完整历史"]
+    ISO --> EX1["<b>deepagents/crewAI/agno/camel/Cline</b><br/>fan-out 委派型"]
+    FULL --> EX2["<b>agent-framework/openai-agents</b><br/>handoff 接力型"]
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class Q entry
+    class ISO,FULL main
+    class EX1,EX2 data
+```
+
 ---
 
 ## 六、手法 5：检索 —— grep 派 vs 向量派的明确分野
+
+grep 派与向量派的项目分布：
+
+```mermaid
+flowchart LR
+    subgraph SG["grep/glob 派"]
+        G1["<b>7 个主流 CLI Agent</b><br/>Claude Code/codex/gemini-cli 等"]
+        G2["<b>Aider</b><br/>tree-sitter + PageRank repo map"]
+    end
+    subgraph SV["向量索引派"]
+        V1["<b>IDE 插件系</b><br/>Continue/Kilo Code/Roo-Code 已归档"]
+    end
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class G1,G2 main
+    class V1 data
+```
 
 ### 6.1 grep 派（全部 7 个主流 CLI 编码 Agent）
 
@@ -404,6 +521,27 @@ opencode 按 provider 分发字段也很细：`anthropic/openrouter/alibaba → 
 | `top_k` 默认 | 100 | **20** |
 | `rerank` 默认 | True | **False** |
 
+v2 到 v3 的架构变化，两边放一起看：
+
+```mermaid
+flowchart LR
+    subgraph OLD["v2 旧架构"]
+        O1["<b>ADD/UPDATE/DELETE/NOOP</b><br/>两阶段 LLM pipeline"]
+        O2["<b>图存储</b><br/>enable_graph"]
+    end
+    subgraph NEW["v3 新架构 2026-04"]
+        N1["<b>只剩 ADD</b><br/>单次 LLM 调用抽取"]
+        N2["<b>MD5 去重加 0.95 相似度合并</b><br/>图存储已完全移除"]
+    end
+    O1 -- "简化" --> N1
+    O2 -- "移除" --> N2
+
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class O1,O2 danger
+    class N1,N2 data
+```
+
 现行 pipeline 是**单次 LLM 调用的 ADD-only 抽取** + MD5 精确去重 + 0.95 相似度实体合并。检索是三路加性融合（向量 + BM25 + 实体 boost 0.5），BM25 参数按 query 词数自适应。`mem0/graphs/` 目录已不存在，`DEFAULT_UPDATE_MEMORY_PROMPT` 已是死代码。
 
 **仍按"两阶段 LLM pipeline + 向量图混合"理解 mem0 会得出错误结论。**
@@ -456,6 +594,31 @@ Penfield Labs（2026-04-08）审计全部 1,540 题：
 **最有说服力的反证**
 
 Letta 官方发文承认 LOCOMO 意义有限：**GPT-4o mini + 纯文件系统 + grep 得 74.0%**，高于 mem0 报告的 graph 变体 68.5%；**full-context baseline ≈ 73%，高于 mem0 最佳配置 ≈ 68%**。
+
+把审计、复现失败、反证摆在一张图上：
+
+```mermaid
+flowchart TD
+    L["<b>LOCOMO 榜单</b><br/>厂商互相引用的分数"]
+    L --> Z["<b>Zep 分数漂移</b><br/>65.99% 到 84% 到 75.14% 到 58.44%"]
+    L --> A["<b>独立审计</b><br/>Penfield Labs：6.4% 答案键本身错"]
+    A --> UB["<b>理论上限</b><br/>完美系统也只有约 93.6%"]
+    L --> RP["<b>复现失败</b><br/>mem0/EverMemOS/MemPalace 实测远低于官宣"]
+    L --> FB["<b>反证</b><br/>纯文件系统加 grep 得 74.0%，反而更高"]
+    UB --> CONC["<b>结论</b><br/>不要信榜单，用自己数据跑"]
+    RP --> CONC
+    FB --> CONC
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class L entry
+    class Z,A,RP danger
+    class UB note
+    class FB data
+    class CONC note
+```
 
 > **实践结论：任何厂商引用的 LOCOMO 数字（含 mem0 的 92.5、supermemory 的"三榜第一"、Zep 的 75.14）都应同等打折。选记忆方案请用自己的数据跑，不要信榜单。**
 

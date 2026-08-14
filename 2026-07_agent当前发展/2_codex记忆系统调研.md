@@ -15,6 +15,31 @@ Codex 实际上是"静态规则文件 + 动态生成记忆"的两层设计：
 | 第一层 | `AGENTS.md`（及 `AGENTS.override.md`） | 人工编写 | 项目内、可提交到版本控制、团队共享 | **权威规则来源**，必须遵守的指令 |
 | 第二层 | `Memories`（`~/.codex/memories/` 下的文件） | Codex 自动后台生成 | 本地机器，默认不同步、不共享 | **辅助性的"本地回忆层"**，帮助 Codex 记住偏好、技术栈、以往上下文 |
 
+两层各自的定位和谁盖过谁，画出来更直观：
+
+```mermaid
+flowchart TD
+    A["<b>AGENTS.md</b><br/>人工编写，可入库共享"]
+    B["<b>Memories</b><br/>自动生成，仅存本地"]
+    C["<b>权威规则来源</b><br/>必须遵守的指令"]
+    D["<b>本地回忆层</b><br/>偏好/技术栈/历史上下文"]
+    E["<b>会话上下文</b><br/>两层共同构成"]
+
+    A --> C
+    B --> D
+    C -- "优先级更高" --> E
+    D -- "辅助参考" --> E
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A,B entry
+    class C,D main
+    class E data
+```
+
 官方文档明确要求：必须遵循的团队规范应放在 `AGENTS.md` 或已入库的文档中，"把 memories 当作有用的本地回忆层，而不是唯一的规则来源"（AGENTS.md 优先于记忆）。
 
 ---
@@ -40,6 +65,39 @@ Codex 实际上是"静态规则文件 + 动态生成记忆"的两层设计：
 ### 2. 写入前的处理：秘密脱敏
 
 在记忆写入磁盘之前，Codex 会对生成的记忆字段执行**内置清理**，自动从中删除 API key、token、密码等明显的秘密信息（例如可以保留"项目使用 AWS"这类事实性描述，但不落盘具体密钥）。官方文档同时提醒用户：在把 Codex 主目录（`~/.codex`）共享给他人前，应自行审查记忆文件。
+
+把触发条件、两阶段流水线和脱敏步骤串起来看：
+
+```mermaid
+flowchart TD
+    A["<b>会话空闲触发</b><br/>满足5项前置条件"]
+    B["<b>Phase 1 提取</b><br/>轻量模型处理单会话"]
+    C["<b>秘密脱敏</b><br/>清理API key、token、密码"]
+    D["<b>结构化输出</b><br/>raw_memory + rollout_summary"]
+    E["<b>Phase 2 全局合并</b><br/>周期性，数据库锁保证互斥"]
+    F["<b>按usage_count排序</b><br/>保留常用，淘汰冷门"]
+    G["<b>落盘到MEMORY.md等</b><br/>写入~/.codex/memories/"]
+    H["<b>跳过本次生成</b><br/>配额紧张或未空闲"]
+
+    A -- "条件满足" --> B
+    A -- "限流/未空闲" --> H
+    B --> C
+    C --> D
+    D --> E
+    E --> F
+    F --> G
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,E,F main
+    class C note
+    class D,G data
+    class H danger
+```
 
 ### 3. Chronicle 扩展（研究预览）
 
@@ -70,6 +128,35 @@ Codex 实际上是"静态规则文件 + 动态生成记忆"的两层设计：
 
 ## 四、如何使用（读取）这个记忆
 
+从注入到反馈回 Phase 2 排序，读路径是一个闭环：
+
+```mermaid
+flowchart TD
+    A["<b>会话启动</b><br/>加载memory_summary.md"]
+    B["<b>注入开发者指令</b><br/>有token上限，超出截断"]
+    C["<b>按需检索</b><br/>摘要不足时查MEMORY.md"]
+    D["<b>citation解析</b><br/>记录记忆是否被引用"]
+    E["<b>usage_count更新</b><br/>反馈进下次合并排序"]
+    F["<b>/memories命令</b><br/>手动启用/禁用/重新生成"]
+
+    A --> B
+    B -- "信息不足" --> C
+    B --> D
+    C --> D
+    D --> E
+    F -. "临时控制" .-> A
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,C main
+    class D,E data
+    class F note
+```
+
 - **上下文注入**：每次会话启动时，Codex 会把 `memory_summary.md` 之类的摘要读入模型的开发者指令（developer instructions）中，通常有 token 数量上限，超出会做截断处理。
 - **按需检索**：当摘要信息不足以回答具体问题时，代理可以对更详细的 `MEMORY.md`（及相关文件）做进一步检索/grep，而不是把全部记忆都塞进上下文。
 - **`/memories` 斜杠命令**：用于在当前会话中控制记忆行为——是否使用已有记忆、是否为本次会话生成新记忆。
@@ -96,6 +183,31 @@ Codex 实际上是"静态规则文件 + 动态生成记忆"的两层设计：
 3. **行为不稳定的已知 issue**：例如有用户报告"代理会忽略已有记忆，除非显式要求它去读"（GitHub issue #18738），也有环境相关的 bug，如 Windows 远程连接场景下记忆未被正确注入（issue #22187），说明当前实现在**可靠性和可预期性**上还不成熟。
 4. **秘密过滤规则不透明**：官方只说"会脱敏"，没有公开具体规则，用户难以自行评估其覆盖率，仍建议在共享 `~/.codex` 目录前人工复查。
 5. **地域/功能仍在演进**：EEA/UK/瑞士暂不可用，云端 Codex（非本地 CLI）的记忆机制细节官方尚未完整公开，说明该系统本身仍在快速迭代中，当前文档描述的行为未来可能变化。
+
+已实现的机制和还没补上的缺口，并排放一起看更清楚：
+
+```mermaid
+flowchart LR
+    subgraph S1["已实现的防护机制"]
+        M1["<b>权威分层</b><br/>AGENTS.md优先于Memories"]
+        M2["<b>空闲触发</b><br/>避免记录进行中的推理"]
+        M3["<b>本地可审查</b><br/>明文Markdown+Git基线"]
+        M4["<b>开关控制</b><br/>全局关闭或按会话禁用"]
+    end
+    subgraph S2["已知缺口"]
+        G1["<b>无单条管理面板</b><br/>只能手动改文件"]
+        G2["<b>不可跨机器同步</b><br/>纠错责任在用户"]
+        G3["<b>脱敏规则不透明</b><br/>无法自评覆盖率"]
+    end
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class M1,M2,M3,M4 main
+    class G1,G2,G3 note
+```
 
 ### 第三方博客提到、但未经官方一手资料确认的"更细"机制（谨慎参考）
 
