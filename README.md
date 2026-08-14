@@ -6,7 +6,8 @@
 
 | 系列 | 一句话 | 篇数 |
 |---|---|---|
-| [三个 agent 系统源码解剖](#2026-08_三个agent系统源码解剖) | Pi / Codex / LangChain v1 逐维度对照 + Grok Build 第四样本，拆到源码行号 | 18 |
+| [DeepSeek Harness 上手教程](#2026-08_deepseekharness上手教程) | 从 harness 思想模型讲到自己写插件，Cordis 占 7 章，另附 130 个内置插件一插件一篇 | 28 + 130 |
+| [三个 agent 系统源码解剖](#2026-08_三个agent系统源码解剖) | Pi / Codex / LangChain v1 逐维度对照，再补 Grok Build、DeepSeek Harness 两个样本，拆到源码行号 | 19 |
 | [agent 当前发展](#2026-07_agent当前发展) | 上下文工程与记忆系统调研 | 2 |
 | [经典场景与底层设施全解](#2026-08_经典场景与底层设施全解) | 12306、红包、撮合、派单……经典系统各拆一篇，再往下拆缓存、锁、Kafka、Raft 等底层设施，再往外拆交易下半场、内容治理与 B 端中台，小白版 | 43 |
 | [流量扛不住了怎么办](#2026-08_流量扛不住了怎么办_六种真实做法) | 流量超过消化能力时的六招，每篇先跑 demo 看数字 | 8 |
@@ -16,12 +17,50 @@
 
 ---
 
-## [2026-08_三个agent系统源码解剖](./2026-08_三个agent系统源码解剖/)
+## [2026-08_DeepSeekHarness上手教程](./2026-08_DeepSeekHarness上手教程/)
 
-2026-08-06 把 [pi](https://github.com/earendil-works/pi)（v0.83.0）、[codex](https://github.com/openai/codex)（rust-v0.146.1）、[langchain v1](https://github.com/langchain-ai/langchain)（1.3.14）三个仓库 clone 到本地逐维度对照读源码，不是使用教程是架构解剖。同日补入第四样本 [grok-build](https://github.com/xai-org/grok-build)（xAI 数据事故后开源，速览级调研）：17 番外是总入口，01–15 各章末有「第四个样本」小节，16 总表已扩四列。贯穿全书的主轴是「框架 vs 产品」：Pi 和 Codex 要对默认行为负责，LangChain 刻意保持沉默。最硬的一条结论在第 06 章——事件订阅、外部进程、洋葱包裹三种拦截范式里，只有洋葱能重试或替换一次模型调用，这是范式决定的，不是实现遗漏。
+DeepSeek 2026-08-13 开源的 agent harness `dsh`（v0.1.0-rc.5，commit `47f9438`）的中文上手教程，从零到能改能扩。开篇先把 harness 思想模型和"把流程写死成节点与边"的框架式写法讲清楚，再用这个仓库自己的代码坐实：循环是启动树里一行 YAML，219 个包里运行期依赖循环实现的只有 2 个。底座 Cordis 单独占 7 章（04–10），waterfall 拦截机制单独一章。所有代码示例与配置字段都追溯到仓库真实出处并逐条对抗核验过。另设 [`内置插件参考/`](./2026-08_DeepSeekHarness上手教程/内置插件参考/README.md)：默认启动树上 130 个内置插件（含 `*-policy`、`*-reminder` 这类拦截型"中间件"）一插件一篇。
 
 | # | 文档 | 一句话 |
 |---|---|---|
+| 27 | [自己写一个续跑插件](./2026-08_DeepSeekHarness上手教程/27-自己写一个续跑插件.md) | 用 `agent/turn-stopping` + `steer()` 让 agent 别过早收工，与 25/26 三方对照 |
+| 26 | [Ralph Loop](./2026-08_DeepSeekHarness上手教程/26-RalphLoop.md) | 每轮换一个全新子 agent，只传不可变目标与结构化交接，工作区当长期记忆 |
+| 25 | [Goal 模式](./2026-08_DeepSeekHarness上手教程/25-Goal模式.md) | 同会话目标状态机与轮次驱动器，`active` 与 `armed` 是两回事 |
+| 24 | [调试手册与常见坑](./2026-08_DeepSeekHarness上手教程/24-调试手册与常见坑.md) | 启动断言、pending services、patch 不生效的排障表 |
+| 23 | [遥测与数据边界](./2026-08_DeepSeekHarness上手教程/23-遥测与数据边界.md) | 什么会离开这台机器，给合规评估用的核对清单 |
+| 22 | [headless 与 SDK](./2026-08_DeepSeekHarness上手教程/22-headless与SDK.md) | 一次性跑、JSON-RPC、Python SDK、ACP、嵌进自己的程序 |
+| 21 | [做一个 bundle 和 profile](./2026-08_DeepSeekHarness上手教程/21-做一个bundle和profile.md) | 从单个插件到可分发的 bundle 与 profile |
+| 20 | [Code Mode](./2026-08_DeepSeekHarness上手教程/20-CodeMode.md) | `run_code` 与 native / code / both 三态 |
+| 19 | [MCP 与其它扩展点](./2026-08_DeepSeekHarness上手教程/19-MCP与其它扩展点.md) | "我想加 X 该注册到哪"总表；命令、后台任务、技能、定时、附件 |
+| 18 | [子 agent 与 workflow](./2026-08_DeepSeekHarness上手教程/18-子agent与workflow.md) | 委派、spawn 与 fork、工作流引擎 |
+| 17 | [沙箱审批与权限](./2026-08_DeepSeekHarness上手教程/17-沙箱审批与权限.md) | 它管什么、更要紧的是它不管什么 |
+| 16 | [压缩与长会话](./2026-08_DeepSeekHarness上手教程/16-压缩与长会话.md) | 压缩是日志上的一次区间 replace，不是重写历史 |
+| 15 | [会话日志与分叉](./2026-08_DeepSeekHarness上手教程/15-会话日志与分叉.md) | 只追加事件日志、`deriveMessages()` 投影、模型可见即已落日志 |
+| 14 | [系统提示词与上下文装配](./2026-08_DeepSeekHarness上手教程/14-系统提示词与上下文装配.md) | prompt 是怎么拼出来的，怎么加一段、改一段 |
+| 13 | [hook 兼容层](./2026-08_DeepSeekHarness上手教程/13-hook兼容层.md) | dsh 的 hook 到底是什么；直接跑你现有的 `hooks.json` |
+| 12 | [工具执行管线](./2026-08_DeepSeekHarness上手教程/12-工具执行管线.md) | 一次工具调用的六道关卡，每关怎么插手 |
+| 11 | [写一个工具](./2026-08_DeepSeekHarness上手教程/11-写一个工具.md) | 模型能调用的工具怎么注册、返回什么、报错怎么写 |
+| 10 | [waterfall 专章](./2026-08_DeepSeekHarness上手教程/10-waterfall专章.md) | 逐行读实现；不调 `next()` 连内置行为一起否掉 |
+| 09 | [事件系统](./2026-08_DeepSeekHarness上手教程/09-事件系统.md) | 五种派发模式怎么选，怎么声明一个新事件 |
+| 08 | [插件配置与 Schema](./2026-08_DeepSeekHarness上手教程/08-插件配置与Schema.md) | 插件怎么读配置；`!!js` 惰性表达式与它被 patch 抹掉的坑 |
+| 07 | [effect 与生命周期](./2026-08_DeepSeekHarness上手教程/07-effect与生命周期.md) | 注册即 effect，卸载即回滚；热重载为什么可行 |
+| 06 | [Service](./2026-08_DeepSeekHarness上手教程/06-Service能力从哪来.md) | `ctx.xxx` 从哪来，依赖等不到时怎么读诊断 |
+| 05 | [你的第一个插件](./2026-08_DeepSeekHarness上手教程/05-你的第一个插件.md) | 写一个插件并挂进 web profile 看到它加载 |
+| 04 | [Cordis 是什么](./2026-08_DeepSeekHarness上手教程/04-Cordis是什么.md) | 底座心智模型：Context 是 Proxy、fiber、registry、isolate |
+| 03 | [接模型](./2026-08_DeepSeekHarness上手教程/03-接模型.md) | DeepSeek、其它厂商、OpenAI 兼容端点与凭据优先级 |
+| 02 | [配置的四层结构](./2026-08_DeepSeekHarness上手教程/02-配置的四层结构.md) | bundle / profile patch / home patch / `--patch`，以及整体替换的坑 |
+| 01 | [五分钟跑起来](./2026-08_DeepSeekHarness上手教程/01-五分钟跑起来.md) | 跑起来、配 key、选 workspace、`~/.dsh` 里有什么 |
+| 00 | [harness 思想模型](./2026-08_DeepSeekHarness上手教程/00-harness思想模型.md) | harness 与框架式写法的根本区别，用 dsh 自己的代码作证 |
+
+---
+
+## [2026-08_三个agent系统源码解剖](./2026-08_三个agent系统源码解剖/)
+
+2026-08-06 把 [pi](https://github.com/earendil-works/pi)（v0.83.0）、[codex](https://github.com/openai/codex)（rust-v0.146.1）、[langchain v1](https://github.com/langchain-ai/langchain)（1.3.14）三个仓库 clone 到本地逐维度对照读源码，不是使用教程是架构解剖。同日补入第四样本 [grok-build](https://github.com/xai-org/grok-build)（xAI 数据事故后开源，速览级调研）；2026-08-14 再补第五样本 [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)（v0.1.0-rc.5，逐维度整章调研 + 逐条引用对抗核验）。17、18 两篇番外分别是这两个样本的总入口，01–15 各章末有对应小节，16 总表已扩五列。贯穿全书的主轴是「框架 vs 产品」：Pi 和 Codex 要对默认行为负责，LangChain 刻意保持沉默。最硬的一条结论在第 06 章——事件订阅、外部进程、洋葱包裹三种拦截范式里，只有洋葱能重试或替换一次模型调用；第五个样本把这条结论逼到了更精确的位置：真正决定成败的不是拦截签名，是**谁拥有那个重跑的循环**。
+
+| # | 文档 | 一句话 |
+|---|---|---|
+| 18 | [番外：DeepSeek Harness 全项目速览](./2026-08_三个agent系统源码解剖/18-番外-DeepSeekHarness全项目速览.md) | 一天涨五万 star 的第五个样本：一切皆插件，agent loop 是一行 YAML |
 | 17 | [番外：Grok Build 全项目速览](./2026-08_三个agent系统源码解剖/17-番外-GrokBuild全项目速览.md) | 数据事故后开源的第四个样本，寄生 Claude 生态，开源 ≠ 开放 |
 | 16 | [横向总表与选型指南](./2026-08_三个agent系统源码解剖/16-横向总表与选型指南.md) | 全维度对照 + 决策树 |
 | 15 | [遥测与数据边界](./2026-08_三个agent系统源码解剖/15-遥测与数据边界.md) | Codex 六套遥测机制逐条拆解，硬编码 Statsig 与治理欠账 |
