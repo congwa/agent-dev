@@ -6,6 +6,33 @@
 
 这章追的是同一条链路：`cordis.yml` 里那个 `config:` 块，怎么变成 `apply(ctx, config)` 的第二个参数——中间经过哪几道手续，每道手续出错时你在终端上看见什么。
 
+整条路的形状是：YAML 里的字面量先被四层 patch 揉成一份 raw config，等 `inject` 就绪后再依次穿过插值和校验两道门，最后才落到 `apply` 的第二个参数上。
+
+```mermaid
+flowchart TD
+    Y["<b>cordis.yml 里的字面量</b><br/>!!js 标量在解析期就变成表达式节点"]
+    P["<b>四层 patch 按顶层键覆盖</b><br/>config 整块顶替，不深合并"]
+    RAW["<b>entry 的 raw config</b><br/>表达式节点原封不动躺着"]
+    G{"<b>inject 声明的服务齐了吗</b>"}
+    PEND["<b>停在 PENDING</b><br/>配置压根没被求值"]
+    W["<b>waterfall internal/config</b><br/>interpolate 把表达式换成求值结果"]
+    S["<b>resolveConfig 过 schema</b><br/>校验类型，填默认值"]
+    AP["<b>apply 拿到第二个参数</b><br/>永远是完整的、已校验的配置"]
+
+    Y --> P --> RAW --> G
+    G -- "缺一个就不动" --> PEND
+    G -- "齐了" --> W --> S --> AP
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class P,RAW,G,W,S main
+    class AP data
+    class Y entry
+    class PEND note
+```
+
 先立一个心智模型，后面一半现象都从它推出来：**改一次配置不是"把新值塞进正在跑的插件"，而是把旧实例整个卸掉、用新配置装一个新的。**
 
 ---
@@ -51,6 +78,34 @@ export function apply(ctx: Context, config: Config) {
 `interface Config` 和 `const Config` 同名不是笔误，是故意的：使用方拿走类型，Cordis 拿走运行期校验器（`docs/cordis-tutorial/05-config.md:34`）。TypeScript 的类型空间和值空间互不打架，同名合法。
 
 值得多看一眼的是 Cordis 认的到底是什么。它认的不是 Schemastery，而是 **Standard Schema**——一个跨校验库的最小接口约定，核心就是校验器对象上挂一个 `~standard` 属性。注册表建立插件 runtime 记录时直接读 `plugin.Config` 存进去（`vendor/cordis/src/registry.ts:326`），字段类型写的是 `StandardSchemaV1`（`vendor/cordis/src/registry.ts:104`），到了校验那一刻取的正是 `runtime.Config['~standard'].validate(config)`（`vendor/cordis/src/fiber.ts:53`）。
+
+这里的归属关系值得单独看一眼：你导出的东西先过 loader 的一道取值，才进注册表，最后在 fiber 里被当成校验器用。
+
+```mermaid
+flowchart LR
+    M["<b>你的模块</b><br/>name、Config 类型、Config schema"]
+    D{"<b>loader 取 exports.default ?? exports</b>"}
+    ND["<b>没有默认导出</b><br/>具名导出直接生效"]
+    HD["<b>写了默认导出</b><br/>只认那个对象上的属性，散在外面的失效"]
+    REG["<b>注册表存下 plugin.Config</b><br/>字段类型是 StandardSchemaV1"]
+    V["<b>fiber 取 Config 的 ~standard.validate</b><br/>普通对象没有这个属性，直接炸"]
+
+    M --> D
+    D -- "无" --> ND
+    D -- "有" --> HD
+    ND --> REG
+    HD --> REG
+    REG -- "读" --> V
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class D,ND,V main
+    class REG data
+    class M entry
+    class HD note
+```
 
 由此推出四条实用后果：
 
@@ -116,6 +171,32 @@ PENDING 的判定在 `vendor/cordis/src/fiber.ts:611-623`：只要 `inject` 里�
 
 现在回到开头那个心智模型。改配置时框架做的事是：卸载旧实例、加载新实例（`docs/user/develop/basic/config.md:100`）。不是给正在跑的插件换个变量值。
 
+热更新那条路的形状是：先看 fiber 在不在 ACTIVE，不在就把求值推迟，在就卸旧装新。
+
+```mermaid
+flowchart TD
+    CH["<b>改了一行 config</b>"]
+    U["<b>fiber.update(config)</b><br/>新的 raw config 先存起来"]
+    Q{"<b>fiber 现在是 ACTIVE 吗</b>"}
+    DEF["<b>推迟求值</b><br/>因为解析 config 可能访问注入的服务"]
+    RS["<b>_resolveConfig 重跑一遍</b><br/>插值 + schema 校验，和冷启动同一条路"]
+    UN["<b>卸掉旧实例</b><br/>注册全是 effect，一并撤销不留残渣"]
+    NEW["<b>用新配置装一个新实例</b><br/>apply 从头装一遍，不需要 diff 逻辑"]
+
+    CH --> U --> Q
+    Q -- "否" --> DEF
+    Q -- "是" --> RS --> UN --> NEW
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class U,Q,RS,UN main
+    class NEW data
+    class CH entry
+    class DEF note
+```
+
 这件事之所以敢这么干，靠的是第 08 章讲的 effect——插件的所有注册都是 effect，旧实例卸载时一并撤销，不会残留。所以你写插件时不需要为"配置变了"准备任何 diff 逻辑，`apply` 里按新配置从头装一遍就是对的。
 
 反过来，这也解释了为什么配置改动会走一遍完整的 PENDING 判定和 schema 校验：新实例和冷启动的实例走的是同一条路。
@@ -123,6 +204,35 @@ PENDING 的判定在 `vendor/cordis/src/fiber.ts:611-623`：只要 `inject` 里�
 ## 配错了终端上长什么样
 
 报错信息是一层层加前缀攒出来的。拿官方教程那个 `targets: 'not-an-array'` 当例子，一路看下去。
+
+四层前缀是从里往外一层层套上去的，`apply` 自己抛的异常从第三层起并进同一条路：
+
+```mermaid
+flowchart TD
+    E1["<b>schema 校验不通过</b>"]
+    E2["<b>apply 自己抛异常</b>"]
+    L1["<b>① Schemastery</b><br/>路径前缀 + 期望什么拿到什么，一次只出一条"]
+    L2["<b>② Cordis ValidationError</b><br/>invalid config: 加一行 issue"]
+    L3["<b>③ Loader entry 包装</b><br/>补上是哪一行、哪个 stage 炸的"]
+    F["<b>fiber 进 FAILED</b>"]
+    O1["<b>④a 启动窗口内被 boot 接住</b><br/>plugin tree failed to load"]
+    O2["<b>④b 树 settle 之后的审计</b><br/>N entries did not activate"]
+
+    E1 --> L1 --> L2 --> L3
+    E2 --> L3
+    L3 --> F
+    F -- "已过 _start 的 await 与否，本章未实跑区分" --> O1
+    F --> O2
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class L1,L2,L3 main
+    class E1,E2 entry
+    class F danger
+    class O1,O2 note
+```
 
 **第一层，Schemastery。** 给出路径前缀 `$.targets`（`vendor/schemastery/src/index.ts:213-226`）和"期望什么、拿到什么"（array 解析器 `vendor/schemastery/src/index.ts:714`）：
 
@@ -209,6 +319,37 @@ function validateRefreshInterval(refreshIntervalMs: number | undefined): void {
 
 ### 它只在两个位置生效
 
+同一个表达式节点，落在不同字段上是完全不同的命运：
+
+```mermaid
+flowchart TD
+    T["<b>!!js 标量</b><br/>解析成 __jsExpr 表达式节点"]
+    Q{"<b>它躺在哪个字段下</b>"}
+    C["<b>config 下任意深度</b><br/>用该行插件自己的 ctx"]
+    CT["<b>等 inject 就绪后才求值</b><br/>provider 换人或 patch 热重载会重算"]
+    D["<b>disabled 表达式本身</b><br/>用 loader 侧上下文"]
+    DT["<b>每一次挂载决策都算一遍</b><br/>只该写平台或环境判断"]
+    X["<b>嵌在普通 disabled 值里面</b><br/>永不求值，恒为 truthy 数据"]
+    N["<b>id / name / group / inject 等元数据</b><br/>一律当字面量"]
+
+    T --> Q
+    Q --> C --> CT
+    Q --> D --> DT
+    Q --> X
+    Q --> N
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class Q,C,D main
+    class CT,DT data
+    class T entry
+    class X danger
+    class N note
+```
+
 | 位置 | 是否插值 | 求值上下文 | 时机 |
 |---|---|---|---|
 | `config:` 下任意深度 | ✅ | **该行插件自己的 ctx**（inject 已就绪） | fiber 具备启动条件后、`apply` 之前；provider 换人或 patch 热重载会重算 |
@@ -280,6 +421,34 @@ for (const [key, value] of Object.entries(overrides)) {
 结果不是"超时变 5000、其余保持"，而是 **`config` 整块被换成 `{ shutdownTimeoutMillis: 5000 }`**。`mode` 连同它的 `!!js`、以及原文里的 `exporter` / `processor` 整块（`:153-161`），一起消失，退回 schema 默认值。
 
 这条尤其阴险，因为它连症状都没有：`mode` 的 schema 默认值恰好也是 `DISABLED`（`packages/session/session-telemetry-otel/src/index.ts:51` 的 `DEFAULT_TELEMETRY_MODE`），所以表面上看起来毫无变化，只是 `DSH_TELEMETRY_MODE` 这个环境变量从此对它无效了。
+
+把这条静默失败串起来看，它的每一环都不报警：
+
+```mermaid
+flowchart TD
+    B["<b>base 层的 session-telemetry-otel 行</b><br/>mode 走 !!js，另有 exporter 与 processor"]
+    MY["<b>你的 patch 只写了 shutdownTimeoutMillis</b>"]
+    R["<b>整块 config 被顶替</b><br/>顶层键逐个写回，不深合并"]
+    L["<b>mode 的表达式连同 exporter、processor 一起消失</b>"]
+    DF["<b>mode 退回 schema 默认值 DISABLED</b><br/>恰好和表达式原本的兜底一样"]
+    Z["<b>表面毫无变化</b><br/>DSH_TELEMETRY_MODE 从此对它无效"]
+    DUMP["<b>dsh --dump-config 逐字渲染 !!js</b><br/>表达式还在就是还在"]
+
+    B --> R
+    MY -- "整块写入" --> R
+    R --> L --> DF --> Z
+    R -. "改完对一眼" .-> DUMP
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class R,L main
+    class B,MY entry
+    class DF note
+    class Z danger
+    class DUMP note
+```
 
 官方把这件事写进了两处 Known Limitations：`packages/boot/app-boot/README.md:60`（"id 定向的 patch 不深合并，profile 覆盖必须重述它想保留的字段"）和 `packages/boot/cmdline/README.md:73`（"用户 patch 替换整块 config 会丢掉它的表达式……保住表达式才保得住 flag 优先"）。同一条也写在 `packages/boot/app-boot/README.md:43`。
 
@@ -372,6 +541,35 @@ pnpm dsh web --patch ./scratch-plugin/cordis.yml
 4. **`!!js` 写在了不插值的位置。** 嵌在普通 `disabled` 值下面的表达式永不求值，恒为 truthy（`scripts/verify-cordis-config.ts:431-451`）；元数据字段更是一律字面量。
 
 前三种一条命令就能同时排掉：`dsh --dump-config` 打出来的是离线合成、`!!js` 逐字保留的最终树。你的键名在不在、表达式还在不在、patch 有没有命中，一眼可见。
+
+摊平来看，这条排查线是一条捷径加两个岔口：
+
+```mermaid
+flowchart TD
+    S["<b>配了但没生效</b>"]
+    D["<b>先跑 dsh --dump-config</b><br/>离线合成，!!js 逐字保留"]
+    A["<b>① 键名拼错</b><br/>未声明的键原样合并，没人读也没人报"]
+    B2["<b>② patch 换掉整块 config</b><br/>兄弟字段和它们的表达式一起没了"]
+    C2["<b>③ patch 的 id 没匹配上</b><br/>只有一行灰扑扑的 stderr 警告"]
+    E2["<b>④ !!js 写在不插值的位置</b><br/>dump 看不出来，得回去核字段"]
+    F2["<b>插件干脆没起来</b><br/>照诊断出口那节认报错，先看 pending 那行"]
+
+    S --> D
+    D -- "前三种一眼可见" --> A
+    D --> B2
+    D --> C2
+    S -- "dump 排不掉" --> E2
+    S -- "根本没跑起来" --> F2
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class D main
+    class S entry
+    class A,B2,C2 note
+    class E2,F2 danger
+```
 
 如果不是这四种，而是插件干脆没起来，那就回到诊断出口那节按报错认——尤其是 `<name>: pending (waiting for services: ...)`，它意味着配置压根没被求值，问题不在配置本身。
 

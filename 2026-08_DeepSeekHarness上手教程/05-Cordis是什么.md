@@ -83,6 +83,27 @@ Cordis 的上游是 `cordiverse/cordis` 的 `packages/core`，快照在 commit `
 
 那子 ctx 上的属性查找怎么最终落到那个 Proxy 上？Context 类自己没挂 tracker（`symbols.tracker` 只出现在 logger / events / registry / reflect / `Service` 上），`getTraceable` 遇到没 tracker 的值原样返回（`utils.ts:122-124`），于是原型链一路上溯，最后撞到根那个 Proxy。
 
+路上的四跳是这样接的——注意最后一跳，trap 里拿到的仍然是你那个 ctx：
+
+```mermaid
+flowchart TD
+    P["<b>你的插件收到的 ctx</b><br/>自有属性只有 fiber"]
+    U["<b>顺原型链上溯</b><br/>Context 没挂 tracker，值原样返回"]
+    ROOT["<b>根 Context 的 Proxy</b><br/>整棵树上只有这一个"]
+    T["<b>get trap 同时拿到两样</b><br/>target 恒为根实例，receiver 是你的 ctx"]
+
+    P -- "读 ctx.tools，自己没有" --> U
+    U --> ROOT
+    ROOT --> T
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class U,T main
+    class ROOT data
+    class P entry
+```
+
 **结论：你的插件函数收到的 `ctx` 只属于你这个 fiber。它的自有属性只有 `fiber` 一个——声明了 `inject` 时还会多一个 intercept 符号属性（`fiber.ts:240-244`）——其余全靠原型链继承。你和隔壁插件拿到的 `ctx` 长得一样，行为不同。**
 
 ---
@@ -107,6 +128,42 @@ ctx.tools
        :163  爬到根 fiber（runtime === null）→ 抛 without inject
        :164  父 ctx 的 isolate['tools'] ≠ key（也就是进了别的 realm）→ 抛
        :165  否则 fiber = fiber.parent.fiber，继续
+```
+
+这个循环摊开来只有四个出口：一个正常返回，三个抛，而且抛的理由各不相同。
+
+```mermaid
+flowchart TD
+    S["<b>从你的 fiber 起爬</b>"]
+    Q1{"fiber.store 里有这个名字吗"}
+    OK["<b>返回 getTraceable 包过的值</b>"]
+    Q2{"名字在 fiber.inject 里吗"}
+    E1["<b>抛 in inactive context</b><br/>提供方此刻不是 ACTIVE"]
+    Q3{"已经是根 fiber 了吗"}
+    E2["<b>抛 without inject</b><br/>你压根没声明"]
+    Q4{"父 ctx 的标签还等于 key 吗"}
+    E3["<b>抛 without inject，上爬到此为止</b><br/>你在某个 realm 里，不许越界"]
+    UP["<b>fiber = fiber.parent.fiber</b>"]
+
+    S --> Q1
+    Q1 -- "有" --> OK
+    Q1 -- "没有" --> Q2
+    Q2 -- "在" --> E1
+    Q2 -- "不在" --> Q3
+    Q3 -- "是" --> E2
+    Q3 -- "不是" --> Q4
+    Q4 -- "不等" --> E3
+    Q4 -- "相等" --> UP
+    UP --> Q1
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class Q1,Q2,Q3,Q4,UP main
+    class OK data
+    class E1,E2,E3 danger
+    class S entry
 ```
 
 注意错误对象是在 `:144` 就造好的，后面几个分支只是改写它的 message 再抛出去。这直接决定了下面这件事。
@@ -155,6 +212,30 @@ return this.layers.effect(
 
 > 你在自己的插件里调 `ctx.tools.register(...)`，这个工具注册成了**你这个 fiber 的 effect**；你的插件卸载，工具自动消失。你不写一行清理代码，`tools` 服务也不需要知道你是谁。
 
+这条链上没有一步是靠约定，每一跳都由 `ctx` 的身份决定：
+
+```mermaid
+flowchart LR
+    A["<b>你的插件 ctx</b>"]
+    B["<b>ctx.tools 拿到的是影子</b><br/>套了一层 tracker Proxy"]
+    C["<b>服务方法里的 this.ctx</b><br/>是你，不是 tools 自己的 ctx"]
+    D["<b>effect 建在你的 fiber 上</b><br/>同时决定可见性与归属"]
+    E["<b>你的插件卸载</b>"]
+    F["<b>工具自动消失</b><br/>你一行清理代码都没写"]
+
+    A --> B --> C
+    C -- "把 this.ctx 传下去" --> D
+    E -- "触发逆序回滚" --> D
+    D --> F
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class B,C,D main
+    class F data
+    class A,E entry
+```
+
 事件监听同理，`ctx.on()`（`events.ts:288`）走到 `register()`，里面就是 `this.ctx.fiber.effect(...)`（`events.ts:254-260`）。这就是"注册即 effect、卸载即逆序回滚"的物理基础——不是靠约定，是靠 `ctx` 的身份被 Proxy 全程携带。`packages/` 下有 189 处 `ctx.effect(` 调用点，算上 `apps/` 与 `vendor/` 共 212 处（当场 grep），怎么写见第 08 章。
 
 ---
@@ -178,6 +259,26 @@ fiber 有六个状态，枚举顺序如下（`fiber.ts:147-154`）：
 
 括号里那句是重点：**依赖的提供方换了一个 fiber（uid 变了），epoch 就变，你的插件会被完整卸载重装。** 这不是 bug，正是热重载能干净工作的原因（第 08 章）。
 
+把六个状态和 epoch 的两条规则接起来，迁移图就闭合了——`UNLOADING` 有两个出口，是"卸载完发现依赖又回来了就自动重装"这句话的机制形态：
+
+```mermaid
+stateDiagram-v2
+    [*] --> PENDING: ctx.plugin() 新建一个 fiber
+    PENDING --> LOADING: epoch 从 __INACTIVE__ 变成实串
+    LOADING --> ACTIVE: 插件体跑完，没抛
+    LOADING --> FAILED: 插件体或配置校验抛了
+    ACTIVE --> UNLOADING: epoch 又变了，或被 dispose
+    PENDING --> UNLOADING: 被 dispose，先跑攒下的 disposers
+    UNLOADING --> PENDING: 收尾时 epoch 仍是 __INACTIVE__
+    UNLOADING --> LOADING: 收尾时 epoch 已是实串，自动重装
+    UNLOADING --> DISPOSED: uid 已置空，不能再起
+    DISPOSED --> [*]
+
+    note right of UNLOADING
+        此时再建 effect 会被拒
+    end note
+```
+
 顺带澄清一个容易读反的细节。`effect()` 自己的 disposer 是严格**逆序串行**执行的（`fiber.ts:431` 的 `.reverse()`）；但 fiber 整体 `_unload()` 时，把 `_disposables.clear()` 拿到的逆序列表（`utils.ts:27-31` 的 `values.reverse()`）交给了 `Promise.all` 并发跑（`fiber.ts:676`）——这里逆序决定的是启动顺序，不是串行等待。
 
 ---
@@ -189,6 +290,32 @@ Cordis 本体不认识 YAML。是 loader 插件把配置翻译成 `ctx.plugin()`
 上游那个最小启动器统共 16 行，值得打开看一眼（`vendor/cordis/bin.js:1-16`）：去掉 import 与 `baseUrl` 赋值，剩下的就是 `new Context()` → `ctx.plugin(Loader)` → `ctx.loader.create({ name: '@deepseek-ai/cordis-plugin-include', config: { path: './cordis.yml' } })`。dsh 的启动是同一个形状，只是 Include 那一行换成了内置 id（`packages/boot/app-boot/src/index.ts:764`、`:771`、`:518-523`）。
 
 配置里每一行叫一个 **Entry**（`vendor/loader/src/config/entry.ts:52`）。它自己也 `extend` 出一个 ctx（`entry.ts:67`），再把插件挂上去（`entry.ts:296` 的 `this.ctx.registry.plugin(...)`）。字段就那么几个（`entry.ts:9-22`）：`id` / `name` / `config` / `group` / `disabled` / `inject`，另加 loader 的 isolate 插件补的 `intercept` / `isolate`（`vendor/loader/src/config/isolate.ts:6-9`）。
+
+一行配置到一个运行实例，中间只有三跳；`disabled` 的那一行连 fiber 都不会有：
+
+```mermaid
+flowchart TD
+    Y["<b>cordis.yml 里的一行</b><br/>id / name / config / group / disabled / inject"]
+    E["<b>一个 Entry 对象</b><br/>loader 把这行读成它"]
+    C["<b>entry.ctx = loader.ctx.extend</b><br/>这一行自己的作用域"]
+    P["<b>this.ctx.registry.plugin(...)</b>"]
+    F["<b>一个 fiber</b><br/>entry.fiber，状态与 effect 都记在它身上"]
+    G["<b>带 group: true 的行</b><br/>config 里是一串子行，撑开一层作用域"]
+    D["<b>disabled 的行直接 return</b><br/>不 init，也就没有 fiber"]
+
+    Y --> E --> C --> P --> F
+    E -- "disabled" --> D
+    F -- "group" --> G
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class E,C,P main
+    class F data
+    class Y entry
+    class G,D note
+```
 
 启动后的树：
 
@@ -256,6 +383,35 @@ root:  isolate = { fs: Symbol(fs), tools: Symbol(tools) }
 ```
 
 名字对得上：`fs-local` 占的是 `'fs'`，来自它继承的 `FileSystem` 基类构造时那句 `super(ctx, 'fs')`（`packages/fs/fs/src/index.ts:88`）；而 `str-replace-editor` 那行 `export const inject = ['tools', 'fs']`（`packages/fs/tool-str-replace-editor/src/index.ts:494`）正好一个来自 realm、一个来自全局。
+
+同一个 `inject` 数组里的两个名字，解析走的是两条路：
+
+```mermaid
+flowchart TD
+    T["<b>str-replace-editor 声明 inject</b><br/>要 tools，也要 fs"]
+    I["<b>查自己那张 isolate 表</b><br/>filesystem 组的表，原型指向 root"]
+    A["<b>fs 有自有项</b><br/>解析到本地 realm 那个 Symbol"]
+    B["<b>tools 无自有项</b><br/>原型链继承 root 那个 Symbol"]
+    LA["<b>fs-local 那份</b><br/>裸的本地文件系统"]
+    LB["<b>全局工具表</b><br/>和进程里其它 agent 共用"]
+    G["<b>想顺 fiber 链爬去拿宿主的 fs</b><br/>父表标签不等，当场抛"]
+
+    T --> I
+    I -- "fs" --> A
+    I -- "tools" --> B
+    A --> LA
+    B --> LB
+    A -- "子树里没人 provide 时" --> G
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class I,A,B main
+    class LA,LB data
+    class T entry
+    class G danger
+```
 
 **一次 isolate 只切一个名字**，其余服务照旧继承。"给某个 agent 换掉文件系统、同时保留全局工具表"能一行配置搞定，就是这么来的。
 

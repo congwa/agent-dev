@@ -48,6 +48,31 @@ harness 的主干能力都能追到一行 `super(ctx, '<名字>')`——`package
 
 最后三行是重点。`FileSystem`、`ShellExecutor`、`JobRegistry` 自己不干活，只定义契约，注册成 `ctx.fs` / `ctx.shell` / `ctx.jobs` 的是它们的子类：文件系统有 `packages/fs/fs-local/src/index.ts:64`（`super(ctx)` 在 `:80`）和 `packages/e2b/fs-e2b/src/index.ts:171`，shell 有 `packages/shell/bash-local/src/index.ts:102`（`super(ctx)` 在 `:123`）和 `packages/shell/pwsh-local/src/index.ts:128`，jobs 有 `packages/jobs/jobs-local/src/index.ts:91`。换沙箱实现只需要在配置里换一行，所有消费者不动。
 
+把 `fs` 这条 seam 拆开看：占住名字的是抽象基类，真正干活的实现在配置里二选一，消费者两边都不认识、只认名字。
+
+```mermaid
+flowchart LR
+    DEF["<b>FileSystem 抽象基类</b><br/>只定契约，占住 fs 这个名字"]
+    P1["<b>fs-local</b><br/>本机文件系统"]
+    P2["<b>fs-e2b</b><br/>沙箱文件系统"]
+    CFG["<b>配置里二选一</b><br/>换实现只改这一行"]
+    SLOT["<b>ctx.fs</b><br/>名字解析到当前那份实例"]
+    CON["<b>消费者 str-replace-editor</b><br/>写名字，不 import 实现类"]
+
+    DEF -- "定契约" --> SLOT
+    P1 --> CFG
+    P2 --> CFG
+    CFG -- "注册进来" --> SLOT
+    SLOT -- "按名字取" --> CON
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class P1,P2,CFG main
+    class SLOT data
+    class DEF,CON entry
+```
+
 `JobRegistry` 还多挡了一道，理由挺实在：`abstract` 在运行时会被擦掉，光靠类型拦不住有人把抽象包直接写进配置。所以它在构造函数里检查 `new.target`，命中就当场抛 `@deepseek-ai/dsh-jobs is the abstract job registry seam; load an implementation such as @deepseek-ai/dsh-jobs-local instead`（`packages/jobs/jobs/src/index.ts:67-69`）。
 
 > 想知道这一点上 Pi / Codex / LangChain 怎么做，见 [五个 agent 系统源码解剖](../2026-08_五个agent系统源码解剖/00-总览与阅读指南.md)。
@@ -69,6 +94,35 @@ export async function apply(ctx: Context) {
 
 这一行同时买到三件事（`docs/user/develop/framework/service.md:32`、`docs/cordis-tutorial/03-services.md:59,76`）：**等**——服务没齐，插件就停在 PENDING 不执行 `apply`，配置里谁写前面谁写后面完全不影响结果；**保证**——`apply` 跑起来时，声明过的每个服务都已就绪；**回滚**——运行中依赖消失（provider 被卸载或热替换），依赖方自动卸载，服务回来时再自动装回去。
 
+这三件事是同一台判定机器的三个侧面：`inject` 里的每个名字逐个查一遍，缺一个就整体挂着，补上就被唤醒。
+
+```mermaid
+flowchart TD
+    I["<b>inject 声明的名字列表</b><br/>硬依赖，逐个判定"]
+    Q{"每个名字都取得到吗"}
+    PEND["<b>PENDING</b><br/>apply 一行都不跑"]
+    ACT["<b>LOADING 到 ACTIVE</b><br/>apply 跑起来时依赖已就绪"]
+    PV["<b>别的插件补上了缺的那个</b><br/>super(ctx, name) 或 ctx.provide"]
+    NT["<b>notify 唤醒等待者</b>"]
+
+    I --> Q
+    Q -- "缺一个就算不齐" --> PEND
+    Q -- "齐了" --> ACT
+    PV --> NT
+    NT --> PEND
+    PEND -- "重新判定" --> Q
+    ACT -- "运行中 provider 消失，回滚重等" --> PEND
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class Q,NT main
+    class ACT data
+    class PEND note
+    class I,PV entry
+```
+
 ### 不声明为什么就读不到
 
 `get` 陷阱拿不到属性时，会沿 **fiber 链向上走**（`vendor/cordis/src/reflect.ts:153-166`）。fiber 是一个插件实例的运行时作用域（第 05、08 章）：
@@ -88,6 +142,40 @@ ctx.fs  ── Proxy get 陷阱 (reflect.ts:136)
 所以结论是硬的：**不声明就能读到的，只有祖先 fiber 的 store 里已经有的那些**——祖先自己 `provide` 出去的，或者祖先 `inject` 声明过的。同级插件 provide 的读不到。而 harness 的服务插件和你的插件在配置树里通常是兄弟关系，所以 `inject` 不是礼貌用语，是唯一通路。
 
 这里有个容易串线的地方：声明过的服务解析走的根本不是这条链，而是全局 store 按 isolate symbol 直接查表（`vendor/cordis/src/reflect.ts:237-243`）。兄弟插件提供的服务，只要声明了就拿得到；走 fiber 链的只有"没声明还硬读"这一种情况。
+
+同一个名字，声明过之后读、`ctx.get()` 软探测、没声明硬读，走的是三条不同的路：
+
+```mermaid
+flowchart TD
+    A["<b>声明过 inject，读 ctx.x</b><br/>依赖齐了才进得了 apply"]
+    A2["<b>本 fiber 的 store 第一步就命中</b><br/>值是按 isolate symbol 从全局表取来的"]
+    B["<b>ctx.get('x') 软探测</b>"]
+    B2["<b>直接查全局 store</b><br/>provider 不是 ACTIVE 就不给"]
+    C["<b>没声明，硬读 ctx.x</b>"]
+    C2["<b>沿 fiber 链往上爬</b><br/>只捡祖先 store 里已有的"]
+    OK["<b>拿到实例</b>"]
+    UND["<b>undefined</b><br/>没人提供，或提供者还没起来"]
+    ERR["<b>抛 without inject</b><br/>兄弟插件提供的一律读不到"]
+
+    A --> A2 --> OK
+    B --> B2
+    B2 -- "命中且 ACTIVE" --> OK
+    B2 -- "否则" --> UND
+    C --> C2
+    C2 -- "祖先有" --> OK
+    C2 -- "爬到根还没有" --> ERR
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A2,B2,C2 main
+    class OK data
+    class UND note
+    class ERR danger
+    class A,B,C entry
+```
 
 还有一个例外值得记住：根 context 的 fiber 没有 runtime（`vendor/cordis/src/context.ts:77` 建根 fiber 时 runtime 传的就是 `null`），读取直接绕过整套检查，而且是 `strict = false`，连没 ACTIVE 的 provider 也照给（`vendor/cordis/src/reflect.ts:152`）。你在 boot 脚本或 REPL 里 `ctx.tools` 用得好好的，同样一行搬进插件就炸，原因就在这。
 
@@ -268,11 +356,57 @@ dsh: 1 entry did not activate
 
 `unknown` 这一行值得单说，它看起来像 bug，其实是两套判定口径不一致漏出来的。`ctx.get()` 只看 provider 的 fiber 是不是 ACTIVE（`vendor/cordis/src/reflect.ts:241`），而 fiber 判定依赖是否满足时还会额外调用 provider 的 `[Service.check]` 谓词，谓词返回 false 或者抛异常都算不满足（`vendor/cordis/src/fiber.ts:597-608`）。于是会出现"`ctx.get()` 拿得到、依赖判定却不通过"，诊断里就只剩 `unknown` 可打。这个谓词不是摆设，Loader 自己就实现了一个：`await` 拦截配置打开且还有在跑的任务时返回 false（`vendor/loader/src/index.ts:166-170`，注册在 `:90`）。
 
+表里第二行那种情况的形状值得单独看一眼：等待会串起来，终端上打出的每一行都只是症状，真正要修的在最里层。
+
+```mermaid
+flowchart TD
+    A["<b>你的插件</b><br/>pending，waiting for service greeter"]
+    B["<b>greeter 那个包</b><br/>pending，它自己也缺依赖"]
+    R["<b>根因：缺的那个服务没人提供</b><br/>配置里压根没挂 provider 包"]
+    OUT["<b>诊断把两条都打出来</b><br/>两行都是症状，从最里层往外修"]
+
+    A -- "等 greeter，所以挂着" --> B
+    B -- "自己也没起来，于是从没注册 greeter" --> R
+    A --> OUT
+    B --> OUT
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A,B note
+    class R danger
+    class OUT data
+```
+
 最后一个作用域边界，踩过一次就忘不了：`assertEntriesActivated` 只遍历 `ctx.loader.entries()`（`:696`），也就是配置文件里写着的那些行。插件内部用 `ctx.plugin()` / `ctx.inject()` 开出来的子 fiber 卡在 PENDING，**启动诊断一个字都不会说**。想看这一层只有两条路：
 
 问 agent 自己。`@deepseek-ai/dsh-tool-cordis` 的 `cordis_inspect` 会把当前进程里的服务和所有活着的 fiber 列出来（`packages/extensions/tool-cordis/README.md:11`，状态数值映射在 `packages/extensions/tool-cordis/src/fiber-state.ts:12-18`）。它挂在 `cordis` 这个 agent preset 里（`apps/cli/config/agent-presets/cordis/agent.cordis.yml:245-246`），并且依赖 `@deepseek-ai/dsh-cordis-host-runner` 提供的 `ctx.dynamic`（web 侧挂在 `packages/bundle/web-app/cordis.patch.yml:102-103`）——没有 runner，这套工具根本不会激活（`packages/extensions/tool-cordis/README.md:5`）。
 
 或者自己写个诊断插件，遍历 `ctx.registry.values()` 里每个 runtime 的 `fibers`，官方示例在 `docs/cordis-tutorial/06-composition-and-hmr.md:67-83`。
+
+这一节的可见性边界是这样的：诊断的视野停在配置文件那一层，再往里的 fiber 得自己去问。
+
+```mermaid
+flowchart TD
+    subgraph SEE["assertEntriesActivated 的视野：ctx.loader.entries()"]
+        E1["<b>配置里写着的 entry</b><br/>没转成 ACTIVE 就抓出来抛掉"]
+    end
+    E2["<b>插件内部开出的子 fiber</b><br/>ctx.plugin / ctx.inject 建的，卡住也不吭声"]
+    W1["<b>cordis_inspect 工具</b><br/>列出当前进程的服务和活着的 fiber"]
+    W2["<b>自写诊断插件</b><br/>遍历 registry 里每个 runtime 的 fibers"]
+
+    E1 -- "开出" --> E2
+    E2 -- "只有这两条路看得见" --> W1
+    E2 --> W2
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class E1 main
+    class E2 note
+    class W1,W2 data
+```
 
 ---
 
@@ -308,6 +442,36 @@ dsh: 1 entry did not activate
 （`!!js` 是 loader 的惰性表达式，第 09 章讲，这里当普通配置看就行。）
 
 **这里是本章最容易写错的一处，而且错法很隐蔽。** 直觉会告诉你：realm 是给 provider 开的，我把 `fs-local` 圈进 group，换实现的目的就达到了，消费者写在外面无所谓。不对。realm 是加在 group 上的边界，**provider 和 consumer 必须一起被包进这个 group 才算数**。上面 `str-replace-editor` 和 `fs-local` 并排写在同一个 `config` 列表里，不是排版习惯，是硬要求——落在 group 外面的消费者会去解析 host 那份实例，或者干脆没人提供、直接 PENDING。麻烦的地方在于第一种失败不报错，它只是安静地读到了错的那份文件系统。
+
+边界画在 group 上，两边的结局完全不同——圈进去的读到新实现，落在外面的走另一条解析：
+
+```mermaid
+flowchart TD
+    HOST["<b>host 平面的 fs</b><br/>preset 之外那份实现"]
+    subgraph G["group 上的 isolate: fs 换了个新 symbol"]
+        P["<b>fs-local</b><br/>在这个 realm 里注册 fs"]
+        C1["<b>圈在里面的消费者</b><br/>同一个 symbol，读到本地这份"]
+    end
+    C2["<b>落在 group 外面的消费者</b><br/>symbol 还是 host 那个"]
+    BAD["<b>安静读到错的那份</b><br/>不报错，这是最难查的一种"]
+    PEND["<b>host 也没人提供时</b><br/>直接 PENDING，起码还有报错"]
+
+    P -- "注册" --> C1
+    HOST --> C2
+    C2 -- "host 有实例" --> BAD
+    C2 -- "host 是空的" --> PEND
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class P,C2 main
+    class C1 data
+    class BAD danger
+    class PEND note
+    class HOST entry
+```
 
 这条约束 `standard` preset 的注释写死了："a consumer left outside would resolve a host registry this preset does not populate"（`apps/cli/config/agent-presets/standard/agent.cordis.yml:166-167`）。`cordis:group` 这个内置行的存在理由就是"把 provider 和它的 consumer 一起放进同一个 realm"（`packages/boot/app-boot/README.md:30`）。
 

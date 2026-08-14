@@ -71,6 +71,41 @@ ctx.effect(function* (this: AgentRegistry) {
 
 **这里最容易踩的一脚**是想当然地以为"effect 里做的事都归这个 effect 管"。不是。在 effect body 里调 `ctx.on()` 之类的注册，那个监听器仍然挂在 **fiber** 上，并不会自动变成这个 effect 的子资源。只有被 `yield` 或 `return` 出来的 disposer 才会被 effect 接管——`collect` 会把它从 fiber 的清单里 `delete` 掉，再放进自己的清单（`fiber.ts:448`–`453`）。
 
+所有权的形状是这样：effect 的 wrapper 先落进 fiber 的清单，被 `yield` / `return` 出来的 disposer 再从 fiber 名下搬到 effect 名下，其余的原地不动。
+
+```mermaid
+flowchart TD
+    AP["<b>apply(ctx) 执行</b><br/>它本身就是一次 effect body"]
+    E1["<b>ctx.effect(body, label)</b><br/>body 立即执行"]
+    D1["body 里 yield / return 出来的 disposer"]
+    D2["body 里调 ctx.on() 装的监听器"]
+
+    subgraph OWN["effect 名下（带 label，进 getEffects）"]
+        O1["heartbeat.timer()"]
+    end
+
+    subgraph FIB["fiber._disposables（fiber 名下）"]
+        F1["effect 的 wrapper"]
+        F2["apply 直接 return 的裸 disposer"]
+        F3["ctx.on() 的 disposer"]
+    end
+
+    AP --> E1
+    AP -- "直接 return" --> F2
+    E1 -- "wrapper 先入册" --> F1
+    E1 --> D1
+    E1 --> D2
+    D1 -- "collect：从 fiber 清单 delete，再收进自己" --> O1
+    D2 -- "仍挂在 fiber 上，不归这个 effect" --> F3
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class AP,E1,D1 main
+    class O1,F1,F2,F3 data
+    class D2 note
+```
+
 这条机制有两个真实用法。一是**改所有权以控制顺序**：`packages/schedule/schedule/src/index.ts:69`–`75` 的 disposer 里**手动**调了 `stopCreated()`（也就是第 45 行 `ctx.on('agent/created', …)` 的返回值），因为它要求先停止接新 agent、再逐个拆已建的 runtime，就必须自己攥住这个句柄。二是**改标签**：`packages/preset/persona/src/index.ts:61`–`66` 把本来已经是 effect 的 `ctx.systemPrompt.section(...)` 又包了一层 `ctx.effect(…, 'persona.section()')`，那个 disposer 于是从 fiber 名下转到外层 effect 名下，诊断里显示的就是 `persona.section()`，而不是内层那个笼统的 `systemPrompt.section()`。
 
 ---
@@ -140,11 +175,65 @@ epoch = ':' + providerA.uid + ':' + providerB.uid
 
 于是：某个依赖消失 → epoch 变成 `INACTIVE` → `_unload()`；依赖回来 → epoch 变了 → `_reload()`（`fiber.ts:625`–`639`）。注意即使服务名一个字没变，**换了一个实现**也算变——新 provider 是新 fiber，新 uid，epoch 字符串跟着变，所有依赖它的插件全部卸载重装。触发者是 `reflect.notify()`（`reflect.ts:314`–`336`）。
 
+走一遍这条驱动链：provider 一变就重算 epoch，算出来是 INACTIVE 就卸载停在 PENDING，算出来是另一串 uid 就先卸载、拆完再重装。
+
+```mermaid
+flowchart TD
+    P["<b>provider 变化</b><br/>服务下线，或换了一个实现"]
+    N["reflect.notify() 通知依赖方"]
+    R["<b>重算 epoch</b><br/>把每个依赖的 provider uid 拼成一串"]
+    Q{"epoch 变了没有"}
+    S["什么都不做"]
+    UN["<b>_unload()</b><br/>本轮注册逆序拆光"]
+    PEND["停在 PENDING，等依赖回来"]
+    RE["<b>_reload()</b><br/>重新执行 apply"]
+
+    P --> N --> R --> Q
+    Q -- "没变" --> S
+    Q -- "缺依赖，变成 INACTIVE" --> UN
+    Q -- "uid 变了，换了新实现" --> UN
+    UN -- "拆完再看：epoch 仍是 INACTIVE" --> PEND
+    UN -- "拆完再看：epoch 不是 INACTIVE" --> RE
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class N,R,UN,RE main
+    class P,Q entry
+    class S,PEND note
+```
+
 卸载顺序有两条规则必须分清，混起来会写出很难复现的 bug。
 
 **一个 fiber 的所有 effect 之间**：从逆注册序开始，但异步 disposer 是用 `Promise.all` **并发**跑的，不保证一个跑完再跑下一个（`fiber.ts:676`–`686`，配合 `utils.ts:27`–`31` 的 `clear()` 返回 `values.reverse()`）。
 
 **同一个 effect 内部收集的多个 disposer**：逆序，而且**串行**——`task = task.then(...)` 把它们逐个链起来（`fiber.ts:430`–`440`）。
+
+两条规则叠在一张图上是两个方向：横着那层是并发的，竖着那层才是串行的。
+
+```mermaid
+flowchart TD
+    U["<b>fiber 卸载</b><br/>清单整体取出再 reverse"]
+    A["<b>effect A 的 wrapper</b><br/>heartbeat.audit()"]
+    B["<b>effect B 的 wrapper</b><br/>heartbeat.timer()"]
+    C["裸 disposer"]
+    A1["yield 出的第二个 disposer"]
+    A2["yield 出的第一个 disposer"]
+    T["顺序敏感的清理，要收进同一个 effect"]
+
+    U -- "Promise.all 并发，谁先跑完不保证" --> A
+    U --> B
+    U --> C
+    A -- "逆序，且 task.then 逐个串起来" --> A1 --> A2
+    A2 -- "这条线上才有串行保证" --> T
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class U,A,A1,A2 main
+    class B,C data
+    class T note
+```
 
 结论就是：顺序敏感的清理必须收进**同一个 effect**。generator 里 `yield` 出的多个 disposer 可以，写成一个 disposer 在里面自己 `await` 也可以，两种都拿得到串行保证。官方两处给的是更保守的后一种说法——"放进单个 `ctx.effect()` 返回的同一个 disposer 里，在那里串行 await"（`docs/user/develop/framework/index.md:63`、`docs/cordis-primer.md:44`）。至于 `fiber.dispose()` 的三条保证——注册全部移除、子插件递归卸载、promise 在所有异步清理结束后才 resolve——是官方文档的表述（`docs/user/develop/framework/index.md:94`–`97`）。
 
@@ -198,7 +287,32 @@ export function apply(ctx: Context) {
 
 ## 装到一半抛错，谁来收拾
 
-分三种情况，全部可从源码读出。
+分三种情况，全部可从源码读出。三条路的收尾方式不一样，只有最后一条要你自己动手：
+
+```mermaid
+flowchart TD
+    X{"装到一半抛错了"}
+    E1["<b>effect body 里同步抛</b><br/>已收集的 disposer 立刻逆序跑一遍，再把原错误抛出去"]
+    A1["<b>apply 抛错，或 config 校验没过</b><br/>logger.error、记下 _error、epoch 置回 INACTIVE"]
+    A2["状态更新发现 epoch 变了，转去 _unload()<br/>本轮注册逆序拆光，终态 FAILED"]
+    M1["<b>disposer 还攥在你自己手里</b><br/>框架不管：逆序 await dispose 再 rethrow"]
+    LOG["错误进 logger，不炸进程<br/>await fiber.await() 才会重新抛出来"]
+
+    X --> E1
+    X --> A1 --> A2
+    X --> M1
+    E1 -- "要么整体成立，要么什么都不留" --> LOG
+    A2 --> LOG
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class E1,A1,A2 main
+    class X entry
+    class LOG danger
+    class M1 note
+```
 
 **effect body 里同步抛错。** 已经收集到的 disposer 立刻跑一遍，然后把原错误继续抛出（`fiber.ts:521`–`537`）。也就是说这个 effect 要么整体成立，要么什么都不留。
 
@@ -223,6 +337,36 @@ export function apply(ctx: Context) {
 5. 用旧 fiber 的 `_config` 重新 `registry.plugin(newModule, …)`（`vendor/hmr/src/index.ts:502`–`509`）
 6. 任一步抛错就整体回滚：恢复两个 module cache，把旧插件重新注册回去（`vendor/hmr/src/index.ts:482`–`489`、`:532`–`:545`）
 
+这六步的分叉点有两个：文件属于框架自身那条是条死路，属于插件模块那条则是"清缓存 → 重新 import → 拆旧树 → 装新树"，中途任何一步失败都把旧插件原样装回去。
+
+```mermaid
+flowchart TD
+    W["<b>chokidar 监视 root</b><br/>防抖后进 partialReload()"]
+    Q{"改动文件属于谁"}
+    EX["调 loader.exit()"]
+    NO["<b>空方法，什么也没发生</b><br/>这次改动被静默忽略，只能自己重启"]
+    CA["<b>备份并清缓存</b><br/>ESM loadCache 与 CJS require.cache 两份"]
+    IM["重新 import 新模块"]
+    DEL["registry.delete(旧 plugin)<br/>dispose 它的每一个 fiber"]
+    NEWP["<b>用旧 fiber 的 _config 重挂</b><br/>registry.plugin(新模块)"]
+    RB["<b>整体回滚</b><br/>恢复两份缓存，把旧插件重新注册回去"]
+
+    W --> Q
+    Q -- "框架自身 externals" --> EX --> NO
+    Q -- "ESM loadCache 里的插件" --> CA --> IM --> DEL --> NEWP
+    IM -- "import 失败" --> RB
+    NEWP -- "重挂失败" --> RB
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class W,CA,IM,DEL,NEWP main
+    class Q,EX entry
+    class RB danger
+    class NO note
+```
+
 第 2 步藏了个惊喜：**`loader.exit()` 在本仓库里是个空方法**（`vendor/loader/src/index.ts:188`–`189`，注释写的是 "Hook for hosts that can restart the process on full-reload requests"），全仓 grep 没有任何子类覆写它。所以改到框架自身的文件时，HMR 既不局部重载也不重启进程，那次改动被静默忽略——想生效只能自己重启。
 
 Schema 里声明的字段有四个（`vendor/hmr/src/index.ts:560`–`570`）：`base`、`root`（默认 `['.']`）、`ignored`（默认忽略 `**/node_modules`、`**/.*`、`cache`、`data`）、`debounce`（默认 100ms）。但它不是"只认这四个"：`Config extends ChokidarOptions`（`:553`），整份 config 被展开传给 `watch()`（`:229`），而 schemastery 的非严格解析会把未声明的键原样并回结果（`vendor/schemastery/src/index.ts:761`），所以 chokidar 自己的选项能透传。它 `inject` 了 `loader` 和 `timer`（`vendor/hmr/src/index.ts:87`），并且要求拿得到 Node 的内部 ESM loader，否则构造函数直接抛（`vendor/hmr/src/index.ts:120`–`122`）。
@@ -238,6 +382,36 @@ Schema 里声明的字段有四个（`vendor/hmr/src/index.ts:560`–`570`）：
 | headless | `disabled: true` | `packages/bundle/headless/cordis.patch.yml:12`–`15` |
 
 被关掉之后并非全无热更。CLI 在 boot 之后发现 `ctx.get('hmr') === undefined`，会**兜底挂一个 `root: []` 的 watch-only HMR**（必要时先补 `timer`），专门用来盯用户的 patch 层（`apps/cli/src/profile-boot.ts:279`–`294`），再由 `watchUserPatches` 把变更转成对 Include entry 的 `entry.update({ config })`（`packages/boot/app-boot/src/index.ts:241`–`254`）。
+
+所以"改完会不会热更"取决于你动的是哪一层：
+
+```mermaid
+flowchart TD
+    Q{"你改了什么"}
+    P1["<b>cordis.patch.yml</b><br/>profile 的和 $DSH_HOME 的两份"]
+    WO["CLI 兜底的 watch-only HMR<br/>root 为空数组，只盯 patch 层"]
+    UP["watchUserPatches 转成 entry.update"]
+    OK["<b>实时生效</b><br/>卸载旧实例、装新实例，旧注册不残留"]
+    P2["<b>插件源码文件</b>"]
+    NG["<b>不会热更</b><br/>web / headless 的 hmr 行是 disabled，得重启进程"]
+    P3["<b>框架自身文件</b>"]
+    IG["<b>静默忽略</b><br/>loader.exit() 是空实现"]
+
+    Q --> P1 --> WO --> UP --> OK
+    Q --> P2 --> NG
+    Q --> P3 --> IG
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class WO,UP main
+    class Q,P1,P2,P3 entry
+    class OK data
+    class NG note
+    class IG danger
+```
 
 于是对使用者的实际结论是这么四条：
 
