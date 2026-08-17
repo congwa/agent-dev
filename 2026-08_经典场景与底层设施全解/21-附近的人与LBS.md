@@ -26,6 +26,30 @@
 
 ---
 
+九节内容层层递进，先搭一张地图，看清"二维塞进一维"这件事是怎么一步步讲透的：
+
+```mermaid
+flowchart TD
+    S0["<b>开场</b><br/>一条 SQL 引发的惨案"]
+    S1["<b>全篇的纲</b><br/>索引一维，地球二维"]
+    S2["<b>GeoHash</b><br/>Z 曲线交织编码"]
+    S3["<b>两大破绽</b><br/>编码远近与空间远近对不上"]
+    S4["<b>Redis GEO 揭底</b><br/>不过是 zset + 52bit score"]
+    S5["<b>网格与四叉树</b><br/>另一条降维路"]
+    S6["<b>H3 六边形</b><br/>治好正方形邻居不平等的病"]
+    S7["<b>落地流水线</b><br/>粗筛 + 精算拼成生产方案"]
+    S8["<b>结论与词典</b><br/>反直觉清单 + 一句话总结"]
+
+    S0 --> S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7 --> S8
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class S0 entry
+    class S1,S2,S3,S4,S5,S6,S7 main
+    class S8 data
+```
+
 ## 0. 开场：一条 SQL 引发的惨案
 
 你站在上海外滩，坐标 `(31.2397, 121.4900)`。掏出手机搜"3 公里内的奶茶店"。
@@ -393,6 +417,32 @@ Z 曲线是一笔画，一笔画总要"抬笔跨页"。看 4×4 的 Z 曲线全�
     于是错误只剩一个方向：只会多抓，不会漏抓。
 ```
 
+把这条分岔画成图，两条破绽走向两种截然不同的补丁，最后收敛成同一个"只多不漏"：
+
+```mermaid
+flowchart TD
+    R["<b>前缀相同≈距离近</b><br/>这个约等号是单向的"]
+    B1["<b>破绽一</b><br/>空间近、编码远（踩在切割线两侧）"]
+    B2["<b>破绽二</b><br/>编码近、空间远（Z 曲线抬笔跳崖）"]
+    F1["<b>会漏抓</b><br/>假阴性"]
+    F2["<b>会多抓</b><br/>假阳性"]
+    P1["<b>补丁：九宫格</b><br/>邻格一起查"]
+    P2["<b>补丁：精算</b><br/>超半径的扔掉"]
+    FIN["<b>粗筛 + 精算</b><br/>错误只剩一个方向，可以放心兜底"]
+
+    R --> B1 --> F1 --> P1 --> FIN
+    R --> B2 --> F2 --> P2 --> FIN
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class R entry
+    class B1,B2 danger
+    class F1,F2,P1,P2 main
+    class FIN data
+```
+
 💡 **"错误是单向的"——这句话你在[第 12 篇布隆过滤器](./12-小而美的五个算法.md)里见过。** 布隆说"不存在"一定对、说"存在"可能错；打好补丁的 GeoHash 粗筛说"不在候选里"一定对、说"在候选里"可能错。错误单向，才敢把它放在流水线前面当粗筛——反正后面有精算兜底，多抓的会被扔掉，漏抓的却永远找不回来。
 
 所以生产上的"附近"，从来不是一段查询，而是两段：**粗筛（编码/格子）+ 精算（球面距离）**。这个形状记住，第 7 节还会见到它，而且你会发现它眼熟。
@@ -456,6 +506,30 @@ ZRANGE shops:sh 0 -1 WITHSCORES # 按 score 升序：
 
 于是"查一个格子"变成"查一段 score 区间"。用本文的编码器演示这个换算（注意：Redis 内部的纬度切分范围和教科书 GeoHash 不同，所以它的 score 数值和本文编码器算的不同，机制一致，见下）：6 位格 = 30 bit 前缀，把前缀值记作 P，则这个格子里所有点的 52 bit 编码恰好落在区间 `[P × 2²², (P+1) × 2²²)`。九宫格 = 9 段 score 区间。`GEOSEARCH` 内部干的就是：算出覆盖半径的格子精度 → 取中心格加邻格 → 逐段区间捞成员 → 逐个算球面距离过滤（机制出自 Redis 源码 `geo.c` / `geohash_helper.c` 的结构，本篇未逐行核对每个版本的实现细节）。**第 3 节的"九宫格 + 精算"流水线，Redis 全帮你做了——但破绽和补丁一个没少，只是搬进了 C 代码里。**
 
+命令层看着专门，掀开看底下走的还是 zset 那条老路：
+
+```mermaid
+flowchart TD
+    API["<b>GEOADD / GEOSEARCH</b><br/>看起来像专门的地理命令"]
+    ENC["<b>52bit 编码</b><br/>经纬度各二分 26 轮交织"]
+    SCORE["<b>塞进 zset score</b><br/>当成普通的 double 分数存"]
+    TYPE["<b>TYPE 命令实测</b><br/>返回 zset，没有新结构"]
+    Q["<b>GEOSEARCH 查询</b><br/>换算成 score 区间"]
+    NINE["<b>九宫格 = 9 段区间</b><br/>逐段捞成员"]
+    CALC["<b>逐个 haversine</b><br/>精算过滤"]
+
+    API --> ENC --> SCORE
+    SCORE --> TYPE
+    SCORE --> Q --> NINE --> CALC
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class API entry
+    class ENC,SCORE,Q,NINE,CALC main
+    class TYPE data
+```
+
 两个顺手的实测冷知识：
 
 - 没有 `GEODEL` 命令。删除成员直接 `ZREM shops:sh beijing`——因为它就是 zset，zset 的所有命令都能用。
@@ -480,6 +554,37 @@ zset 的 score 类型是 IEEE 754 双精度浮点数（double）。double 的尾
 | [第 13 篇](./13-雪花算法真实项目调研.md) | Grafana | 微秒时间戳打包进雪花格式 | 一个天然可比较、可排序的资源版本号 |
 | [第 14 篇](./14-分库分表.md) | 基因法 | user_id 的低位塞进 order_id | 两个查询维度一次命中同一分片 |
 | 本篇 | Redis GEO | 经纬度交织成 52 bit 塞进 score | 二维空间查询变一维区间查询 |
+
+三次打包并排摆出来，心法是同一句话：
+
+```mermaid
+flowchart LR
+    subgraph P1["雪花算法（第13篇）"]
+        GF1["<b>Grafana</b><br/>微秒时间戳打包进 ID"]
+        GF2["<b>换来</b><br/>可比较、可排序的版本号"]
+        GF1 --> GF2
+    end
+    subgraph P2["基因法（第14篇）"]
+        GN1["<b>user_id 低位</b><br/>塞进 order_id"]
+        GN2["<b>换来</b><br/>两个查询维度命中同一分片"]
+        GN1 --> GN2
+    end
+    subgraph P3["Redis GEO（本篇）"]
+        RG1["<b>经纬度交织</b><br/>52bit 塞进 zset score"]
+        RG2["<b>换来</b><br/>二维空间查询变一维区间查询"]
+        RG1 --> RG2
+    end
+    GF2 -.-> HEART["<b>共同心法</b><br/>语义编成整数高低位，白嫖排序比较范围查询"]
+    GN2 -.-> HEART
+    RG2 -.-> HEART
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class GF1,GN1,RG1 main
+    class GF2,GN2,RG2 data
+    class HEART note
+```
 
 💡 **这是全系列第三次见到"把语义塞进整数的 bit 里"。** 三次的心法一模一样：整数世界自带一套免费基建——比较、排序、范围查询、B-tree/zset 索引——位打包就是给业务语义办一本进入整数世界的护照，进去之后这些基建全部白嫖。第 13 篇说"雪花不是发号器，是打包格式"，现在把话说得更狠一点：**凡是能被排序解决的问题，都值得问一句——我的语义能不能编成一个整数的高低位。**
 
@@ -563,6 +668,33 @@ GeoHash 不是唯一的排队方法。这一节讲另一族方案，讲完你会
 
 所以第 2 节和第 5 节不是两条路，是同一棵树的两种写法。地图瓦片系统里这层关系更露骨：Bing 地图的瓦片编号 QuadKey 就是显式按四叉树路径编的字符串，一层一个字符（微软 Bing Maps Tile System 文档，非一手核实）。
 
+同一棵树的两种写法，并排摆出来：
+
+```mermaid
+flowchart LR
+    subgraph QT["显式四叉树"]
+        Q1["<b>树结构</b><br/>存在指针里"]
+        Q2["<b>深度</b><br/>自适应，按密度分裂合并"]
+        Q3["<b>分布式</b><br/>要做重平衡，天生差"]
+        Q1 --> Q2 --> Q3
+    end
+    subgraph GH["GeoHash"]
+        H1["<b>树结构</b><br/>存在编码字符串里"]
+        H2["<b>深度</b><br/>全球等深，按前缀长度选层"]
+        H3["<b>分布式</b><br/>纯函数，天生友好"]
+        H1 --> H2 --> H3
+    end
+    Q3 -.-> SAME["<b>同一棵树</b><br/>不同的存法"]
+    H3 -.-> SAME
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class Q1,Q2,Q3 entry
+    class H1,H2,H3 main
+    class SAME data
+```
+
 真正的分叉在下一节——有人连"方格"本身都不要了。
 
 ---
@@ -615,6 +747,30 @@ H3 有 16 级分辨率（0~15），级别越高格子越小；网约车派单常
 
 顺带一句 Google S2：它把地球投影到外接立方体的 6 个面上再做四叉树切分，格子编号沿**希尔伯特曲线**（Hilbert curve）走——这条曲线没有 Z 曲线的抬笔跳跃，编号相邻的格子保证空间共边，邻近性比 Z 曲线保得好；MongoDB 的 2dsphere 索引底层用的就是 S2（MongoDB 官方文档，非一手核实）。细节不展开，[第 08 篇 6.2 节](./08-网约车派单.md)有图。选型口诀也在那边：找附近用 Redis GEO 十分钟搞定，格子级统计聚合用 H3，复杂多边形运算用 S2。
 
+三选一的判断标准摆成一张图：
+
+```mermaid
+flowchart TD
+    Q["<b>你要解决什么问题</b>"]
+    Q1["<b>找附近的点</b><br/>附近的人 / 店 / 车"]
+    Q2["<b>格子级统计聚合</b><br/>热力图 / 供需密度 / ML 特征"]
+    Q3["<b>复杂多边形运算</b><br/>区域相交、覆盖计算"]
+    A1["<b>Redis GEO</b><br/>十分钟搞定，zset 天然支持"]
+    A2["<b>Uber H3</b><br/>六边形邻居等距，聚合不失真"]
+    A3["<b>Google S2</b><br/>希尔伯特曲线，邻近性最好"]
+
+    Q --> Q1 --> A1
+    Q --> Q2 --> A2
+    Q --> Q3 --> A3
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class Q entry
+    class Q1,Q2,Q3 main
+    class A1,A2,A3 data
+```
+
 ---
 
 ## 7. 落地：附近的人完整流水线
@@ -661,6 +817,31 @@ H3 有 16 级分辨率（0~15），级别越高格子越小；网约车派单常
 | 推荐系统（11 篇） | 召回：便宜、量大、宁多勿漏 | 精排：贵、只看少量候选、逐个打分 |
 | 附近的人（本篇） | 格子并集：位运算级便宜、宁多勿漏 | haversine：三角函数不便宜、只算候选 |
 | 错误纪律 | 单向——漏了永远找不回，多了后面能扔 | 负责把"多"修剪掉 |
+
+两条流水线并排摆出来，形状是同一个：
+
+```mermaid
+flowchart LR
+    subgraph REC["推荐系统（第11篇）"]
+        R1["<b>召回</b><br/>便宜、量大、宁多勿漏"]
+        R2["<b>精排</b><br/>贵、只看候选、逐个打分"]
+        R1 --> R2
+    end
+    subgraph LBS["附近的人（本篇）"]
+        L1["<b>格子并集</b><br/>位运算级便宜，宁多勿漏"]
+        L2["<b>haversine 精算</b><br/>三角函数不便宜，只算候选"]
+        L1 --> L2
+    end
+    R2 -.-> SAME["<b>同一个形状</b><br/>精确计算贵、候选空间大时都分层"]
+    L2 -.-> SAME
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class R1,L1 main
+    class R2,L2 data
+    class SAME note
+```
 
 💡 **同构不是巧合。** 只要"精确计算贵、候选空间大"，最优解都是分层：用便宜且只多不漏的初筛把候选空间砍掉几个数量级，再把贵的计算集中花在幸存者身上。推荐系统砍的是百万物品，LBS 砍的是百万坐标点，形状一个样。第 12 篇布隆过滤器守数据库、[第 22 篇倒排索引](./22-搜索引擎倒排索引.md)先取交集再算相关性打分，也都是这个形状的变体。见过一次，处处认得。
 

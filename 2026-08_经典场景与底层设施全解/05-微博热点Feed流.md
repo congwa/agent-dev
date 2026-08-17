@@ -36,6 +36,31 @@
 
 ---
 
+全文很长，先给个路标，八个台阶一步步爬：
+
+```mermaid
+flowchart TD
+    A["<b>定位问题</b><br/>0-2节 签名难题与朴素方案之死"]
+    B["<b>两条基本路</b><br/>3-5节 推模式 vs 拉模式正面对决"]
+    C["<b>主流答案</b><br/>6-8节 推拉结合 + 阈值 + 活跃过滤"]
+    D["<b>核心算法</b><br/>9节 K路归并取Top N"]
+    E["<b>存储与削峰</b><br/>10-11节 收件箱铁律 + MQ削峰"]
+    F["<b>热点与排序</b><br/>12-13节 热key治理 + 召回精排"]
+    G["<b>全景与实战</b><br/>14-16节 架构图 代码 生产坑"]
+    H["<b>结论沉淀</b><br/>17-18节 反直觉结论 + 速查表"]
+
+    A --> B --> C --> D --> E --> F --> G --> H
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class A entry
+    class B,C,D,E,F,G main
+    class H data
+```
+
+---
+
 ## 0. 先讲个故事：订报纸 vs 去报刊亭
 
 ### 0.1 两种拿到报纸的方式
@@ -1262,6 +1287,37 @@ def get_feed_naive(db, user_id: int, limit: int = 20) -> list[Post]:
    ★ 长尾分布让"分而治之"的收益大得离谱 ★
 ```
 
+把这三条路的死法和活法画在一起：
+
+```mermaid
+flowchart TD
+    A["<b>一个人发帖</b><br/>要让N个粉丝看到"]
+    B["<b>纯推模式</b><br/>写扩散到所有粉丝"]
+    C["<b>纯拉模式</b><br/>读时现拉现归并"]
+    D["<b>遇到大V</b><br/>写扩散1.2亿次"]
+    E["<b>系统被打垮</b><br/>27秒延迟+故障传染"]
+    F["<b>全站普通人刷新</b><br/>各拉数百个发件箱"]
+    G["<b>读扇出爆炸</b><br/>全站QPS放大200倍"]
+    H["<b>推拉结合</b><br/>粉丝少走推,粉丝多走拉"]
+    I["<b>两头成本都被砍掉</b><br/>写降到600亿,读可控"]
+
+    A --> B
+    A --> C
+    A --> H
+    B -- "遇到大V" --> D --> E
+    C -- "遇到海量普通人" --> F --> G
+    H --> I
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class A entry
+    class B,C,D,F,H main
+    class E,G danger
+    class I data
+```
+
 ---
 
 ## 6. 主流答案：推拉结合
@@ -1471,6 +1527,28 @@ def get_feed_naive(db, user_id: int, limit: int = 20) -> list[Post]:
    │    "最贵的写" 和 "最多的读" 恰好可以分开处理 ★                   │
    │                                                                  │
    └──────────────────────────────────────────────────────────────────┘
+```
+
+上面是量的对比，下面把三条路的实际数据流路径并排摆出来：
+
+```mermaid
+flowchart LR
+    subgraph PUSH["纯推:写全扩散"]
+        P1["<b>发帖</b><br/>1次写post表"] --> P2["<b>写扩散</b><br/>ZADD 1.2亿个收件箱"] --> P3["<b>粉丝读</b><br/>1次ZREVRANGE"]
+    end
+
+    subgraph PULL["纯拉:读全扇出"]
+        L1["<b>发帖</b><br/>1次写outbox"] --> L2["<b>粉丝读</b><br/>并发拉500个发件箱"] --> L3["<b>归并排序</b><br/>现场算,用完就扔"]
+    end
+
+    subgraph MIX["推拉结合:分流"]
+        M1["<b>发帖</b><br/>按粉丝规模分流"] --> M2["<b>分流处理</b><br/>大V只写发件箱,普通人推活跃粉丝"] --> M3["<b>粉丝读</b><br/>收件箱+并发拉12个大V"]
+    end
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class P1,P2,P3,L1,L2,L3 main
+    class M1,M2,M3 data
 ```
 
 数字化对比（全站每天）：
@@ -1708,6 +1786,27 @@ def get_feed_naive(db, user_id: int, limit: int = 20) -> list[Post]:
    └────────────────────────────────────────────────────────────┘
 ```
 
+两个独立的约束条件相乘，就得到了这个数字：
+
+```mermaid
+flowchart TD
+    A["<b>约束一</b><br/>扩散必须在5秒内完成"]
+    B["<b>约束二</b><br/>单作者可用写吞吐5万ops/s"]
+    C["<b>相乘得出阈值</b><br/>5秒 × 5万 = 25万活跃粉丝"]
+    D["<b>换算总粉丝数</b><br/>按5%活跃率约合500万总粉丝"]
+
+    A --> C
+    B --> C
+    C --> D
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class A,B entry
+    class C main
+    class D data
+```
+
 **记住这个方法论比记住 25 万这个数字重要得多。** 换一家公司、换一套硬件，数字就变了，但推导过程不变：
 
 ```
@@ -1755,6 +1854,19 @@ def get_feed_naive(db, user_id: int, limit: int = 20) -> list[Post]:
    │    - 变更操作走低优先级队列，慢慢做，不抢线上资源              │
    │                                                                │
    └────────────────────────────────────────────────────────────────┘
+```
+
+把这套规则画成状态机，两条边用不同阈值，灰色地带原地不动：
+
+```mermaid
+stateDiagram-v2
+    [*] --> 普通用户
+    普通用户 --> 大V : 活跃粉丝涨破30万
+    大V --> 普通用户 : 活跃粉丝跌破20万且过了冷却期
+    note right of 普通用户
+        20万~30万之间维持原状
+        状态变更后7天冷却期内不再变
+    end note
 ```
 
 这一招你在秒杀的**熔断器**那节见过 —— 熔断器的"打开阈值"和"半开恢复阈值"也是分开的，就是为了防止在临界点反复横跳。**同一招，不同场景。**
@@ -2088,6 +2200,30 @@ def merge_naive(sources: list[list[FeedItem]], n: int) -> list[FeedItem]:
    │    堆归并可以【流式】拉取：先每路取 20 条，                    │
    │    不够再回去取 —— 大多数情况根本不需要取 200 条。             │
    └────────────────────────────────────────────────────────────────┘
+```
+
+两条路径并排摆一起看：
+
+```mermaid
+flowchart LR
+    subgraph NAIVE["笨办法:全取出来排序"]
+        N1["<b>取回全部</b><br/>13路×200条=2600条"] --> N2["<b>整体排序</b><br/>sort全部2600条"] --> N3["<b>截断</b><br/>取前20,扔掉2580条"]
+    end
+
+    subgraph HEAP["正确做法:K路堆归并"]
+        H1["<b>只取每路首条</b><br/>13个元素进堆"] --> H2["<b>反复弹堆顶</b><br/>补下一条进堆"] --> H3["<b>凑够20条即停</b><br/>只碰33个元素"]
+    end
+
+    N3 --> CMP
+    H3 --> CMP
+    CMP["<b>差距</b><br/>29400次 vs 74次,差400倍"]
+
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class N1,N2,N3 danger
+    class H1,H2,H3 main
+    class CMP note
 ```
 
 罪状四是关键。**归并算法的选择，直接决定了你要从 Redis 拉多少数据回来。**
@@ -4039,6 +4175,25 @@ def merge_top_n(sources: list[list[FeedItem]], n: int) -> list[FeedItem]:
    └──────────────────────────────────────────────────────────────────┘
 ```
 
+三种成因各不相同，但都收敛到同一个解法：
+
+```mermaid
+flowchart TD
+    A["<b>成因一</b><br/>身份切换重叠期,推的和拉的都有"]
+    B["<b>成因二</b><br/>收件箱重建与正常推送并行写入"]
+    C["<b>成因三</b><br/>多路召回都命中同一条帖"]
+    D["<b>归并层去重</b><br/>按post_id去重,必需品"]
+
+    A --> D
+    B --> D
+    C --> D
+
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class A,B,C danger
+    class D data
+```
+
 ### 16.3 展开讲：大 V 互相关注和身份切换空窗
 
 ```
@@ -4162,6 +4317,28 @@ def merge_top_n(sources: list[list[FeedItem]], n: int) -> list[FeedItem]:
 | ZSet 最大成员数（单 key） | < 2000 | 超了说明截断没跑 |
 
 **最后一行特别提醒**：Redis 里出现一个超大的 ZSet（比如某个 key 有 500 万成员），会导致这个 key 的所有操作变慢，而且**删除它会阻塞 Redis 主线程几秒钟**（大 key 删除）。生产上一定要有大 key 巡检。
+
+全文出现过四处不同的降级触发点（7.6 过载、8.3 沉睡用户、10.2 翻页超界、11.6 异步扩散窗口），它们最终都汇入同一条兜底路径：
+
+```mermaid
+flowchart TD
+    A["<b>正常路径</b><br/>读收件箱,最快"]
+    B["<b>系统过载</b><br/>全部临时降级为拉模式"]
+    C["<b>翻页超1000条</b><br/>该次请求降级为纯拉"]
+    D["<b>沉睡用户上线</b><br/>先纯拉兜底,后台重建"]
+    E["<b>共同兜底</b><br/>纯拉模式:现拉现归并"]
+
+    A -- "过载" --> B --> E
+    A -- "翻到底" --> C --> E
+    A -- "沉睡唤醒" --> D --> E
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class A entry
+    class B,C,D note
+    class E data
+```
 
 ---
 

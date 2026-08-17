@@ -114,6 +114,33 @@ SSD 没有磁头，差距缩小，但没消失——小块随机写有写放大�
 
 > 💡 **磁盘不是慢，磁盘是"随机访问慢、顺序访问快"。** 说磁盘慢，就像说管理员 A 手脚慢——他手脚不慢，他是跑得太多。
 
+同一个写请求，岔路走哪条，结果差着两个数量级：
+
+```mermaid
+flowchart TD
+    A["<b>一次磁盘 IO</b><br/>读或写一段数据"]
+    B{"<b>访问模式</b><br/>随机还是顺序"}
+    C["<b>随机 IO</b><br/>磁头反复寻道"]
+    D["<b>顺序 IO</b><br/>磁头几乎不挪"]
+    E["<b>每秒一两百次</b><br/>逐行更新的天花板"]
+    F["<b>每秒几百 MB</b><br/>只追加的量级"]
+
+    A --> B
+    B -- "B+ 树就地更新" --> C
+    B -- "log 只追加" --> D
+    C --> E
+    D --> F
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class A entry
+    class B,D main
+    class C,E danger
+    class F data
+```
+
 ### 2.3 回头看 MySQL 为什么撑不住
 
 现在能解释 1.1 的压测了。InnoDB 用 B+ 树存数据，B+ 树的世界观是：
@@ -127,6 +154,29 @@ SSD 没有磁头，差距缩小，但没消失——小块随机写有写放大�
 拿 B+ 树存只追加的事件流，等于雇了管理员 A 来管传送带的活——他的所有本事（目录、格子、跑位）在这个场景里全是纯开销。
 
 那换个思路：这个场景需要的存储结构，天生就该长成传送带的样子。
+
+把第 3 到第 7 节要讲的五招提前串成一条线，每一招解决上一招留下的缺口：
+
+```mermaid
+flowchart TD
+    S["<b>顺序写</b><br/>把磁盘当磁带只追加"]
+    P["<b>page cache</b><br/>缓存全交给 OS"]
+    Z["<b>零拷贝</b><br/>sendfile 省两次搬运"]
+    B["<b>攒批压缩</b><br/>一次请求顶几百次"]
+    I["<b>分区+稀疏索引</b><br/>并行与快速定位"]
+
+    S -- "读会不会搅乱写" --> P
+    P -- "转发要过用户态吗" --> Z
+    Z -- "小包太多怎么办" --> B
+    B -- "单机吞吐到顶了" --> I
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class S entry
+    class P,Z,B main
+    class I data
+```
 
 ---
 
@@ -279,6 +329,29 @@ Linux 提供了 `sendfile` 系统调用（Java 里对应 `FileChannel.transferTo
 注意这招和第二招是连体的：**正因为数据本来就躺在 page cache 里（第 4 节），sendfile 才有东西可发。** 一条热门消息被四家下游各拉一遍，就是 page cache 里的同一份数据被 sendfile 发四次，broker 的用户态代码全程没碰过这些字节。Kafka 用它的地方是"broker → consumer"和"broker → follower 副本"这两条读路径；producer 写进来的路径用不了（写入总得过 broker 的手做校验和记账）。
 
 ⚠️ **开了 SSL/TLS，零拷贝就没了。** 加密必须在用户态做（Kafka 官方文档明确说了不支持内核态的 SSL_sendfile），数据只好老老实实走 5.1 的四次搬运再加一道加解密。安全和这部分性能，二选一，这是明码标价的交易。（内核 kTLS 理论上能救回来，但 Kafka 默认不用——此句为文档与社区讨论方向，未一手核实。）
+
+两条路径并排摆一起，差距更扎眼：
+
+```mermaid
+flowchart LR
+    subgraph OLD["传统 read+write"]
+        direction TB
+        O1["<b>4 次搬运</b><br/>2 次 DMA + 2 次 CPU 拷贝"]
+        O2["<b>4 次切换</b><br/>用户态内核态来回"]
+    end
+    subgraph NEW["sendfile 零拷贝"]
+        direction TB
+        N1["<b>2 次搬运</b><br/>全部 DMA，CPU 不碰"]
+        N2["<b>1 次系统调用</b><br/>数据全程不出内核"]
+    end
+
+    O2 -. "省两次 CPU 拷贝" .-> N2
+
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class O1,O2 danger
+    class N1,N2 data
+```
 
 ### 5.3 为什么这招还不够
 
@@ -467,6 +540,23 @@ if __name__ == "__main__":
   producer ◀─⑤ ack────────┘
 ```
 
+把这五步摆成时序，谁等谁看得更清楚：
+
+```mermaid
+sequenceDiagram
+    participant Pr as Producer
+    participant Ld as Leader
+    participant Fw as Follower
+
+    Pr->>Ld: 发一批消息
+    Ld->>Ld: append 进本地 log
+    Fw->>Ld: fetch 拉取这批
+    Ld->>Fw: 返回数据
+    Fw->>Ld: 汇报同步进度
+    Ld->>Ld: ISR 全体确认后高水位前移
+    Ld->>Pr: ack
+```
+
 注意③：副本同步复用的还是那套"顺序读 + page cache + 零拷贝"的路径——leader 发给 follower 和发给 consumer 走的是同一条快车道。**可靠性机制没有另起炉灶，它搭了性能机制的便车。** 这是"可靠但不拖慢"的第一层原因。
 
 **ISR**（In-Sync Replicas）是"跟得上的副本"名单。follower 落后太久（超过 `replica.lag.time.max.ms` 的阈值）就被踢出名单，追上了再回来。它的用处：leader 等确认时**只等名单里的**，不被一台病秧子 follower 拖死全队。
@@ -480,6 +570,39 @@ producer 可以选等到什么程度才算发送成功：
 | `acks=0` | 什么都不等，发出去就算成 | 最快 | 网络一抖就丢，broker 挂了也丢 | 丢了无所谓的指标、采样 |
 | `acks=1` | leader 写进自己 log 就确认 | 快 | leader 刚确认就挂、follower 还没拉走 → 丢 | 大多数日志埋点 |
 | `acks=all` | ISR 全体写入才确认 | 慢一截（延迟） | 配合 `min.insync.replicas=2`：一台机器炸了也不丢 | 订单、支付、账务事件 |
+
+三档摆成一条分岔，丢消息的风险随等待程度递减：
+
+```mermaid
+flowchart TD
+    A["<b>producer 发送一批</b><br/>选择 acks 档位"]
+    B{"<b>acks 设置</b>"}
+    C["<b>acks=0</b><br/>发出去就算成功"]
+    D["<b>acks=1</b><br/>等 leader 写入本地"]
+    E["<b>acks=all</b><br/>等 ISR 全体确认"]
+    F["<b>丢消息风险高</b><br/>网络一抖就丢"]
+    G["<b>丢消息风险中</b><br/>leader 挂且未同步会丢"]
+    H["<b>基本不丢</b><br/>配合副本数量兜底"]
+
+    A --> B
+    B --> C
+    B --> D
+    B --> E
+    C --> F
+    D --> G
+    E --> H
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B main
+    class C,F danger
+    class D,G note
+    class E,H data
+```
 
 两个要点：
 
@@ -581,6 +704,31 @@ print("最后才 fsync :", round(write_10k("b.bin", False), 3), "秒")
 - [第 9 篇 IM](./09-IM消息可靠投递.md) 第 15 节：消息有序**只保证会话内**——seq 是会话级的，不是全局的；
 - [第 14 篇分库分表](./14-分库分表.md)：雪花 ID 只保证**分片内**递增，跨分片不保证；
 - 本篇：消息有序**只保证分区内**。
+
+三个系统摆在一起看，是同一个形状：
+
+```mermaid
+flowchart LR
+    subgraph IM["IM 消息"]
+        I1["<b>会话内有序</b><br/>seq 按会话递增"]
+    end
+    subgraph SHARD["分库分表"]
+        S1["<b>分片内递增</b><br/>雪花 ID 分片内单调"]
+    end
+    subgraph KAFKA["Kafka 分区"]
+        K1["<b>分区内有序</b><br/>offset 分区内单调"]
+    end
+
+    I1 --> COM
+    S1 --> COM
+    K1 --> COM
+    COM["<b>共同点</b><br/>辖区外彻底放飞并行"]
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class I1,S1,K1 main
+    class COM data
+```
 
 三个系统，同一句话：**全局有序是并行的天敌，所以把"有序"的辖区缩到业务真正需要的最小单位——会话、分片、分区——辖区外彻底放飞。** 有序的圈画到哪，并行的天花板就开到哪。下次做系统设计，先问"有序的最小辖区是什么"，这个问题值钱。
 
