@@ -38,6 +38,33 @@
 
 写策略共四个触发点（`README.md:19`–`24`）：`turn/end`（强制，冷读最想要的就是回合终值）、会话摘离（强制）、计数阈值（可配节流）、间隔阈值（可配节流）。前两个是**策略不是旋钮**，永远会触发。
 
+四个触发点收拢到同一次写盘动作：
+
+```mermaid
+flowchart TD
+    A["<b>session/event 到达</b>"]
+    B["<b>turn/end 事件</b>"]
+    C["<b>脏计数达到 writeEveryEvents</b>"]
+    D["<b>writeIntervalMs 定时器到期</b>"]
+    E["<b>session/disposed</b><br/>live→cold 那一刻"]
+    F["<b>写耐久检查点</b><br/>session_projcache 表 sessions"]
+
+    A -- "强制，不可关" --> B
+    A -- "可配节流" --> C
+    A -- "可配节流" --> D
+    B --> F
+    C --> F
+    D --> F
+    E -- "强制，不可关" --> F
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class A,E entry
+    class B,C,D main
+    class F data
+```
+
 ## 四条不可动摇的性质
 
 - **一行缓存是折叠捷径，永远不是权威**：可能陈旧（`seq` 精确说明陈旧多少），但绝不会错（`README.md:7`）。
@@ -51,6 +78,30 @@
 
 - `cachedSnapshot(meta)`（`src/index.ts:119`）——**零 I/O 那一级**：直接从身份匹配的记录里 view 出整值（只取版本匹配的 key），`asOfSeq` 取所供给行里**最低**的水位（`src/index.ts:128`），这样客户端按 higher-seq-wins 播种时，陈旧的列表块永远盖不掉更新的 push 帧。没有可用记录就返回 `undefined`。
 - `coldSnapshot(id, signal?)`（`src/index.ts:166`）——冷读梯子，顺路是零全量日志加载：缓存行 → `sessionProjections.restoreFloor` → 持久化 `readFrom(id, floor)` → `sessionProjections.restore` → fail-soft 写回。地板锚在最低可用水位下方一条（`packages/session/session-projection/src/index.ts:309`），使得"日志被崩溃修复截短"变得可证：越界的行会触发**恰好一次**从 seq 0 的全量重读，而不是供出幽灵值（`src/index.ts:184`–`194`）。没有持久化日志的会话按 seam 的 `not found` 拒绝。
+
+两条路径一个零 I/O、一个走完整的冷读梯子，并排看更清楚谁快谁慢：
+
+```mermaid
+flowchart LR
+    subgraph CACHED["cachedSnapshot：零 I/O"]
+        CA["<b>身份匹配的缓存记录</b><br/>只取版本匹配的 key"]
+        CB["<b>直接 view 出整值</b><br/>asOfSeq 取最低水位"]
+        CA --> CB
+    end
+    subgraph COLD["coldSnapshot：冷读梯子"]
+        DA["<b>缓存行</b>"]
+        DB["<b>sessionProjections.restoreFloor</b>"]
+        DC["<b>持久化 readFrom(id, floor)</b>"]
+        DD["<b>sessionProjections.restore</b>"]
+        DE["<b>fail-soft 写回</b>"]
+        DA --> DB --> DC --> DD --> DE
+    end
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class CA,CB data
+    class DA,DB,DC,DD,DE main
+```
 
 ## 模型看得见什么
 

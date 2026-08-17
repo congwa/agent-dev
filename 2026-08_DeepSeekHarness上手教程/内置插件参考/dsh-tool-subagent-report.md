@@ -39,6 +39,33 @@ web-app **不禁用**这一行，理由写在 `packages/bundle/web-app/cordis.pa
 
 `src/index.ts:36-38`。`wakeup` 走 `parent.followup()`，恰好创建一个普通的后续父 turn 并唤醒停park的父 driver，**从不**改变进行中的 turn；它之所以是默认，是因为已经 park 的父没有别的理由回头看，安静投递会让一条已接受的 report 一直没人读。`quiet` 走 `parent.inject()`，只加模型可见上下文而不发起父的模型请求：父 idle 时追加在调用返回前就完成，父正在准入或运行时则暂存到下一个安全日志位置。这是**部署级调度策略**，模型 schema 无法逐次选择或覆盖。
 
+两种投递策略在父侧引发的动作完全不同，选哪个取决于「愿不愿意让子唤醒父」：
+
+```mermaid
+flowchart TD
+    A["<b>子调用 report</b><br/>唯一必填参数 output"]
+    B{"<b>reportDelivery</b>"}
+    C["<b>wakeup（默认）</b><br/>走 parent.followup()"]
+    D["<b>quiet</b><br/>走 parent.inject()"]
+    E["<b>创建普通后续父 turn</b><br/>唤醒停 park 的父 driver"]
+    F["<b>只加模型可见上下文</b><br/>不发起父的模型请求"]
+    G["<b>父 idle</b><br/>追加在调用返回前完成"]
+    H["<b>父正在准入/运行</b><br/>暂存到下一个安全日志位置"]
+
+    A --> B
+    B -- "默认" --> C --> E
+    B -- "config 显式设置" --> D --> F
+    F --> G
+    F --> H
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class A entry
+    class B,C,D main
+    class E,F,G,H data
+```
+
 ## 模型看得见什么
 
 - **子侧 schema**：一个必填 `output` 字符串。描述要求子在结束前 report 一次、说明 report 只到达启动它的那个 agent、且**不结束 turn**；还写着「A failed call may still have arrived, so do not blindly repeat it.」

@@ -29,6 +29,31 @@
 
 四个派发模式见 `docs/event-producer-consumer.md:41`–`44`。监听器由共享的 `PersistenceCoordinator` 装，不是本包直接写的；HMR 热重载不会重放 `session/created`，所以加载时会把已存在的活会话补种一遍（`coordinator.ts:1136`）。本包不注册工具、命令、prompt 段。
 
+四条监听线最终只汇成两种落盘节奏——合批等待，或立即排干：
+
+```mermaid
+flowchart TD
+    A["<b>session/created</b><br/>捕获 header，fork 的 seed 只持久化一次"]
+    B["<b>session/event</b><br/>冻结事件拷入 write-behind 控制器"]
+    C["<b>session/flush</b><br/>耐久屏障，取消等待立即排干"]
+    D["<b>session/disposed</b><br/>退休前最后一次排干"]
+    E["<b>PersistenceCoordinator 合批窗口</b><br/>writeBatchMaxDelayMs 默认 200ms"]
+    F["<b>写入 session.jsonl.zstd</b><br/>append-only，写失败回滚原字节长度"]
+
+    A --> E
+    B --> E
+    E -- "合批窗口到期" --> F
+    C -- "绕过合批窗口，立即" --> F
+    D -- "绕过合批窗口，立即" --> F
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class A,B,C,D entry
+    class E main
+    class F data
+```
+
 ## 配置项
 
 | 字段 | 类型 | 默认值 | 作用 |
@@ -50,6 +75,31 @@
 项目目录名是把 cwd 规范化后**有损**截断和替换分隔符得到的，所以规范化后相同的 cwd 会共用一个项目目录；会话 id 仍然区分出各自的会话目录（`README.md:19`）。会话 id 是未经校验的 branded string，会被单射转义成一个安全路径段（`README.md:20`）。
 
 耐久语义要点（`README.md:42`–`48`）：懒物化（`create()` 什么都不写，首次 `append` 才写 header 帧并 `fsync`，POSIX 用硬链接发布、Windows 用 `MoveFileExW(..., MOVEFILE_WRITE_THROUGH)`，均不覆盖；两者分别落在 `src/index.ts:549` 与 `src/win32.ts:30`、`:47`）；append-only（写失败回滚到原字节长度）；崩溃恢复保留有效尾部（最后一帧结构不完整就保留其已解码记录、从该帧起截断并补上契约要求的合成 tool/step/turn 收尾，但**缺陷落在最后一个已提交 `turn/end` 处或之前就算损坏、直接拒绝**）；`inspect()` 只读、不截断；`append` 拒绝首 seq 接不上的批次。
+
+崩溃恢复能不能修，取决于损坏点相对最后一个已提交 `turn/end` 的位置：
+
+```mermaid
+flowchart TD
+    A["<b>加载时发现尾部损坏</b><br/>最后一帧结构不完整"]
+    B["<b>损坏点晚于最后已提交 turn/end</b>"]
+    C["<b>保留有效尾部并截断</b><br/>补合成 tool/step/turn 收尾"]
+    D["<b>损坏点在最后已提交 turn/end 处或之前</b>"]
+    E["<b>拒绝整份日志</b><br/>不做任何修复"]
+
+    A -- "可修复" --> B
+    A -- "判定为坏" --> D
+    B --> C
+    D --> E
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class A entry
+    class B main
+    class C data
+    class D,E danger
+```
 
 ## 模型看得见什么
 

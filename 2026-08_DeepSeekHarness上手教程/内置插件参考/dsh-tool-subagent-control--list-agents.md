@@ -34,6 +34,40 @@
 
 投影规则在 `project()`（`src/list-agents.ts:66-85`）：诊断行原样保留，`mode !== 'continuable'` 的行**直接丢弃**——一次性子无法被 `send_message` 续话，所以模型不该选到它们，但发现过程仍然穿过它们去找更深的可续后代。状态由 `statusOf()`（`:59-63`）算：registry 里没有 → `ready`；有且 `agent.status === 'running'` → `running`；否则 `idle`。`ready` 的措辞是刻意的——「可恢复而非终态」，不是一个等着被收取的结果。
 
+从持久子目录到最终渲染行，中间要经过一次过滤和一次在线状态查询：
+
+```mermaid
+flowchart TD
+    A["<b>ctx.subagents 枚举</b><br/>scope=children 直接子 / scope=descendants 整棵树"]
+    B{"<b>逐行判断</b>"}
+    C["<b>诊断行</b><br/>corrupt/unsupported/unavailable，原样保留"]
+    D{"<b>mode 是否为 continuable</b>"}
+    E["<b>丢弃</b><br/>一次性子不能被 send_message 续话"]
+    F["<b>查在线 ctx.agents registry</b>"]
+    G["<b>registry 里没有</b><br/>status=ready"]
+    H["<b>registry 里有且 running</b><br/>status=running"]
+    I["<b>registry 里有但非 running</b><br/>status=idle"]
+    J["<b>渲染成一行</b><br/>&lt;id&gt; （status）— &lt;label&gt;"]
+
+    A --> B
+    B -- "诊断" --> C --> J
+    B -- "正常子" --> D
+    D -- "否" --> E
+    D -- "是" --> F
+    F --> G --> J
+    F --> H --> J
+    F --> I --> J
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class A entry
+    class B,D,F main
+    class C,G,H,I,J data
+    class E danger
+```
+
 `descendants` 行里的 `parent` 是持久的直接父 session id，**可能指向一个没出现在输出里的普通 session**。对调用方而言，只有 depth-1 的子才是 `send_message` 的候选，更深的只能作为 `interrupt_agent` 的候选。
 
 ## 配置项

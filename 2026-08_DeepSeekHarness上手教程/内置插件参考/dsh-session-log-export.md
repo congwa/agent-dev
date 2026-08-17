@@ -39,6 +39,32 @@
 
 两条入口（Header 按钮 / 斜杠命令）走同一个 controller：先发 `HEAD` 预检，非 2xx 就把 `Export failed: HTTP <status>` 连同 body 文本抛成错误；通过后把 GET URL 交给浏览器下载管理器，**JS 里从不缓冲 ZIP**（`src/client/controller.ts:111-130`、`39-44`）。同一会话的并发点击共享同一次操作（`src/client/controller.ts:78-88`）；插件卸载时 abort 预检并等待收敛（`src/client/controller.ts:104-109`）。
 
+两条入口最终收敛到一次操作、一条判断分支：
+
+```mermaid
+flowchart TD
+    A["<b>用户触发</b><br/>Header 按钮点击 或 /export 命令"]
+    B["<b>共享 Controller 接管</b><br/>同会话并发点击共享同一次操作"]
+    C["<b>HEAD 预检</b>"]
+    D["<b>预检非 2xx</b><br/>抛错 Export failed: HTTP status"]
+    E["<b>GET 流式下载</b><br/>交给浏览器下载管理器"]
+    F["<b>ZIP 由 dsh-host-apiproxy 流式产出</b><br/>JS 从不缓冲 ZIP"]
+
+    A --> B --> C
+    C -- "非 2xx" --> D
+    C -- "2xx" --> E
+    E --> F
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class A entry
+    class B,C main
+    class D danger
+    class E,F data
+```
+
 ## 模型看得见什么
 
 README《Model Experience》："Nothing. `/export` stays on the human-command plane, and the ZIP download does not enter model history." Token effect "Zero. The command creates no model turn."（`README.md:35`、`39`）

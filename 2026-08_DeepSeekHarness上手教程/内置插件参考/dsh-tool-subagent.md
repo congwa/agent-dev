@@ -51,6 +51,33 @@ web-app bundle 把这两行都 `disabled: true`（`packages/bundle/web-app/cordi
 
 前台路线一定 `await run.dispose()`；非 `completed` 的 stop reason 变成 errored 结果，并把子保住的**部分输出**接在 headline 后面（`withPartialText`，`src/index.ts:149-155`），所以截断的答案既不会被当成成功，也不会被静默丢掉。可续路线在 inbox 接受时就 resolve，此后子自己拥有 turn，这次调用既不等待也不收集结果。
 
+`run_in_background` 参数和实例的 `backgroundMode` 配置一起决定走哪条路线、模型能拿到什么：
+
+```mermaid
+flowchart TD
+    A["<b>调用委派工具</b><br/>run_in_background 省略或显式传值"]
+    B{"<b>run_in_background 解析为 false？</b>"}
+    C["<b>前台路线</b><br/>await run.dispose()，返回子的最终文本；非 completed 时附部分输出，结果 errored"]
+    D{"<b>本实例 backgroundMode</b>"}
+    E["<b>一次性后台</b><br/>{kind:'background', jobId}<br/>渲染 started background subagent task"]
+    F["<b>可续后台</b><br/>{kind:'continuable', subagentId}<br/>渲染 started subagent"]
+    J["<b>用 job_output/job_kill 收集</b><br/>走通用 task 面"]
+    K["<b>用 send_message 续话</b><br/>结算通知另行到达父侧"]
+
+    A --> B
+    B -- "是" --> C
+    B -- "否（默认）" --> D
+    D -- "one-shot" --> E --> J
+    D -- "continuable" --> F --> K
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class A entry
+    class B,D main
+    class C,E,F,J,K data
+```
+
 ## 配置项
 
 | 字段 | 类型 | 默认值 | 作用 |

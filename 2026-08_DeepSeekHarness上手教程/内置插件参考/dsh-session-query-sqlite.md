@@ -44,6 +44,22 @@ web-app 原样重述同一组值（`packages/bundle/web-app/cordis.patch.yml:30`
 
 三个 `openAt` 的区别（`README.md:19`）：`startup` 在服务激活时就 import 并开句柄，索引非法则在发布前失败；`first-search` 把服务直接标 ACTIVE，首批并发搜索共享一个 readiness promise，为的是让 Node 22 启动输出干净（把 SQLite 的实验性警告推迟到第一次真搜索，**不是消除**）；`never` 则连观察和对账都不跑。
 
+三个取值决定 SQLite 句柄什么时候打开、以什么代价打开：
+
+```mermaid
+stateDiagram-v2
+    [*] --> Never
+    Never --> FirstSearch : 覆写 openAt
+    Never --> Startup : 覆写 openAt
+    FirstSearch --> Active : 第一次真正搜索触发 import 与开句柄
+    Startup --> Active : 服务激活时立即 import 并开句柄
+
+    Never : never（bundle 默认），search 恒失败 SESSION_QUERY_SEARCH_DISABLED
+    FirstSearch : first-search，先标 ACTIVE，首批搜索共享 readiness promise
+    Startup : startup，索引非法则在发布前失败
+    Active : Active，SQLite 句柄已打开，可全文检索
+```
+
 ## 检索契约要点
 
 - 查询串是**必填、trim 过、空白规范化的字面短语**；FTS5 语法（引号、`OR`、`NEAR`、`*`）一律当数据而非可执行 MATCH 语法（`README.md:9`）。

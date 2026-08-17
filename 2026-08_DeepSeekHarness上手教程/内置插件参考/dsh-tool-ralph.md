@@ -54,6 +54,22 @@ schemastery 定义在 `src/index.ts:35-40`；`resolveConfig`（`src/index.ts:187
 
 脚本是模板字符串常量 `RALPH_SCRIPT`（`src/index.ts:90-177`），模型改不了它、看不见它、也选不了 provider。每轮 prompt 由 6 段拼成（`src/index.ts:155-162`），给 child 的只有：不可变 objective、当前轮次和上限、「共享工作区就是唯一真相源」的指令、上一轮的结构化 handoff。父对话和上一个 child 的 session **都不注入**。
 
+一轮一个全新 child，靠 status 字段决定是继续开下一轮还是收敛到某个终态：
+
+```mermaid
+stateDiagram-v2
+    [*] --> 起新一轮
+    起新一轮 --> child跑本轮
+    child跑本轮 --> 提交报告
+    提交报告 --> 起新一轮 : continue 且未到轮数上限（带上生成的 handoff）
+    提交报告 --> Complete : status=complete
+    提交报告 --> Blocked : status=blocked
+    提交报告 --> BudgetLimited : continue 但已到 maxRounds
+    Complete --> [*]
+    Blocked --> [*]
+    BudgetLimited --> [*]
+```
+
 报告 schema 是 `{ status, summary, evidence, nextSteps, blocker }` 五个必填字段、`additionalProperties: false`（`src/index.ts:91-102`）。status 三态各有自己的合法性规则（`src/index.ts:125-143`）：
 
 | status | 约束 |

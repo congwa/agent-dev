@@ -32,6 +32,34 @@
 
 两个工具都在 `exec.agent` 缺失时直接抛（`src/index.ts:60-64`、`:109-113`）：父权限和祖先权限都要求一个精确的在线调用 agent。
 
+两个工具都是「接受即返回」，但接受之后各自影响的范围完全不同：
+
+```mermaid
+flowchart LR
+    subgraph SM["send_message"]
+        direction TB
+        S1["<b>父调用 send_message</b><br/>subagent_id + message"]
+        S2["<b>子 inbox 接受</b><br/>返回 messageId"]
+        S3["<b>成为子的下一个 FIFO turn</b><br/>子正在忙就排在当前 turn 之后"]
+        S4["<b>不影响正在跑的 turn</b><br/>结果不通过本工具收集"]
+        S1 --> S2 --> S3 --> S4
+    end
+
+    subgraph IA["interrupt_agent"]
+        direction TB
+        I1["<b>父调用 interrupt_agent</b><br/>agent_id，可以是子或更深后代"]
+        I2["<b>服务比对在线谱系</b><br/>目标不存在/已结束也是接受的 no-op"]
+        I3["<b>只停当前 turn</b><br/>keepInbox：排队消息原地停放"]
+        I4["<b>已发布的后代继续跑</b><br/>子本身继续可续"]
+        I1 --> I2 --> I3 --> I4
+    end
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class S1,I1 main
+    class S2,S3,S4,I2,I3,I4 data
+```
+
 ## 配置项
 
 无配置项。行为完全由 `ctx.subagents` 决定：投递路由、冷恢复、权限校验、interrupt 的谱系检查全在服务侧，这里只转发参数和 `exec.agent`。

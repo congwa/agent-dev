@@ -48,6 +48,34 @@
 - **`stateVersion` 是失效锚**。持久化缓存存 `(sessionId, key, ver, seq, val)`；状态形状或折叠语义一变就必须 bump，否则陈旧行会被向前应用成垃圾。
 - **可选能力**。领域插件都在 `ctx.inject(['sessionProjections'], …)` 下注册，carrier 用 `ctx.get('sessionProjections')`，没有注册表的 headless 组合不受影响。
 
+"框架驱动、领域计算 + 同引用即无事发生"这两条规矩合起来就是一条事件的完整旅程：
+
+```mermaid
+flowchart TD
+    A["<b>session/event 提交</b>"]
+    B["<b>逐个已注册单元调用 apply</b><br/>纯函数 init/apply/view"]
+    C["<b>与事件无关</b><br/>返回同一 state 引用"]
+    D["<b>与事件相关</b><br/>返回新 state 引用"]
+    E["<b>onChanged 回调</b><br/>带 schema 校验过的 view"]
+    F["<b>carrier snapshot()/checkpoint()</b><br/>同步一致切面 asOfSeq"]
+
+    A --> B
+    B -- "Object.is 相等" --> C
+    B -- "Object.is 不等" --> D
+    D --> E
+    C --> F
+    E --> F
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,D main
+    class C note
+    class E,F data
+```
+
 ## 谁往里注册单元
 
 默认树上至少有：`dsh-tool-todo`（`packages/todo/tool-todo/src/index.ts:135`）、`dsh-goal`（`packages/goal/goal/src/index.ts:204`）、`dsh-plan-mode`（`packages/plan/plan-mode/src/index.ts:244`）、`dsh-permission-presets`（`packages/interaction/permission-presets/src/index.ts:243`）、`dsh-token-meter`（三个单元，`packages/llm/token-meter/src/index.ts:87`–`90`）、`dsh-session-title`（`packages/session/session-title/src/index.ts:308`）、`dsh-subagent`（两个单元：timing 与 identity，`packages/subagent/subagent/src/index.ts:197`–`199`）。web-app 另加 `dsh-session-stats`（`packages/session/session-stats/src/index.ts:20`、`28`，`inject = ['sessionProjections']`），以及 carrier 自己注册的两个单元 `sessionListMetadata`（`packages/host/apiproxy/src/api-proxy.ts:1292`）与 `imageLimits`（`:1316`）。

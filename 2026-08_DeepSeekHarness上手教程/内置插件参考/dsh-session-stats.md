@@ -36,6 +36,37 @@
 | `ttftMs` / `ttftSteps` | 首 token 延迟之和 / 计入的步数 | `step/start` → 第一条非空 delta chunk（`src/projection.ts:113-118`，累加在 `129-131`） |
 | `decodeMs` / `decodeTokens` | 解码时间与 provider 报的输出 token | 首 token → 组装完成，且该步报了 usage（`src/projection.ts:129-136`） |
 
+八个字段各自绑定一段事件区间，摊开看更清楚谁量谁：
+
+```mermaid
+flowchart TD
+    A["<b>step/start</b>"]
+    B["<b>首条非空 delta chunk</b><br/>首 token 到达"]
+    C["<b>assistant/message 组装完成</b><br/>且该步报了 usage"]
+    D["<b>tool/call → tool/result</b><br/>按 callId 配对"]
+    E["<b>step/end</b><br/>step 生命周期权威"]
+    F["<b>ttftMs / ttftSteps</b>"]
+    G["<b>decodeMs / decodeTokens</b>"]
+    H["<b>llmMs</b>"]
+    I["<b>toolMs</b>"]
+    J["<b>turns / steps</b>"]
+
+    A --> F
+    B --> F
+    B --> G
+    C --> G
+    A --> H
+    C --> H
+    D --> I
+    E --> J
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class A,B,C,D,E entry
+    class F,G,H,I,J data
+```
+
 schema 是 `.strict()` 的八个非负数（`src/projection.ts:65-74`）。每个字段在第一条贡献事件到达前都是 0；注册表一旦组合，key 永远在，客户端读**值**而不是判 key 是否存在（`README.md:15`）。
 
 为什么数 `step/end` 而不是 `assistant/message`：README 说得很直白——它是 step 生命周期的权威，agent loop 在 `finally` 里每进一个 step 就恰好写一条，所以完成、失败、取消、撞 max-tokens 的步都算；换成数组装消息会把 max-tokens 的 usage-host 消息多算、把取消的步漏算（`README.md:9`）。
@@ -47,6 +78,27 @@ README："None, as the plugin only computes a client-facing read model of alread
 ## 什么时候你会想换掉它 / 怎么换
 
 - **不想要**：删掉或 `disabled: true`。Web 聊天页的 stats strip 不会消失，而是**整条退回窗口内折叠**——`StatsLine` 里 `useProjection('sessionStats') ?? deriveStats(settledNodes)`（`packages/client/ui-conversation/src/client/chat/StatsLine.tsx:170-171`）。字段名两边刻意一样，就是为了能整体回退。差别是：窗口折叠只统计已经加载进来的那段历史，翻页和压缩会让数字变。
+
+两条路径的口径差异摊开看：
+
+```mermaid
+flowchart LR
+    subgraph ON["session-stats 启用（web-app 默认）"]
+        P1["<b>sessionStats 投影单元</b><br/>折叠全量日志"]
+        P2["<b>StatsLine 读 useProjection</b><br/>数字覆盖整个会话，翻页压缩不改变"]
+        P1 --> P2
+    end
+    subgraph OFF["session-stats 禁用或非 web-app 形态"]
+        Q1["<b>没有 sessionStats key</b>"]
+        Q2["<b>StatsLine 回退 deriveStats</b><br/>只统计已加载进来的那段历史"]
+        Q1 --> Q2
+    end
+
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class P1,P2 data
+    class Q1,Q2 note
+```
 - **想在别的形态里也有**：把这一行搬进对应 bundle 即可，前提是那棵树上有 `session-projection`（base 层已有）；不然 fiber 会一直 pending，什么都不注册（`README.md:24`）。
 - **想改口径**：没有配置开关，折叠逻辑是编译进包的纯函数（`src/projection.ts:105-171`）。要改只能自己写一个 key 不同的投影单元并接管消费端。
 

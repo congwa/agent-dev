@@ -32,6 +32,33 @@ web profile 关掉这一行（`packages/bundle/web-app/cordis.patch.yml:318-319`
 
 与 tool-fs 的一个实现差异值得记：`str_replace` / `insert` 拿到 intent 后并不调 `ctx.fs.editText`，而是自己读全文、算好新内容再调 `writeText`；guard 用 intent 里的 version，**intent 为 undefined 时退回刚 stat 到的 version**（`src/index.ts:312-314`、`:354-356`）——也就是说即使没挂策略插件，它仍然做一次 CAS。
 
+`create` / `str_replace` / `insert` 三条写路径都要先过一次 waterfall，`fs-observation-policy` 插件在不在场直接决定 intent 是谁给的：
+
+```mermaid
+flowchart TD
+    A["<b>write/edit 命令进来</b><br/>create、str_replace 或 insert"]
+    B{"<b>派发 fs/write-intent 或 fs/edit-intent</b><br/>waterfall 事件"}
+    C["<b>fs-observation-policy 已挂载</b><br/>策略插件决定 intent 内容"]
+    D["<b>没有策略插件</b><br/>落到默认 thunk"]
+    E["<b>create 默认 intent</b><br/>createIfAbsent"]
+    F["<b>str_replace / insert 默认 intent</b><br/>undefined"]
+    G["<b>CAS 写入</b><br/>guard 用 intent 里的 version"]
+    H["<b>intent 为 undefined 时</b><br/>guard 退回刚 stat 到的 version"]
+
+    A --> B
+    B -- "有策略" --> C --> G
+    B -- "无策略" --> D
+    D -- "create" --> E --> G
+    D -- "str_replace/insert" --> F --> H --> G
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class A entry
+    class B,C,D main
+    class E,F,G,H data
+```
+
 沙箱侧由内部 `MutationPolicy` 处理：构造时若 `ctx.fs.sandboxMode !== undefined` 却拿不到 `ctx.sandboxPolicy`，直接抛 `tool-str-replace-editor: the mounted filesystem confines but ctx.sandboxPolicy is missing`（`src/index.ts:70-72`）。拒绝错误被映射成 `sandboxDenialMarker(mode)`（`src/index.ts:81-85`）——注意它**不追加**升级提示，也不注册 `sandbox_permissions` 参数，这点与 tool-fs 不同。
 
 ## 配置项
