@@ -38,6 +38,20 @@
 | `refresh(session, signal?)` | 显式重跑 provider，或无 provider 时物化兜底；它是"钉住"的唯一解法（`src/index.ts:392-426`） |
 | `register(provider)` | 装唯一那个 provider，第二次注册直接抛错（`src/index.ts:434-459`） |
 
+标题在兜底、模型生成、用户钉住之间怎么转移，`get`/`rename`/`refresh` 三个方法凑在一起才是完整状态机：
+
+```mermaid
+stateDiagram-v2
+    [*] --> 兜底标题: "首条人类消息<br/>取前几个词"
+    兜底标题 --> 模型标题: "provider 生成成功"
+    模型标题 --> 模型标题: "all-prompts 场景重算"
+    兜底标题 --> 已钉住: "rename()"
+    模型标题 --> 已钉住: "rename()"
+    已钉住 --> 已钉住: "后续消息不再自动生成"
+    已钉住 --> 模型标题: "refresh() 重跑 provider"
+    已钉住 --> 兜底标题: "refresh() 且无 provider"
+```
+
 ## 配置项
 
 | 字段 | 类型 | 默认值 | 作用 |

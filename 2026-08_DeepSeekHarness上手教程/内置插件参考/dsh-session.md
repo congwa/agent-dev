@@ -28,6 +28,33 @@
 
 四个事件都是 scope-filtered 派发，但两种口径：`session/created` 与 `session/event` 是 agent 作用域过滤——该作用域的监听器只收到经这个 agent 上下文进入的会话/事件（`src/index.ts:48`–`49`、`69`–`70`）；`session/disposed` 与 `session/flush` 复用会话自己的 owner scope（`:59`、`:79`–`80`）。
 
+四个事件的派发模式与否决语义各不相同，文字很容易读混，摊开看更直接：
+
+```mermaid
+flowchart TD
+    A["<b>会话事件总线</b><br/>ctx.sessions 派发"]
+    B["<b>session/created</b><br/>emit，同步 throw 可否决"]
+    C["<b>session/disposed</b><br/>emit，恰好一次，含回滚路径"]
+    D["<b>session/event</b><br/>emit，fire-and-forget"]
+    E["<b>session/flush</b><br/>parallel，await 全部 settle"]
+
+    A --> B
+    A --> C
+    A --> D
+    A --> E
+
+    B -.-> B1["<b>否决</b><br/>同步 throw 可回滚发布<br/>异步 reject 只记日志"]
+    D -.-> D1["<b>监听器失败被容纳</b><br/>不影响已提交的 append"]
+    E -.-> E1["<b>耐久性检查点</b><br/>无 waterfall 否决"]
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,C,D,E main
+    class B1,D1,E1 note
+```
+
 本包不注册任何工具、命令或 prompt 段。
 
 主要 API（`README.md:15`–`19`）：`create(id?, {seed?, meta?})` / `flush(session)` / `fork(source, boundary?, childSessionId?)` / `get(id)` / `list()`。需要与别的资源做有序拆卸时另有 `prepare` + `enter` + `announce` 三段式（`README.md:25`–`27`），`dsh-agent-loop` 用它保证 loop 的最后一次 flush 早于会话摘离。
@@ -55,6 +82,25 @@ README 的 Model Experience 恰好三块（`README.md:95`–`137`）：
 **三、已记录的 request header（`README.md:125`–`137`）**
 
 会话能重建 loop 当时真正发出去的 system prompt、工具 schema、call config 与会话前缀。header 事件**不会**在 message 历史里多出一份拷贝——前缀是在 `deriveMessages()` 之外拼上去的，所以记录本身零重复 token、零失效；只有后续 header 换了前缀/prompt/schema 才会从第一处差异起让复用失效。
+
+「模型看得见什么」那三块其实是同一份 append-only 日志派生出的三条独立投影：
+
+```mermaid
+flowchart TD
+    LOG["<b>append-only 会话日志</b><br/>SessionEvent 序列，唯一事实源"]
+    M["<b>deriveMessages()</b><br/>派生模型可见的 message 历史"]
+    R["<b>崩溃修复</b><br/>补 TOOL_NOT_STARTED / TOOL_OUTCOME_UNKNOWN"]
+    H["<b>已记录的 request header</b><br/>system prompt/工具schema/前缀"]
+
+    LOG --> M
+    LOG --> R
+    LOG --> H
+
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    class LOG data
+    class M,R,H main
+```
 
 ## 什么时候你会想换掉它 / 怎么换
 

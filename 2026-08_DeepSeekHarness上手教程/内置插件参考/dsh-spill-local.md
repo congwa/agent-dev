@@ -40,7 +40,30 @@
 - `<random>-<safeName>`：6 字节随机十六进制前缀 + 经 `encodeSegment` 消毒成单个安全路径段的 `suggestedName`（`packages/spill/spill-local/src/store.ts:107-111`）。随机前缀是为了让共享 root 下无法预先植入符号链接。
 - 写入是独占 + 仅属主：`open(path, 'wx', 0o600)`（`packages/spill/spill-local/src/store.ts:113`），任何已存在的路径（含符号链接）都会让写入失败，所以植入的目标改不了写入方向。目录以 `mode: 0o700` 创建。
 
-README 把理由写得很直白："A predictable, world-readable root would let other local users read spilled tool output or plant symlinks."
+README 把理由写得很直白："A predictable, world-readable root would let other local users read spilled tool output or plant symlinks."这条路径构造与独占写入的防护逻辑串起来看更直接：
+
+```mermaid
+flowchart TD
+    IN["<b>saveText(input)</b><br/>content + suggestedName"]
+    HASH["<b>session-&lt;hash&gt;</b><br/>sha256(sessionId) 前12位"]
+    RAND["<b>&lt;random&gt;-&lt;safeName&gt;</b><br/>6字节随机前缀 + 消毒后的名字"]
+    WRITE["<b>独占写入</b><br/>open(path,'wx',0o600)"]
+    OUT["<b>返回 locator</b><br/>路径 + retrievalHint"]
+    FAIL["<b>路径已存在（含符号链接）</b><br/>写入直接失败"]
+
+    IN --> HASH --> RAND --> WRITE
+    WRITE -- "成功" --> OUT
+    WRITE -- "路径冲突" --> FAIL
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class IN entry
+    class HASH,RAND,WRITE main
+    class OUT data
+    class FAIL danger
+```
 
 ## 模型看得见什么
 

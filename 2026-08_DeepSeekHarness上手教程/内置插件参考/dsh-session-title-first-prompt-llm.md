@@ -28,7 +28,36 @@
 | 日志事件 | `session/title-llm-request` | 由共享库在**派发前**追加的 log-only 请求记录（声明 `packages/session/session-title-llm/src/index.ts:40-45`，追加 `262-269`） |
 | invariant | `@deepseek-ai/dsh-session-title-first-prompt-llm` | 空实现：请求与结果校验全在共享库和 session-title 服务那边，本包无独立可变状态（`src/invariant.ts:17-21`） |
 
-本包自己不监听任何事件、不注册工具、不注册命令。真正的实现全在库包 `@deepseek-ai/dsh-session-title-llm`（它不是插件，是 library，列在 `docs/config-catalog.md` 的 "Library packages (no plugin entry)" 一节，`docs/config-catalog.md:3114`、`3146`），本包只提供"节奏 + 选谁"这两个参数——源码里那句 `jscpd` 注释写得直白："the field validators remain shared"（`src/index.ts:17`）。触发时机由 session-title 服务掌握：`first-prompt` 只在"非 fork、第一条合格消息、且尚无标题"时排队（`packages/session/session-title/src/index.ts:470-471`）。
+本包自己不监听任何事件、不注册工具、不注册命令。真正的实现全在库包 `@deepseek-ai/dsh-session-title-llm`（它不是插件，是 library，列在 `docs/config-catalog.md` 的 "Library packages (no plugin entry)" 一节，`docs/config-catalog.md:3114`、`3146`），本包只提供"节奏 + 选谁"这两个参数——源码里那句 `jscpd` 注释写得直白："the field validators remain shared"（`src/index.ts:17`）。触发时机由 session-title 服务掌握：`first-prompt` 只在"非 fork、第一条合格消息、且尚无标题"时排队（`packages/session/session-title/src/index.ts:470-471`）。这三个条件分散在不同段落，串成判定树更好懂：
+
+```mermaid
+flowchart TD
+    A["<b>用户发第一条消息</b><br/>user/message"]
+    B{"<b>非 fork 会话？</b><br/>parentSession === undefined"}
+    C{"<b>尚无标题？</b><br/>未被 rename 钉住"}
+    D{"<b>是首条合格人类消息？</b><br/>messages 数组首项"}
+    E["<b>排队触发 provider</b><br/>session-title-first-prompt-llm"]
+    F["<b>不触发</b><br/>标题保持兜底或已有值"]
+    G["<b>请求标题模型</b><br/>system prompt + 首条消息 JSON"]
+    H["<b>写入 session/title</b><br/>source: provider"]
+
+    A --> B
+    B -- "是" --> C
+    B -- "否（fork 继承标题）" --> F
+    C -- "是" --> D
+    C -- "否（已钉住/已生成）" --> F
+    D -- "是" --> E
+    E --> G --> H
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class A entry
+    class B,C,D main
+    class E,G,H data
+    class F danger
+```
 
 ## 配置项
 

@@ -56,6 +56,40 @@
 | `FEEDBACK_ONLY` | 每条 `feedback/record` 触发一次"回放+投影+脱敏"当前日志后缀；没有 feedback 就永远留在本地 |
 | `DISABLED` | 默认。不构造 coordinator / provider / processor / exporter，一条记录都不出进程 |
 
+三种 mode 在 `feedback/record` 到达时分叉成完全不同的行为，画出来比对着读表格清楚：
+
+```mermaid
+flowchart TD
+    EVT["<b>session/event 派发</b><br/>feedback/record 到达"]
+
+    subgraph DISABLED["mode: DISABLED（默认）"]
+        D1["<b>只 warn 一句</b><br/>不构造 provider/coordinator"]
+    end
+
+    subgraph FEEDBACK_ONLY["mode: FEEDBACK_ONLY"]
+        F1["<b>校验事件本人</b><br/>是 session.events 中该 seq 本人才回放"]
+        F2["<b>回放+投影+脱敏</b><br/>当前日志后缀"]
+        F1 -- "校验通过" --> F2
+    end
+
+    subgraph FULL["mode: FULL"]
+        L1["<b>协程实时捕获</b><br/>created/disposed/event/flush/error"]
+        L2["<b>逐条投影后立即上报</b><br/>包括生命周期记录"]
+        L1 --> L2
+    end
+
+    EVT --> DISABLED
+    EVT --> FEEDBACK_ONLY
+    EVT --> FULL
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class EVT entry
+    class D1 danger
+    class F1,F2,L1,L2 main
+```
+
 bundle 里那组数字是有意的：`exporter.timeoutMillis: 1000` 既是单次 socket 超时也是重试死线（等于关掉 SDK 的 5 次退避），`maxExportBatchSize == maxQueueSize` 让排空只有一批——目的是把"collector 不可达时的关停等待"压到 ~1s（`packages/bundle/base/cordis.patch.yml:139-147`）。
 
 ## 模型看得见什么
@@ -70,6 +104,29 @@ README："None, as the backend only forwards the seam's redacted records into th
 - **只在用户点了反馈时才上传**：`mode: FEEDBACK_ONLY`。
 
 ## 坑与边界
+
+从会话事件到远端 collector 这条链路上，脱敏扩展点是空的——这一点比文字更适合直接看图：
+
+```mermaid
+flowchart LR
+    S["<b>会话事件</b><br/>session/event 等"]
+    P["<b>投影成 OTel log record</b><br/>event.data 原样映射"]
+    W["<b>session-telemetry/record</b><br/>waterfall 脱敏扩展点"]
+    O["<b>OTel SDK 批处理</b><br/>BatchLogRecordProcessor"]
+    C["<b>远端 collector</b><br/>DSH_TELEMETRY_OTLP_URL"]
+
+    S --> P --> W --> O --> C
+
+    N["<b>dsh 自带零监听器</b><br/>waterfall 直接透传，未脱敏"]
+    W -.-> N
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class S,P,O main
+    class C data
+    class N note
+```
 
 - **默认零脱敏**。README《What leaves the machine》逐项列了会走人的东西：用户与助手消息正文、工具入参与结果（命令输出、文件内容）、完整 system prompt 与 tool schema（`request/header`）、todo 文本、压缩摘要、hook `stderrSummary`、反馈文本、会话 `cwd`（`README.md:38`）。API key 结构性缺席（适配器构造参数，从不进日志）。
 - 身份是 `$DSH_HOME/.anonymous-user-id` 里的随机 UUID v4，作为 Resource 的 `user.id` 每批带一次；删文件即重置（`src/index.ts:204`、`packages/identity/anonymous-user-id/README.md:5`、`7`）。

@@ -79,7 +79,30 @@ ctx.inject(['shellEnv'], (runtimeCtx) => {
 
 - **`list()` 只列 contributor 声明的变量**，注册表自有的内置键（`DSH_HOME`、`DSH_SHELL`、`DSH_SESSION_ID`）不在里面，所以诊断/prompt/UI 代码**不能**把 `list()` 当成完整环境目录（README.md:51）。源码里留了 `TODO(bash-env-list-builtins)`（`src/index.ts:178-179`）。
 - **命名遗留**：对外服务名是 `shellEnv`，但内部类型名仍是 `BashEnvContributor` / `BashEnvVariable` / `BashEnvVariableInfo`，错误信息里也是 `bash env contributor …`（`src/index.ts:50, 116, 166`），effect 标签是 `'bashEnv.register()'`（143）。查日志时按 `bash env` 搜，不是 `shell env`。
-- **快照走的是专用通道**：`ShellExecRequest.dshEnv`，不是普通 `env`；执行器把它叠在 explicit env 的最外层（`packages/shell/bash-local/src/index.ts:196`、`packages/shell/pwsh-local/src/index.ts:240`），而继承来的**所有** `DSH_*` 早在 subprocess 层就被删干净了——擦洗函数 `scrubbedParentEnv()` 定义在接缝包 `@deepseek-ai/dsh-subprocess`（`packages/subprocess/subprocess/src/index.ts:60-66`），由 [subprocess-local](./dsh-subprocess-local.md) 的 `childEnv()` 调用。嵌套 harness 与并发父子 agent 因此不会串身份，`process.env` 全程不被修改（README.md:39）。
+- **快照走的是专用通道**：`ShellExecRequest.dshEnv`，不是普通 `env`；执行器把它叠在 explicit env 的最外层（`packages/shell/bash-local/src/index.ts:196`、`packages/shell/pwsh-local/src/index.ts:240`），而继承来的**所有** `DSH_*` 早在 subprocess 层就被删干净了——擦洗函数 `scrubbedParentEnv()` 定义在接缝包 `@deepseek-ai/dsh-subprocess`（`packages/subprocess/subprocess/src/index.ts:60-66`），由 [subprocess-local](./dsh-subprocess-local.md) 的 `childEnv()` 调用。嵌套 harness 与并发父子 agent 因此不会串身份，`process.env` 全程不被修改（README.md:39）。这条从注册到子进程的链路跨了好几个包，画出来比追代码快：
+
+```mermaid
+flowchart TD
+    C1["<b>contributor 注册</b><br/>register() 声明 DSH_* 键"]
+    S["<b>shell 工具调用</b><br/>tool-bash / tool-pwsh 触发"]
+    COL["<b>collect(execution)</b><br/>内置键 + 按名排序调 resolve()"]
+    SNAP["<b>冻结快照</b><br/>ShellExecRequest.dshEnv"]
+    SCRUB["<b>scrubbedParentEnv()</b><br/>继承环境里所有 DSH_* 先被擦洗"]
+    CHILD["<b>子进程环境</b><br/>dshEnv 叠在擦洗后的父环境最外层"]
+
+    C1 --> COL
+    S --> COL
+    COL --> SNAP
+    SNAP --> CHILD
+    SCRUB --> CHILD
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class C1,S entry
+    class COL,SNAP main
+    class SCRUB,CHILD data
+```
 
 ## 相关
 
