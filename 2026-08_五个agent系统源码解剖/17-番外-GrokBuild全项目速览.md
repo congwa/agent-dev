@@ -56,6 +56,39 @@
 
 **一个引擎四种形态**（全部入口在 `xai-grok-shell/src/agent/app.rs`）：TUI（进程内线程）、编辑器嵌入（`run_stdio_agent`，:277）、headless（`run_headless`，:409）、常驻 leader 服务（`run_leader`，:974，socket + WebSocket bridge 多客户端接入）。反直觉的一处：**headless 强制要求 grok.com 登录会话，唯一传输是 relay WebSocket，没有本地 fallback**（app.rs:421-424）——API-key 用户被指去 stdio 模式。CI 场景反而是绑云最深的形态。
 
+四种形态怎么从同一个入口分岔、又怎么收敛回同一套协议，画出来更直观：
+
+```mermaid
+flowchart TD
+    A["<b>xai-grok-shell/src/agent/app.rs</b><br/>四种入口统一调度"]
+    B["<b>TUI 模式</b><br/>进程内线程"]
+    C["<b>编辑器嵌入</b><br/>run_stdio_agent :277"]
+    D["<b>headless 模式</b><br/>run_headless :409"]
+    E["<b>leader 常驻服务</b><br/>run_leader :974，socket + WS bridge"]
+    F["<b>ACP 消息层</b><br/>agent-client-protocol 0.10.4"]
+    G["<b>强制 grok.com 登录</b><br/>唯一传输 relay WebSocket，无本地 fallback"]
+
+    A --> B
+    A --> C
+    A --> D
+    A --> E
+    B --> F
+    C --> F
+    D --> F
+    E --> F
+    D -- "无 API-key 兜底" --> G
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,C,E main
+    class F data
+    class D,G note
+```
+
 还有一处姿态：入口二进制启用了 obfstr/cryptify **编译期字符串+控制流混淆**（xai-grok-pager-bin/Cargo.toml:66-68 "Binary hardening"）——开源项目给自己的发行二进制上混淆，全系列仅此一家。
 
 ---
@@ -108,6 +141,36 @@
 
 - **无锁是设计宣言**：`xai-chat-state/src/lib.rs:12` 的 ASCII 架构图里直接写着 "State (no locks needed)"；persistence trait 用 `&mut self`，注释明言 "no locks, no atomics, no shared state"。代价是读者视图：`GetConversation` 是**全量深拷贝**（actor/mod.rs:305-311，还打了 "cloning full conversation" 的 debug log 自认成本）——没有 Codex 的 Arc COW，比 Pi 的 `.slice()` 浅拷贝更贵，靠对话 pruning 控上界。
 - **并行工具回灌与 Codex 恰好相反**：`FuturesUnordered`（tool_calls.rs:611），结果**按完成顺序**进历史，不保证请求序。正确性不靠序，靠三件套：call_id 配对（协议层天然无序安全）、写边界修复不变量（`repair_dangling_tool_calls` + `dedup_duplicate_tool_results`，只在三个写边界跑）、turn 末 reconciliation。第 14 章说 Codex 的 `FuturesOrdered` 是"正确性藏在类型名里"——Grok 直接放弃了顺序保证，把不变量做成显式修复函数。**两种哲学：一个防患于未然，一个宽进严出。**
+
+"宽进严出"具体靠哪几层兜底，拆开看：
+
+```mermaid
+flowchart TD
+    A["<b>模型发出并行工具调用</b><br/>FuturesUnordered 派发"]
+    B["<b>结果按完成顺序回灌</b><br/>不保证请求序"]
+    C["<b>call_id 配对</b><br/>协议层天然无序安全"]
+    D["<b>写边界修复</b><br/>repair_dangling_tool_calls +<br/>dedup_duplicate_tool_results"]
+    E["<b>turn 末 reconciliation</b><br/>兜底核对"]
+    F["<b>正确性达成</b><br/>宽进严出"]
+
+    A --> B
+    B --> C
+    B --> D
+    B --> E
+    C --> F
+    D --> F
+    E --> F
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,C,D,E main
+    class F data
+```
+
 - **竞态防护粒度是文件路径级**：同一批并行调用里，非只读操作命中同一 `file_path` 参数时共享一把 per-path `tokio::sync::Mutex` 按模型发出顺序串行（tool_dispatch.rs:50-59），其余全并发。
 - **插话是双范式并存**：默认 Pi 式排队（`InterjectionBuffer`，"An interjection never cancels the turn"，interjection.rs:332，且在同 turn 的循环边界就排干、比 Pi 更激进）；另留 `send_now` 的 Codex 式 cancel-and-send 硬中断（commands.rs:233）。第 02 章的"排队 vs 打断"之争，Grok 的答案是"都要，让队列策略函数裁决"。
 - **崩溃语义**：内存 actor 是运行时真相，落盘默认 Buffered 不 fsync（`AppendDurability`，jsonl/mod.rs:22-25）——比 Pi 的同步 append 弱、比纯内存强；JSONL 有 torn-tail 自愈（append 前查最后字节非 `\n` 就先封死残行，storage/jsonl/mod.rs:257-330，注释里写着这个 bug 曾经 "bricked session resume"）。
@@ -130,6 +193,35 @@
 - 摘要 prompt 里有一段独有的防御："If the prior conversation contains a note about files at /tmp/compaction/segment_*.md … those files are an out-of-band memory channel for a FUTURE work agent, not for you."——防摘要模型自己去读压缩残档。
 - 顺带一条：压缩摘要 prompt 模板里出现了 `grok-4.20` 这个未发布型号名（chat 侧专用压缩模型配置，intra_compaction/config.rs:208）。
 
+prefire 预压缩和正式压缩的两段式衔接，画出来是这样：
+
+```mermaid
+flowchart TD
+    A["<b>用量达到阈值−10%</b><br/>后台预压缩触发"]
+    B["<b>摘要前 95% 历史</b><br/>生成 NOTE₁ 缓存，带前缀指纹"]
+    C["<b>用量达到 85%</b><br/>正式压缩触发"]
+    D["<b>NOTE₁ + 5% 尾巴重写</b><br/>用户无感延迟"]
+    F["<b>切点=最后一条真实 user 消息</b><br/>之前换成 9 节结构化摘要"]
+    G["<b>放不下时降级</b><br/>verbatim → fitted → lossy"]
+    E["<b>期间发生 rewind</b><br/>NOTE₁ 缓存失效"]
+
+    A --> B
+    B --> C
+    C --> D
+    D --> F
+    F -- "内容仍超限" --> G
+    E -- "使缓存失效" --> B
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,C,D,F main
+    class G,E note
+```
+
 **记忆叫 "dream"，默认关**（`--experimental-memory` 门控）。布局和 Claude Code 的 auto-memory 神似——连 `MEMORY.md` 的文件名都一样，按 workspace 用 blake3(cwd) 分目录。写入三条路：会话结束的零成本元数据摘要（不调 LLM）、压缩前的 LLM flush turn（写入前做 embedding 余弦去重，阈值 0.92）、以及**睡眠整理**：距上次 ≥4 小时且新增 ≥3 个会话日志时，把日志合并进 MEMORY.md，DREAM_SYSTEM_PROMPT 原话要求 "Resolve contradictions — if a recent session disproves an older fact, keep only the current truth"、"Convert relative dates to absolute dates"，没东西可记就回 `NO_REPLY`。遗忘不用 Codex 的引用计数，用"整理即遗忘"组合：dream 消化后删源日志 + 30 天 GC + 检索时间衰减 + 写入去重。读取双路：首轮自动以用户 query 做 FTS5+向量混合检索注入 top-6，加 `memory_search`/`memory_get` 工具供模型主动查——正好是第 09 章"分层召回"的完整实现。
 
 ---
@@ -141,6 +233,35 @@
 MCP 工具用 **`search_tool`（BM25 检索）+ `use_tool`（转发）二段式**延迟加载——与 Claude Code 的 ToolSearch 同构。
 
 **没有 Code Mode，它的位置被 Rhai workflow 占了**：模型可提交 Rhai 脚本，但 host 函数只有 `agent()/parallel()/phase()/log()`——脚本编排的是**子 agent**而不是工具（预算默认 128 个 agent、上限 1024，支持断点续跑）。对照 Codex Code Mode（模型写 TS 直接调工具省 round trip），Grok 的赌注是"可编程的多智能体编排"，工具调用仍由每个子 agent 传统方式发。
+
+三套方言工具集、MCP 延迟加载、Rhai 子 agent 编排，都挂在同一次工具调用入口上：
+
+```mermaid
+flowchart TD
+    A["<b>模型发起工具调用</b><br/>按 agent_type 选方言"]
+    B["<b>grok_build 主命名空间</b><br/>run_terminal_cmd / read_file 等约30个"]
+    C["<b>codex:: 方言</b><br/>apply_patch，21KB prompt"]
+    D["<b>opencode:: 方言</b><br/>bash / read / edit"]
+    E["<b>MCP 工具</b><br/>search_tool(BM25) + use_tool 二段式"]
+    H["<b>Rhai workflow 脚本</b><br/>agent/parallel/phase/log"]
+    G["<b>子 agent 编排</b><br/>预算128，上限1024，断点续跑"]
+
+    A --> B
+    A --> C
+    A --> D
+    A --> E
+    A --> H
+    H --> G
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,C,D,E,H main
+    class G data
+```
 
 **钩子是外部进程范式**（第 06 章三分法里与 Codex 同族）：Command（JSON 进 stdin、exit code 2 = deny）+ HTTP webhook 两种 handler，15 个事件变体（14 个规范事件），失败一律 fail-open。能力天花板同 Codex 一档：`PreToolUse` 只能 allow/deny **不能改写 tool input**，`UserPromptSubmit` 连注入上下文都不行，模型调用没有任何包裹点——第 06 章"只有洋葱范式能重试/替换模型调用"的结论第四次成立。最强的是 `Stop` 门：`decision:"block"` + reason 可强迫模型继续干活（Claude Code stop-hook 同款语义）。
 
@@ -179,6 +300,36 @@ skip_artifact(..., "full_prompt.txt", "prompt_content_upload_disabled")
 1. **内容路径中和**（上表）；仓库变更序列化模块整个被掏空只剩类型 re-export。
 2. **新增 workspace 分类器**（`xai-file-utils/src/workspace_classifier.rs`）：`$HOME` 本身、`~/Library`、Desktop/Downloads/Documents、`.ssh`/`.claude`/`.grok` 目录明确排除出上传范围，只有 git 仓库或"项目目录"才可归类上传——直接对应"把家目录整个传了"的事故。
 3. **ZDR/opt-out 时主动 purge 本地待传队列**（auth/model.rs:184-189）。
+
+三件整改怎么对应到事故本身，画成一张图：
+
+```mermaid
+flowchart TD
+    A["<b>事故：5.1GB 家目录数据上传</b><br/>2026-07 mitmproxy 抓包发现"]
+    B["<b>内容路径中和</b><br/>上传函数编译期存根化"]
+    C["<b>workspace 分类器</b><br/>排除 HOME/.ssh/.claude/.grok"]
+    D["<b>ZDR/opt-out 主动 purge</b><br/>清空本地待传队列"]
+    E["<b>内容上传物理禁用</b><br/>需改源码重编译才能恢复"]
+    F["<b>仍存活：元数据/工件上传</b><br/>四重门控 ZDR→开关→凭证→分类器"]
+
+    A --> B
+    A --> C
+    A --> D
+    B --> E
+    C --> E
+    D --> E
+    E --> F
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A danger
+    class B,C,D main
+    class E data
+    class F note
+```
 
 **仍然活着的**是元数据/工件上传（trace upload，四重门控：ZDR → feature 开关 → 凭证 → 目录分类器）：`metadata.json` 含 `repo_root` 路径和 strip 凭证后的 `remote_url`、工具定义、权限决策、用户 prompt 里的图片等。
 

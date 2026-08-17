@@ -100,6 +100,59 @@ Cordis 给的四个原语，正好解释了后面所有维度上 dsh 为什么�
 - **依赖图上的硬证据**：219 个包按 `peerDependencies` 统计，对 `dsh-agent-loop` 有运行期依赖的只有 **1 个**（还是 `packages/examples/agent-spine-demo`，即那个"负责组装骨架"的组合包）；作为对照，`dsh-session` 有 80 个、`dsh-llm` 78 个、`dsh-agent` 58 个、`dsh-tools` 43 个，`@deepseek-ai/cordis` 是 219/219。**大家依赖接口，没人依赖循环。**
 - 第 01 章记过 Codex 的铁律：TUI 源码里 `codex_core::` 引用数为 0。dsh 把同一件事做到了另一个方向：**没有人依赖循环的实现**。而且 UI 侧也跑一棵 cordis 树——浏览器里自己 `new Context()` 再 `ctx.plugin(Loader)`，UI 组件是 `extends Service` 的 cordis 服务；host 面和 client 面是**两个互斥的 TS program**，因为两侧对同一个 `Context` 做同名 key 的 declaration merging，合并了就编不过。打包器层还有一个 `dsh-client-bundle-purity` 插件，跨插件的值导入直接 throw。
 
+启动树的形状是空 root 上一层层叠 patch，命中同一个 `id` 就整体替换那一行——`agent-loop` 能被换掉，靠的正是这套机制：
+
+```mermaid
+flowchart TD
+    ROOT["<b>空 root</b><br/>启动起点，无插件"]
+    BUNDLE["<b>bundle 层</b><br/>dsh-base 78 行插件"]
+    PROFILE["<b>profile 层</b><br/>各 profile 自己的 patch.yml"]
+    HOME["<b>home 层</b><br/>用户 home 级覆盖"]
+    PATCH["<b>--patch 层</b><br/>命令行覆盖，最终生效"]
+    LOOP["<b>agent-loop 一行</b><br/>按 id 命中，整体替换"]
+
+    ROOT --> BUNDLE
+    BUNDLE --> PROFILE
+    PROFILE --> HOME
+    HOME --> PATCH
+    PATCH -- "id: agent-loop" --> LOOP
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class ROOT entry
+    class BUNDLE,PROFILE,HOME,PATCH main
+    class LOOP note
+```
+
+把这组依赖计数摆成图，谁依赖接口、谁依赖实现一目了然：
+
+```mermaid
+flowchart LR
+    subgraph IFACE["接口类服务：大家依赖"]
+        CORDIS["<b>cordis</b><br/>219/219 全部依赖"]
+        SESSION["<b>dsh-session</b><br/>80 个包依赖"]
+        LLM["<b>dsh-llm</b><br/>78 个包依赖"]
+        AGENT["<b>dsh-agent</b><br/>58 个包依赖"]
+        TOOLS["<b>dsh-tools</b><br/>43 个包依赖"]
+    end
+    subgraph IMPL["循环实现：几乎没人依赖"]
+        LOOP2["<b>dsh-agent-loop</b><br/>仅 1 个包依赖"]
+    end
+
+    IFACE -. "没有依赖关系" .-> IMPL
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class CORDIS,SESSION,LLM,AGENT,TOOLS main
+    class LOOP2 danger
+```
+
 ### 2.3 capability seam：换一个 provider，整个执行世界搬家
 
 `docs/architecture.md:100` 定义的 seam 是三角形：**Service Definition（接口）+ Service Provider（实现）+ Consumer（用它的人，通常是模型可见的工具）**，缺一不成 seam。这个约束的实际收益写在 `:102`：
@@ -144,6 +197,36 @@ Cordis 给的四个原语，正好解释了后面所有维度上 dsh 为什么�
 
 真正的 `ModelFallbackMiddleware` 等价物在 dsh 里是这么做的：重试循环留在 loop 自己的 `while (true)` 里，失败时 loop 把**是否再来一次**这一个 bit 通过 `agent/request-error` waterfall 投票出去，插件投 `{ kind: 'retry' }` 就 `continue`，然后重走完整的 `agent/request` 链路换模型。仓库里已经有现成实现（`packages/llm/llm-retry`），而且它最漂亮的一点是：**重试计数不在闭包里，在 session log 里**——`agent.session.append('llm/retry', ...)` 先落盘再等待，下次靠 `findLast` 从事件流里算出已重试次数。
 
+循环自己攥着重跑权、只对外开放一个投票位，画出来是这样一个环：
+
+```mermaid
+flowchart TD
+    START["<b>loop 的 while true</b><br/>循环体只有 192 行"]
+    REQ["<b>agent/request waterfall</b><br/>发起一次模型调用"]
+    FAIL["<b>调用失败</b><br/>捕获错误"]
+    VOTE["<b>agent/request-error waterfall</b><br/>插件投票是否重试"]
+    RETRY["<b>retry 位为真</b><br/>continue，重走完整链路"]
+    STOP["<b>retry 位为假</b><br/>把错误抛给上层"]
+    LOG["<b>落盘 llm/retry 事件</b><br/>先落盘再等待"]
+
+    START --> REQ
+    REQ -- "失败" --> FAIL
+    FAIL --> VOTE
+    VOTE -- "投 retry" --> RETRY
+    VOTE -- "无人投票" --> STOP
+    RETRY --> LOG
+    LOG --> START
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class START,REQ,VOTE,RETRY main
+    class FAIL,STOP danger
+    class LOG data
+```
+
 所以第 06 章的结论不用改，但边界要收窄一格：**真正必须的不是 `handler` 回调，而是"谁拥有那个重跑的循环"。** LangChain 把循环给了中间件；dsh 把循环留在 loop、只开放一个 bit。后者换来两个前者没有的性质：重试次数是**持久的**（可跨进程 resume），且重试必然走完整链路不会跳过兄弟监听器。代价是插件做不了"跑 3 次取多数"这种控制流。
 
 顺带一处**文档与代码的张力**（值得每个读者自己去验）：`llm/stream` 的 JSDoc 把自己描述成 "Waterfall around every streaming model call (**retry**, replay, routing)"，`tools/execute` 写 "Around-dispatch waterfall for timeout, **retry**, or metrics"——但按上面的游标语义，真靠二次 `next()` 重试的插件会静默跳过同一 waterfall 上的兄弟监听器。全仓 376 处 `next()` 里没有任何一处这么用。**文档承诺的语义在代码里没有安全实现路径。**
@@ -151,6 +234,34 @@ Cordis 给的四个原语，正好解释了后面所有维度上 dsh 为什么�
 ### 4.2 "Model-visible ⟺ logged" 是一条会在运行时 throw 的等式
 
 `AGENTS.md` 里那条规矩——"anything that reaches a model request must be reconstructable from the session log"——在别家是评审纪律，在 dsh 是**每次模型请求前都会跑的断言**：invariant 插件以 `{ global: true, prepend: true }` 挂在 `llm/stream` waterfall 的最前面（prepend 是为了防止某个短路的 replay 监听器把检查静音掉），把**实际要发出去的 messages** 与**从日志重新投影出来的 messages** 做 JSON 逐字节比对，不一致就 fail。
+
+这条断言的执行链路是一条会 throw 的等式：
+
+```mermaid
+flowchart TD
+    REQ["<b>即将发出的模型请求</b><br/>deep-frozen messages"]
+    CHECK["<b>invariant 插件</b><br/>prepend 在 llm/stream 最前面"]
+    PROJECT["<b>从 session log 重新投影</b><br/>还原出应有的 messages"]
+    CMP["<b>JSON 逐字节比对</b><br/>请求 vs 投影"]
+    PASS["<b>一致</b><br/>放行，继续发起请求"]
+    FAILSTOP["<b>不一致</b><br/>直接 fail"]
+
+    REQ --> CHECK
+    CHECK --> PROJECT
+    PROJECT --> CMP
+    CMP -- "match" --> PASS
+    CMP -- "mismatch" --> FAILSTOP
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class REQ entry
+    class CHECK,PROJECT,CMP main
+    class PASS data
+    class FAILSTOP danger
+```
 
 这条断言把好几件事一次性钉死了：中间件不能偷偷往 payload 里塞话（`agent/request` 的文档直接写 "this waterfall cannot mutate messages"，`llm/stream` 拿到的请求是 deep-frozen 的）；任何新的模型可见输入必须先扩展 `SessionEventMap` 加一个事件类型；压缩不能"重建历史"，只能在日志上做区间替换。第 10 章说 Pi 的"日志 + 投影"是最干净的范式，dsh 把它从范式变成了可执行的等式。
 
@@ -160,6 +271,38 @@ Cordis 给的四个原语，正好解释了后面所有维度上 dsh 为什么�
 
 - `packages/llm/llm-pi-ai` 的实现方式是**把 `@earendil-works/pi-ai`（^0.82.1）整包 import 进来**当多厂商适配器——那正是本系列第一个样本 Pi 的模型抽象包。**dsh 是本系列里唯一一个把另一个样本当依赖的样本。** 而且这不是省事：仓库里同时有一个自己手写 fetch 的 `llm-deepseek`（1,216 行），两者作为"设计验证 twin"并排跑同一份 `StreamChunk` 契约，验收规则写在 Agent Note 里——**任一实现表达不了的东西，就是核心词汇的 bug**。
 - `packages/subagent/` 下 6 个 provider 里有 `subagent-claude-code`（走 Claude Agent SDK）和 `subagent-codex`（走 `codex app-server --stdio`，手写 wire 协议）——**把一次委派整个交给真的竞品进程**。跨进程 provider 一律声明 `NO_START_CAPABILITIES`，父侧要求它做不到的事（结构化输出、深度限制、工具过滤）时直接 `UNSUPPORTED_CAPABILITY` 拒绝，而不是接受后忽略。
+
+委派出去的对象里，两个是真实跑着的竞品进程：
+
+```mermaid
+flowchart TD
+    CORE["<b>dsh 主进程</b><br/>把一个 turn 整体委派出去"]
+    P1["<b>subagent-claude-code</b><br/>走 Claude Agent SDK"]
+    P2["<b>subagent-codex</b><br/>走 codex app-server 协议"]
+    P3["<b>其余 4 个 provider</b><br/>本地/远程隔离机制"]
+    CC["<b>真实 Claude Code 进程</b>"]
+    CX["<b>真实 Codex 进程</b>"]
+    CAP["<b>能力声明不足</b><br/>直接 UNSUPPORTED_CAPABILITY 拒绝"]
+
+    CORE --> P1
+    CORE --> P2
+    CORE --> P3
+    P1 --> CC
+    P2 --> CX
+    P1 -- "做不到就拒绝" --> CAP
+    P2 -- "做不到就拒绝" --> CAP
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class CORE entry
+    class P1,P2,P3 main
+    class CC,CX data
+    class CAP note
+```
+
 - 反向佐证一条本系列的旧疑点：第 08 章曾指出 Codex 的 `codex_mcp_interface.md` 声称 `codex mcp-server` 暴露 `thread/*` / `turn/*`，但代码里对不上。dsh 是一个完全独立的第三方实现，它对着 `codex app-server` 发 `thread/start` / `turn/start`——**没有人对着 `codex mcp-server` 实现这套方法**。原来的"存疑"可以升级为结论。
 
 ### 4.4 它的 workflow 引擎自陈"modeled on Claude Code's dynamic workflows"
