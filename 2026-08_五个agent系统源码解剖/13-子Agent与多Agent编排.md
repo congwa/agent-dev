@@ -19,6 +19,33 @@
 
 用一个类比：你是项目负责人，你派实习生去图书馆查一整天资料，他回来给你一页纸的摘要。你的脑子里只多了一页纸，不是一整天的阅读量。
 
+两条路径在上下文里留下的痕迹完全不同：
+
+```mermaid
+flowchart TD
+    Q["<b>用户提问</b><br/>session 持久化逻辑在哪"]
+    A1["<b>不用子agent</b><br/>主线程自己 grep/read 20次"]
+    A2["<b>用子agent</b><br/>派独立agent做这20次调用"]
+    B1["<b>主线程上下文</b><br/>累计约8万token源码"]
+    B2["<b>子agent自己的上下文</b><br/>脏了也没关系，用完即弃"]
+    C1["<b>后续每次调用</b><br/>8万token全部重新发送"]
+    C2["<b>回传给主线程</b><br/>几百字结论"]
+
+    Q --> A1
+    Q --> A2
+    A1 --> B1 --> C1
+    A2 --> B2 --> C2
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class Q entry
+    class A1,B1,C1 danger
+    class A2,B2 main
+    class C2 data
+```
+
 这个类比在几个地方是成立的：
 - **分工**：不同的子 agent 可以配不同的系统提示词、不同的模型（便宜的模型干粗活）、不同的工具白名单（只读的探索者拿不到写文件的工具）。
 - **并行**：三个互不相关的问题可以同时派三个人去查，墙钟时间几乎不变。
@@ -50,6 +77,31 @@
 
 第二种在并行度上明显更优，但它引入了一堆新问题：消息什么时候被消费进上下文？父 agent 正在跑一个工具调用时收到消息怎么办？子 agent 之间能不能互相发消息（能的话就是完整的 actor 系统了，路由、寻址、死锁全都要考虑）。Codex 从 v1 到 v2 的演进正好就是从第一种走向第二种，见 3.2。
 
+两种模型的骨架并排放一起看更清楚：
+
+```mermaid
+flowchart LR
+    subgraph S1["RPC / future 模型"]
+        R1["<b>spawn_and_wait</b><br/>父agent发起调用"]
+        R2["<b>阻塞等待</b><br/>父agent什么都做不了"]
+        R3["<b>结果直接返回</b><br/>作为工具返回值进入上下文"]
+        R1 --> R2 --> R3
+    end
+    subgraph S2["actor / 邮箱模型"]
+        M1["<b>spawn</b><br/>立即返回一个id"]
+        M2["<b>父agent继续干活</b><br/>不阻塞"]
+        M3["<b>子agent完成</b><br/>往父agent邮箱投消息"]
+        M4["<b>wait</b><br/>阻塞在有没有新邮件上"]
+        M1 --> M2 --> M4
+        M3 --> M4
+    end
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class R1,R2,M1,M2 main
+    class R3,M3,M4 data
+```
+
 ### 1.3 失败、中断、超时
 
 子 agent 崩了，父 agent 应该看到什么？一个异常？还是一段「你的下属失败了，错误是 XXX，你可以再派一个」的自然语言？后者明显更适合 LLM 消费，但要求 harness 把错误翻译成模型能理解的措辞。
@@ -74,6 +126,29 @@ Pi 的整个立场就建立在这个论证上（见 2.2）。而 Codex 和 LangC
 - 更隐蔽的情况：A 看到 `auth.ts` 里有个它不认识的函数（其实是 B 刚加的），觉得这是脏代码，**把它删了**。
 
 数据库有事务，git 有 merge，agent 之间什么都没有。三家 harness 里没有任何一家提供了机制层面的解决方案（第四个样本 Grok Build 提供了，见第 8 节）。Codex 的解法完全在提示词层：内置的 `worker` 角色描述里逐字写着「明确分配文件所有权」和「告诉 worker 它不是唯一在这个代码库里的人，不要回滚别人的改动」（见 3.3）。这是一个诚实但脆弱的答案——它依赖模型听话。
+
+四家在这道题上的答案摆在一起看，差距很直观：
+
+```mermaid
+flowchart TD
+    P["<b>多个worker并发改同一仓库</b><br/>共享同一个cwd"]
+    D1["<b>Pi</b><br/>完全不管，4并发共享cwd"]
+    D2["<b>Codex</b><br/>只有提示词约定文件所有权"]
+    D3["<b>LangChain</b><br/>框架只管图状态，不管文件系统"]
+    D4["<b>Grok Build</b><br/>isolation: worktree 机制隔离"]
+
+    P --> D1
+    P --> D2
+    P --> D3
+    P --> D4
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class P entry
+    class D1,D2,D3 danger
+    class D4 data
+```
 
 ### 1.6 成本与递归爆炸
 
@@ -110,6 +185,30 @@ Pi 的整个立场就建立在这个论证上（见 2.2）。而 Codex 和 LangC
 **隔离机制 = 独立进程**。这是 Pi 方案最干净的一点：子 agent 不是同一个进程里的另一个 agent loop，而是一个真正的 `pi` 子进程。上下文窗口的隔离不需要任何代码来保证——两个进程本来就没有共享内存。
 
 **三种调用模式**：`single`（一个 agent 一个任务）、`parallel`（数组，最多 8 个任务、4 个并发）、`chain`（数组，用 `{previous}` 占位符把上一步输出喂给下一步）。
+
+一次委派从起进程到回传结论的完整链路是这样的：
+
+```mermaid
+flowchart TD
+    T["<b>agent定义</b><br/>markdown + frontmatter"]
+    S["<b>起子进程</b><br/>pi --mode json -p --no-session"]
+    P1["<b>append系统提示词</b><br/>叠加人格，不替换基础提示词"]
+    R["<b>逐行解析JSONL</b><br/>父进程实时看到每一步"]
+    K["<b>Ctrl+C中断</b><br/>SIGTERM，5秒后SIGKILL"]
+    O["<b>回传结果</b><br/>模型可见截断到50KB/task"]
+
+    T --> S --> P1 --> R --> O
+    R -.-> K
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class T entry
+    class S,P1,R main
+    class O data
+    class K danger
+```
 
 ### 2.3 源码
 
@@ -274,6 +373,30 @@ Execute this as a chain, passing output between steps via {previous}.
 
 这一条值得停下来想想。默认 fork 全部历史，等于说子 agent 的输入上下文和父 agent 一样大——「隔离上下文窗口」这个初衷似乎被推翻了。但仔细看，隔离仍然成立，只是隔离的方向变了：**子 agent 探索过程中产生的那 8 万 token 垃圾不会回到父 agent**。父 agent 的历史被复制给子 agent（一次性成本，且能命中 prompt cache），子 agent 的历史不会污染父 agent（持续收益）。v1 的做法是双向隔离，v2 是单向隔离。单向隔离牺牲了初始 token，换来子 agent 不会因为不知道背景而做错事。考虑到 1.0 节里说的「实习生没有共享记忆」是子 agent 最大的失败源，这个交换在我看来是划算的。
 
+三条演进线并排放一起看：
+
+```mermaid
+flowchart LR
+    subgraph V1["v1"]
+        A1["<b>ThreadId</b><br/>不透明字符串"]
+        B1["<b>wait_agent同步</b><br/>join阻塞拿结果"]
+        C1["<b>fork_context默认false</b><br/>隔离优先，只给初始prompt"]
+    end
+    subgraph V2["v2"]
+        A2["<b>层级路径</b><br/>root/task1/task_3"]
+        B2["<b>邮箱异步</b><br/>wait只负责唤醒"]
+        C2["<b>fork_turns默认all</b><br/>理解优先，继承全部历史"]
+    end
+    A1 -. "命名系统演进" .-> A2
+    B1 -. "调用模型演进" .-> B2
+    C1 -. "隔离方向演进" .-> C2
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class A1,B1,C1 main
+    class A2,B2,C2 data
+```
+
 #### 谁来决定派人：`ultra` 档位
 
 `models.json` 里，`gpt-5.6-sol` 和 `gpt-5.6-terra` 有一个别的模型没有的推理档位：
@@ -320,6 +443,27 @@ const PROACTIVE_MULTI_AGENT_MODE_TEXT: &str = "Proactive multi-agent delegation 
 ```
 
 两段文本都以「之前那条相反的指令作废」开头——因为这段 developer 消息是随会话状态**增量注入**的（`MultiAgentModeState` 实现了 `render_diff`），历史里可能残留着上一次的相反指令，必须显式覆盖。这是一个在「上下文是 append-only 日志」这个约束下做状态机的经典技巧。
+
+推理档位到委派策略的映射就是一棵简单的判定树：
+
+```mermaid
+flowchart TD
+    E["<b>推理档位</b><br/>effective_reasoning_effort"]
+    U["<b>ultra档位</b><br/>gpt-5.6-sol / terra"]
+    O["<b>其他档位</b><br/>默认设置"]
+    PR["<b>Proactive</b><br/>模型自主决定何时委派"]
+    EX["<b>ExplicitRequestOnly</b><br/>用户不明确要求就不许派人"]
+
+    E --> U --> PR
+    E --> O --> EX
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class E entry
+    class U,O main
+    class PR,EX data
+```
 
 默认策略是 `ExplicitRequestOnly`：**除非用户明确要求，否则不许派人**。v1 的 `spawn_agent` 工具描述把这条讲得更死：
 
@@ -411,6 +555,29 @@ Rules:
 **所有子 agent 共享父 agent 的工作目录**。没有 worktree 隔离，没有容器隔离。三个 worker 并行改同一个仓库，冲突的唯一防线就是上面那段提示词里的「ownership」约定。v1 的工具描述里还追加了一条更操作性的要求：「For code-edit subtasks, decompose work so each delegated task has a disjoint write set」——把写集不相交的责任推给了父 agent 的规划能力。
 
 这是一个诚实的设计：Codex 没有假装解决了这个问题。但也必须说清楚，**这是纪律不是机制**，模型不听话时没有任何东西会拦住它。
+
+四个角色摆在一张图里：
+
+```mermaid
+flowchart TD
+    R["<b>角色系统</b><br/>role.rs 内置角色表"]
+    D["<b>default</b><br/>基础角色"]
+    EX["<b>explorer</b><br/>只读探索，结果一般不复查"]
+    W["<b>worker</b><br/>执行改代码，需分配文件所有权"]
+    AW["<b>awaiter（已注释）</b><br/>只读盯任务，reasoning调低"]
+
+    R --> D
+    R --> EX
+    R --> W
+    R --> AW
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class R entry
+    class D,EX,W main
+    class AW note
+```
 
 #### 命名：为什么用科学家的名字
 
@@ -694,6 +861,30 @@ class Send:
 
 这解决了 Codex 和 Pi 都需要模型自己拿捏的事：**并行度由数据决定，不由模型决定**。有 17 个文件要审查就派 17 个，代码里写死，模型不参与，也就不会「忘了派」或者「派太多」。
 
+拓扑画出来是这样：
+
+```mermaid
+flowchart LR
+    S["<b>state.subjects</b><br/>数据里有17个文件"]
+    F["<b>continue_to_jokes</b><br/>条件边动态生成Send列表"]
+    N1["<b>generate_joke</b><br/>并行实例1"]
+    N2["<b>generate_joke</b><br/>并行实例2"]
+    N3["<b>generate_joke</b><br/>并行实例…17"]
+    G["<b>聚合结果</b><br/>回到主图state"]
+
+    S --> F
+    F --> N1 --> G
+    F --> N2 --> G
+    F --> N3 --> G
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class S entry
+    class F,N1,N2,N3 main
+    class G data
+```
+
 **状态隔离用 subgraph 的独立 schema**。`StateGraph` 从构造时就区分三套 schema：
 
 `libs/langgraph/langgraph/graph/state.py:212`
@@ -808,9 +999,48 @@ scoped namespace. ...
 | `isolation` | none（默认）/ **worktree** | 工具描述逐字："Worktree mode prevents the child's edits from…"（task.rs:55-56）——独立 git worktree，完成后保留并返回路径。**这就是 6 节经验第 4 条里"三家都没做"的那件事** |
 | `resume_from` | 已完成子 agent 的 id | 继承 peer 的 transcript 和工具状态；与 worktree 互斥（task.rs:83） |
 
+`isolation` 这一档的两条路径分叉很清楚：
+
+```mermaid
+flowchart TD
+    T["<b>task工具</b><br/>isolation字段"]
+    N["<b>none（默认）</b><br/>共享父cwd，与其它样本相同"]
+    WT["<b>worktree</b><br/>独立git worktree"]
+    C1["<b>子agent编辑</b><br/>可能与他人冲突"]
+    C2["<b>子agent编辑</b><br/>完成后保留worktree并返回路径"]
+
+    T --> N --> C1
+    T --> WT --> C2
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class T entry
+    class N,C1 danger
+    class WT,C2 data
+```
+
 内置三型 `general-purpose` / `explore`（只读）/ `plan`（只读架构师）（task.rs:867-990），与 Codex 的 default/explorer/worker 三角色几乎一一对应。用户自定义 agent 是 `.md` + frontmatter，发现顺序里**原生认 `~/.claude/agents/`**（`xai-grok-agent/src/discovery.rs:186-189`）——Pi 用同样的 markdown+frontmatter 格式但只认自己的目录，Grok 直接兼容 Claude Code 的。嵌套深度默认 1（`MAX_SUBAGENT_DEPTH: u32 = 1`，`task/mod.rs:36`），与 Codex 的默认值相同——两家产品在 1.6 节的递归爆炸问题上独立收敛到同一个数。
 
 **上下文继承是第三种答案**。第 3.2 节讲过 Codex v1（默认不继承）到 v2（默认全继承）的摇摆，Grok 的 `InitialContextSource`（`subagent/mod.rs:52-63`）三档：`New`（默认，只带 task prompt + 压缩版 AGENTS.md）、`Forked`（父会话史规范化成一条 `<background_context>` 用户消息——**最多 3 个完整 turn 逐字保留、更早的只留统计摘要**，并剥掉 system-reminder/git_status 等噪声标签，`xai-grok-subagent-resolution/src/context.rs:11-48`）、`Resumed`。`Forked` 是隔离-理解轴上的折中：既不像 v1 那样让子 agent 盲干，也不像 v2 那样付全量 fork 的 token——**衰减式继承**（近处逐字、远处摘要）正是第 04 章压缩的思路被搬到了 spawn 时刻。
+
+三档摆在隔离-理解这条轴上：
+
+```mermaid
+flowchart LR
+    A["<b>New（默认）</b><br/>只带task prompt+压缩版AGENTS.md"]
+    B["<b>Forked</b><br/>近3个完整turn逐字+更早摘要"]
+    C["<b>Resumed</b><br/>继承已完成子agent的会话"]
+    A -- "隔离更强" --> B
+    B -- "继承更多" --> C
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A main
+    class B data
+    class C note
+```
 
 **回传与管理**：tool result 带 `SubagentCompletedOutput`（output + `<subagent_meta>` 统计 + resume 提示，task.rs:210-253）；后台模式先返回 id，由 `get_task_output`（可多 id 聚合等待，上限 20）/ `wait_tasks`（wait_any|wait_all）/ `kill_task` 管理（task.rs:444-478, 656-714）。**没有 agent 互发消息**——父模型对运行中的子 agent 只有 poll/wait/kill，`resume_from` 仅限已完成者。也就是说 Grok 停在了 Codex v1.5 的位置：邮箱化了等待，但没有走到 v2 的任意 agent 网络。防提前收尾靠 `Stop` hook 的 payload 枚举在飞的 `backgroundTasks`（`hooks/src/event.rs:255-288`）。
 
@@ -842,6 +1072,32 @@ scoped namespace. ...
 | `codex` | **真的 `codex app-server --stdio` 进程**（`subagent-codex/src/index.ts:2-4`） | `NO_START_CAPABILITIES`（:49） | false | 无 |
 | `claude-code` | **真的 Claude Code CLI，走官方 Agent SDK**（`subagent-claude-code/src/index.ts:2-4`） | `NO_START_CAPABILITIES`（:54） | false | 无 |
 | `dsh-sdk` | 另一个 dsh 进程，走 TS SDK | `NO_START_CAPABILITIES`（`subagent-dsh-sdk/src/index.ts:94`） | false | 无 |
+
+六个 provider 按隔离机制分成两类：
+
+```mermaid
+flowchart TD
+    R["<b>ctx.subagents</b><br/>具名provider注册表"]
+    subgraph IP["同进程"]
+        SP["<b>spawn</b><br/>不带任何seed"]
+        FK["<b>fork</b><br/>父日志completed-turn作seed"]
+    end
+    subgraph OOP["跨进程（能力全阉割）"]
+        ACP["<b>acp</b><br/>外部ACP子进程"]
+        CX["<b>codex</b><br/>真的codex app-server"]
+        CC["<b>claude-code</b><br/>真的Claude Code CLI"]
+        DS["<b>dsh-sdk</b><br/>另一个dsh进程"]
+    end
+    R --> IP
+    R --> OOP
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class R entry
+    class SP,FK main
+    class ACP,CX,CC,DS note
+```
 
 `NO_START_CAPABILITIES` 的注释把代价写得很直白（`packages/subagent/subagent/src/out-of-process.ts:19-23`）：跨进程的孩子**没法**兑现 `outputSchema`/`maxDepth`/`toolFilter`/`persona`，所以服务在 `start()` 之前就用 `SubagentError('UNSUPPORTED_CAPABILITY')` 拒掉（`subagent/src/index.ts:442, 492`），"never accepted-then-ignored"。这是本章第一次看到有人把「工具白名单在跨进程场景下不可执行」这件事做成了**类型化的能力协商**，而不是像 Pi 的 `reviewer.md` 那样在提示词里叮嘱一句。
 
@@ -880,6 +1136,18 @@ if (composition.toolFilter !== undefined) childCtx.tools.restrict(composition.to
 
 默认的 `subagent` 工具是 `backgroundMode: continuable`，`run_in_background` **默认 true**（`tool-subagent/src/index.ts:263`）——与 Grok 一致，与三个主样本相反。返回的不是 job id 而是**持久的 child session id**（`:398`，`subagentId: started.childId`），子 agent 是一个「至多一个活 Activation 的持久 Session」，三态 `running` / `waiting` / `settled` 由 Agent 静默性和 owned-child 集合推导，不维护第二个状态机（`subagent/src/continuation.ts:145-159, 871-873`；`docs/subsystems/subagent.md:136`）。`send_message` 冷 resume 已落盘的孩子，`interrupt_agent` 能打断**任意后代**而不只是直接子女（工具描述：`tool-subagent-control/src/index.ts:82-87`，"The target may be your direct child or a deeper agent created under you"），且只停当前 turn、排队消息原地保留。
 
+三态之间怎么迁移，画成状态机比文字描述清楚得多：
+
+```mermaid
+stateDiagram-v2
+    [*] --> running: spawn 启动
+    running --> waiting: Agent 静默
+    waiting --> running: 收到新消息
+    running --> settled: turn结束且无owned-child
+    waiting --> settled: interrupt_agent
+    settled --> [*]
+```
+
 真正的新东西是 `report`：一个**只注册进 continuable 子 agent 自己 scope**的工具（`tool-subagent-report/src/index.ts:39-52`，注册点 `:64`），让孩子在**不结束自己 turn**的情况下主动把结论推给直接父亲，`reportDelivery` 可选 `wakeup`（默认，唤醒父亲开一个新 turn）或 `quiet`（只入上下文不唤醒，`:26-36`）。它的提示词直指第 1.1 节的带宽悖论，而且给的是和 Pi scout「回传坐标」不同的解法：
 
 > The agent that started you shares your workspace but does not automatically receive your transcript, tool output, or reasoning, so a closing remark such as "done" leaves it nothing it can use.
@@ -906,6 +1174,31 @@ const DEFERRED_AGENT_OPTIONS = new Set(['effort', 'isolation', 'agentType'])
 > Each round opens a new child with no parent conversation or prior child session; the shared workspace is long-term memory, and only a bounded structured report crosses rounds.
 
 **编排逻辑的第五种居所：部署方写死的脚本**——比 LangChain 的应用层代码更靠近产品，比 Grok 的模型生成脚本更可审计。
+
+五个样本各自把编排逻辑放在不同的地方，串起来看是这样一条谱系：
+
+```mermaid
+flowchart TD
+    O["<b>编排逻辑放哪</b><br/>五个样本各选一处"]
+    P1["<b>Pi</b><br/>写在prompt模板里"]
+    P2["<b>Codex</b><br/>放在模型脑子里，ultra自主委派"]
+    P3["<b>LangChain</b><br/>写成Python代码"]
+    P4["<b>Grok Build</b><br/>模型现场生成Rhai脚本"]
+    P5["<b>DeepSeek Harness</b><br/>部署方写死JS脚本（ralph）"]
+
+    O --> P1
+    O --> P2
+    O --> P3
+    O --> P4
+    O --> P5
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class O entry
+    class P1,P2,P4 main
+    class P3,P5 data
+```
 
 ### 9.6 没做的和倒退的
 
