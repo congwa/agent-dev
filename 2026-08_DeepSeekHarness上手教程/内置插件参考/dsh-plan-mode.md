@@ -60,12 +60,55 @@ README 开门见山就把边界划清了：`Plan mode is soft guidance; sandbox 
 
 `hasOpenTurn`（`src/index.ts:158-165`）是那个 idle 判据：agent 的 status 在 post-turn checkpoint 期间仍是 `running`，所以不能用 status 判断。
 
+四种返回值本质是同一个状态机在 idle / 挂起两种处境下的落地方式：
+
+```mermaid
+stateDiagram-v2
+    [*] --> Inactive
+    Inactive --> Active : 空闲态请求切换（committed）
+    Active --> Inactive : 空闲态请求切换（committed）
+    Inactive --> Pending : turn 未关，请求切到 active（queued）
+    Active --> Pending : turn 未关，请求切到 inactive（queued）
+    Pending --> Active : 被接受的 pre-step 落地为 active
+    Pending --> Inactive : 被接受的 pre-step 落地为 inactive
+    note right of Pending : 撤销挂起（cancelled）或目标不变（noop）不产生新日志事件
+```
+
 ## 模型看得见什么
 
 - **激活时**：order 50 位置多出 `section` 全文；非激活时一个 token 都不加（README:48、58）。
 - **`exit_plan_mode` schema 常驻**：README:82 原文 `The stable schema is available in both states` 的对应表述是 `remains available in both states; execution outside plan mode fails`。批准时返回 `{ approved: true }`，渲染成 `Plan approved — plan mode exited; carry out the plan starting with your next step.`（`src/index.ts:319`）。
 - **拒绝 = 失败调用**：`The user chose to keep planning; revise the plan and present it again.`，带反馈时换成 `The user chose to keep planning; their feedback: <feedback>`（`src/index.ts:372-374`）。
 - **用户中途关掉审批框**去说别的（`ASK_CANCELLED`），单独报 `The user dismissed the plan review to speak instead; stay in plan mode, stop here, and wait for their message.`（`src/index.ts:357-359`）——README:17 特意解释了为什么不能复用通用消息：那条消息会提到模型压根没调过的 `ask_user_question`。
+
+三条分支的落点差别很大，批准是唯一走到「日志变更 + 无失败」的路径：
+
+```mermaid
+flowchart TD
+    A["<b>模型调用 exit_plan_mode</b><br/>计划正文须以 # 开头"]
+    B["<b>用户批准</b><br/>approved: true"]
+    C["<b>用户选择继续计划</b><br/>拒绝，可带反馈"]
+    D["<b>用户中途关掉审批框</b><br/>去说别的（ASK_CANCELLED）"]
+    F["<b>plan/mode 落日志</b><br/>active: false，不产生旁白"]
+    G["<b>失败调用</b><br/>revise the plan；带反馈时附 their feedback"]
+    H["<b>失败调用</b><br/>stay in plan mode, wait for their message"]
+
+    A --> B
+    A --> C
+    A --> D
+    B --> F
+    C --> G
+    D --> H
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class A entry
+    class B,C,D main
+    class F data
+    class G,H danger
+```
 - **`/plan` 命令本身不进模型历史**（README:68）；`/plan xxx` 的 `xxx` 会经 `agent.steer()` 变成下一步一条普通的 user 文本块（`src/index.ts:294`）。
 - **切换旁白**：只有当「上一条 `request/header` 描述的是另一个模式」时才追加一句 `The user switched this session to plan mode.` / `The user switched this session back to the default mode.`（`src/index.ts:463-474`），避免重复告知。
 

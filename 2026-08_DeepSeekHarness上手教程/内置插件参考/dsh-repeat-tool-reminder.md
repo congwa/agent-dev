@@ -43,6 +43,41 @@
 - 链存在 `WeakMap<Agent, Chain>` 里（`:173`），一个 agent 的重复不会触发另一个的提醒；agent 对象被回收即失效，不需要 dispose 监听。
 - `agent/pre-step` 里只要本轮 messages 有 `source.kind === 'user'` 就删掉该 agent 的链（`:230`）——用户插话就不算循环。
 
+从一次工具调用完成到提醒是否被塞进下游 decision，走的是同一条判定路径；用户插话则从旁路直接清空链：
+
+```mermaid
+flowchart TD
+    A["<b>tools/post-execute 触发</b><br/>一次工具调用刚完成"]
+    B["<b>include/exclude 过滤</b>"]
+    C["<b>对链透明</b><br/>不计数、不重置"]
+    D["<b>canonical 化参数</b><br/>key 深度排序后 JSON.stringify"]
+    E["<b>与上一条被追踪调用同键？</b>"]
+    F["<b>计数 +1</b>"]
+    G["<b>重置为 1</b>"]
+    H["<b>命中某个 threshold？</b>"]
+    I["<b>折进下游 decision</b><br/>第一档温和版，其余详细版"]
+    J["<b>agent/pre-step 检测到用户消息</b><br/>清空该 agent 的链"]
+
+    A --> B
+    B -- "命中 exclude / 不在 include 内" --> C
+    B -- "参与计数" --> D --> E
+    E -- "同键" --> F
+    E -- "不同键" --> G
+    F --> H
+    G --> H
+    H -- "命中" --> I
+    J -- "触发" --> G
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,D,E,F,G,H main
+    class I data
+    class C,J note
+```
+
 ## 配置项
 
 | 字段 | 类型 | 默认值 | 作用 |

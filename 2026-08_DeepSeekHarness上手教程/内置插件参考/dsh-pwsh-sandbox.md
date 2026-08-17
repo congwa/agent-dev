@@ -52,6 +52,35 @@
 
 限制的实质是平台中立的：Windows 上 `ctx.sandbox` 接缝解析成 ACL 受限令牌 runner 链（`@deepseek-ai/dsh-sandbox-windows-acl`），Linux/macOS 上是 bwrap/Landlock/Seatbelt（README.md:5）。
 
+从平台选中哪个 shell provider，到一条命令最终怎么被放行或拒绝，串起来是这样一条链：
+
+```mermaid
+flowchart TD
+    A["<b>process.platform</b><br/>win32 用 pwsh-sandbox，其余用 bash-sandbox"]
+    B["<b>ctx.shell 只注册一个实现</b><br/>两行 disabled 条件严格互补"]
+    C["<b>sandboxMode 判定</b><br/>来自 ctx.sandboxPolicy.resolve()"]
+    D["<b>danger-full-access</b><br/>直接本地执行，不咨询 provider"]
+    E["<b>read-only / workspace-write</b><br/>argv 经 ctx.sandbox.confine() 包裹"]
+    F["<b>结果 sandbox.denied=false</b><br/>正常执行"]
+    G["<b>runner 启动被拒</b><br/>fail closed，SANDBOX_UNAVAILABLE"]
+    H["<b>命中 denialSignatures</b><br/>归类进 sandbox.denied"]
+
+    A --> B --> C
+    C -- "danger-full-access" --> D --> F
+    C -- "read-only / workspace-write" --> E
+    E -- "runner 拒绝启动" --> G
+    E -- "写入被拒" --> H
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class A,B entry
+    class C,E main
+    class D,F data
+    class G,H danger
+```
+
 ## 模型看得见什么
 
 本包不注册工具、不注册 prompt 段。模型看到的是被限制命令**自身的 stderr**（例如 Windows ACL runner 下的 `Access to the path '...' is denied.`），以及 [tool-pwsh](./dsh-tool-pwsh.md) 把分类后的拒绝转成的标准权限拒绝面（README.md:20）。README 明确：「No model-visible text beyond the command's stderr and the tool layer's standard denial surface.」（README.md:24）

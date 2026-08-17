@@ -49,6 +49,43 @@ bundle 一个 `config` 都没给，三个字段全走 schema 默认值；同一�
 
 三个字段的 schema 声明都在 `packages/sandbox/sandbox-local/src/index.ts:252-256`。
 
+把「`runnerCommand` 短路」和上一节的平台选链拼在一起，才是 `confine()` 一次调用的完整判定：
+
+```mermaid
+flowchart TD
+    A["<b>ctx.sandbox.confine(argv, policy)</b><br/>调用方即将 spawn 的命令"]
+    B["<b>config.runnerCommand 非空？</b>"]
+    C["<b>直接用自定义 argv</b><br/>跳过选择与探测，enforcement=full"]
+    D["<b>按平台定链</b><br/>PLATFORM_CHAINS"]
+    E["<b>linux: bwrap → landlock</b><br/>按序探测"]
+    F["<b>darwin: seatbelt</b><br/>唯一候选，不探测"]
+    G["<b>win32: windows-acl</b><br/>唯一候选，恒为 partial"]
+    H["<b>其他平台：空链</b>"]
+    I["<b>确定 runner + profile</b><br/>缓存进 provider 生命周期"]
+    J["<b>SandboxUnavailableError</b><br/>fail closed"]
+
+    A --> B
+    B -- "是" --> C
+    B -- "否" --> D
+    D --> E
+    D --> F
+    D --> G
+    D --> H
+    E --> I
+    F --> I
+    G --> I
+    H --> J
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class A entry
+    class B,D,E,F,G main
+    class C,I data
+    class J danger
+```
+
 ## 模型看得见什么
 
 README 的 Model Experience 一节说得很干脆（`packages/sandbox/sandbox-local/README.md:28`，此处去掉了原文里的相对链接）：

@@ -29,6 +29,37 @@ bundle 给这一行的注释是 `Durability checkpoints before each model reques
 
 它插在管线的这些位置上：`llm/stream` 的包装是懒的；`tools/execute` 的包装在 pre-execute 策略与守卫**之后**；嵌套的工具派发复用外层模型可见调用的检查点（`README.md:21`）。
 
+三处屏障各管一段边界，任何一处 flush 被拒都是各自范围内的 fail-closed，不牵连另外两处：
+
+```mermaid
+flowchart TD
+    A["<b>turn 内某个动作即将发生</b>"]
+    B["<b>模型请求前</b><br/>llm/stream：懒 flush 屏障"]
+    C["<b>顶层工具派发前</b><br/>tools/execute：仅无 parent 的调用"]
+    D["<b>下一步开始前</b><br/>agent/pre-step：持久化上一批响应/结果"]
+    E["<b>flush 成功</b><br/>继续往下执行"]
+    F["<b>flush 被拒</b><br/>该边界的动作不执行"]
+
+    A --> B
+    A --> C
+    A --> D
+    B -- "成功" --> E
+    C -- "成功" --> E
+    D -- "成功" --> E
+    B -- "失败" --> F
+    C -- "失败" --> F
+    D -- "失败" --> F
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class A entry
+    class B,C,D main
+    class E data
+    class F danger
+```
+
 ## 配置项
 
 无配置项（README 称之为 `zero-config function plugin`，`README.md:9`）。它的行为完全由三个事件边界和 `ctx.sessions.flush()` 的语义决定；真正的批量参数在持久化后端那边——见 [session-persistence-jsonl](./dsh-session-persistence-jsonl.md) 的 `writeBatchMaxDelayMs`。

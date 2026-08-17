@@ -28,6 +28,25 @@
 
 没有事件监听器，也没有工具。它是**被 inject 的一方**，全仓恰好四个消费者：`dsh-bash-sandbox`（`packages/shell/bash-sandbox/src/index.ts:45`）、`dsh-pwsh-sandbox`（`packages/shell/pwsh-sandbox/src/index.ts:53`）、`dsh-fs-sandbox`（`packages/fs/fs-sandbox/src/index.ts:60`）、`dsh-terminal-bash`（`packages/terminal/terminal-bash/src/index.ts:25`）。
 
+```mermaid
+flowchart LR
+    A["<b>ctx.sandboxPolicy</b><br/>SandboxPolicyService，唯一策略之家"]
+    B["<b>dsh-bash-sandbox</b>"]
+    C["<b>dsh-pwsh-sandbox</b>"]
+    D["<b>dsh-fs-sandbox</b>"]
+    E["<b>dsh-terminal-bash</b>"]
+
+    A --> B
+    A --> C
+    A --> D
+    A --> E
+
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    class A data
+    class B,C,D,E main
+```
+
 ## 服务面
 
 | 成员 | 说明 |
@@ -40,6 +59,37 @@
 | `SANDBOX_MODES` | `['read-only', 'workspace-write', 'danger-full-access']`（`src/session-mode.ts:42`） |
 
 路径解析顺序值得记一笔：**先 canonical 再 lexical**（`resolveWorkspaceRoot` = `resolve(canonicalPath(path))`，`src/index.ts:33-35`），这样 `symlink/..` 的结果和进程真正 chdir 的落点一致。
+
+`resolve()` 的 mode 与 root 两条优先级链彼此独立，分别在下面收口：
+
+```mermaid
+flowchart TD
+    A["<b>resolve({ session, mode })</b><br/>调用方请求一份策略"]
+    B["<b>显式已批准的 mode？</b><br/>调用参数传入"]
+    C["<b>用它</b>"]
+    D["<b>会话最后一条 sandbox/mode？</b><br/>effectiveSandboxMode(events)"]
+    E["<b>用会话覆盖</b>"]
+    F["<b>用 defaultMode</b><br/>部署配置 mode"]
+    G["<b>root = session.header.cwd？</b>"]
+    H["<b>用 session cwd</b>"]
+    I["<b>用 config.workspaceRoot 兜底</b>"]
+
+    A --> B
+    B -- "是" --> C
+    B -- "否" --> D
+    D -- "有" --> E
+    D -- "无" --> F
+    A --> G
+    G -- "有" --> H
+    G -- "无" --> I
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class A entry
+    class B,D,G main
+    class C,E,F,H,I data
+```
 
 ## 配置项
 
