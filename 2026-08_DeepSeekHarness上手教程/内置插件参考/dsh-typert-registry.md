@@ -44,7 +44,30 @@ README 开篇（`packages/typert/registry/README.md:5`）：“A contribution ca
 
 ## 配置项
 
-无配置项。它的内容 100% 由运行时调用方决定：默认树上写入者是 typert-loader（自动扫描 loader 条目），此外 `@deepseek-ai/dsh-agent` 与 `@deepseek-ai/dsh-session` 在构造函数里经 `ctx.inject(['typert'], ...)` 注册了 `agent` / `session` 两个 lookup（`packages/core/agent/src/index.ts:269`、`packages/core/session/src/index.ts:799`），`@deepseek-ai/dsh-api-remotes` 再用 `configure()` 覆盖它们的解析策略（`packages/api/remotes/src/agent-lookup.ts:205`）。
+无配置项。它的内容 100% 由运行时调用方决定：默认树上写入者是 typert-loader（自动扫描 loader 条目），此外 `@deepseek-ai/dsh-agent` 与 `@deepseek-ai/dsh-session` 在构造函数里经 `ctx.inject(['typert'], ...)` 注册了 `agent` / `session` 两个 lookup（`packages/core/agent/src/index.ts:269`、`packages/core/session/src/index.ts:799`），`@deepseek-ai/dsh-api-remotes` 再用 `configure()` 覆盖它们的解析策略（`packages/api/remotes/src/agent-lookup.ts:205`）。谁写、谁读、谁改策略，画出来是这样：
+
+```mermaid
+flowchart TD
+    LOADER["<b>typert-loader</b><br/>扫描 loader 条目，register(manifest)"]
+    AGENT["<b>dsh-agent / dsh-session</b><br/>构造函数里注册 agent / session 两个 lookup"]
+    REG["<b>ctx.typert 注册表</b><br/>local / remotes / lookups / contexts 四张只读子表"]
+    REMOTES["<b>dsh-api-remotes</b><br/>configure() 覆盖 lookup 的解析策略"]
+    GATEWAY["<b>typert-gateway</b><br/>resolve / list 读取，据此派发 Remote 调用"]
+
+    LOADER -- "register(manifest)" --> REG
+    AGENT -- "lookups.register()" --> REG
+    REMOTES -- "lookups.configure()" --> REG
+    REG -- "resolve / list" --> GATEWAY
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class LOADER,AGENT,REMOTES entry
+    class REG data
+    class GATEWAY main
+```
 
 ## 模型看得见什么
 

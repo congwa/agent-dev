@@ -34,6 +34,34 @@ README 首句把边界说死了：“Node-only Loader integration for generated 
 3. `loadManifest()`：`import()` 该文件，取 `TYPERT` 导出，跑 `validateTypertManifest()`（`:343`、`:83`）——包名必须自洽、`face` 必须是 `host`、schema 必须是 zod v4 实例、每个 invocation 的 codec 必须是 `strict`（`:88`、`:93`、`:105`、`:266`）。
 4. `ctx.typert.register(manifest)`，并在 import 落地后重新确认 owner 还在（`:382`）。
 
+四步连起来是这样：
+
+```mermaid
+flowchart TD
+    A["<b>flush 一个条目名</b><br/>internal/plugin 标脏后 microtask 触发"]
+    B["<b>qualifies()</b><br/>名字在 packages 配置里，或 loader 条目未禁用"]
+    C["<b>撤回已有注册</b><br/>不合格直接退出"]
+    D["<b>resolveArtifact()</b><br/>解析 package.json 的 exports 字段 typert 子路径"]
+    E["<b>loadManifest()</b><br/>import 该文件，取 TYPERT 导出并校验"]
+    F["<b>ctx.typert.register(manifest)</b><br/>写入注册表，重新确认 owner 还在"]
+
+    A --> B
+    B -- "不合格" --> C
+    B -- "合格" --> D
+    D --> E
+    E --> F
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,D,E main
+    class F data
+    class C danger
+```
+
 ## 配置项
 
 | 字段 | 类型 | 默认值 | 作用 |

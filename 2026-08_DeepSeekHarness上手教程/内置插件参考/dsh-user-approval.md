@@ -38,6 +38,46 @@ waterfall 走 `@deepseek-ai/dsh-scope` 的作用域过滤派发：agent 作用�
 4. 否则派发 waterfall。链上没人应答的兜底是 `unavailable`；answerer 抛错（同步抛也算，`317` 特意先进 promise 链）也是 `unavailable`；返回了词汇表之外的值同样归一化成 `unavailable`（`325-328`）。
 5. append 一条 `approval/decided`（同 id）后返回。审计写失败会导致整个请求抛出，而不是返回一个没记账的决定。
 
+五步连起来，含各条分支去向：
+
+```mermaid
+flowchart TD
+    A["<b>request() 发起</b><br/>要求当前处在未关闭的 turn 内"]
+    B["<b>不在 turn 内</b><br/>append 之前直接抛错"]
+    C["<b>append approval/asked</b><br/>分配全新 ApprovalRequestId"]
+    D["<b>decide() 判定</b><br/>signal 是否已 abort、policy 是否为 never"]
+    E["<b>cancelled</b>"]
+    F["<b>rejected</b><br/>never 策略，抢在任何 dispatch 之前"]
+    G["<b>派发 approval/request waterfall</b><br/>按作用域过滤到对应 agent"]
+    H["<b>unavailable</b><br/>无人应答 / answerer 抛错 / 返回值不在词汇表"]
+    I["<b>allowed-once</b><br/>唯一有效的授权结果"]
+    J["<b>append approval/decided</b><br/>同 id；审计写失败则整请求抛出"]
+
+    A -- "不在 turn 内" --> B
+    A -- "在 turn 内" --> C
+    C --> D
+    D -- "signal 已 abort" --> E
+    D -- "policy 为 never" --> F
+    D -- "其余情况" --> G
+    G -- "无人应答 / 抛错 / 非法值" --> H
+    G -- "认领并返回合法值" --> I
+    E --> J
+    F --> J
+    H --> J
+    I --> J
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A,C entry
+    class D,G main
+    class B,E,F,H danger
+    class I data
+    class J main
+```
+
 消费侧：工具管线的 `ask` 决策走这里，没组合审批服务就退化成拒绝（`packages/core/tools/src/index.ts:1693-1699`）；沙箱升级（`sandbox_permissions`）也走这里——`approveEscalation()` 先校验「严格更宽」，再问审批，`allowed-once` 返回被批准的 mode，其余三种结果各抛一段不同的报错文案（`packages/sandbox/sandbox/src/escalation.ts:157-189`，分支在 `180-187`），`dsh-tool-bash`（`packages/shell/tool-bash/src/index.ts:226`）与 `dsh-tool-fs`（`packages/fs/tool-fs/src/sandbox.ts:100`）把 `ctx.get('approval')` 传进去。
 
 ## 配置项

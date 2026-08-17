@@ -40,7 +40,29 @@ base 文件头自己声明 `Row order carries no load semantics (activation is s
 
 它自己不监听任何事件（`src/index.ts` 内无 `ctx.on`）；同包 `src/invariant.ts:77-84` 才监听 `session/created` / `session/event` / `internal/dispatch`。
 
-管线顺序（README:5 原文）：`tools/pre-execute` → 单调 guard → `tools/execute` → `tools/post-execute` → 定义自带的 `finalizeContent` → `tools/result`。公开方法：`register` `:1037`、`presentAs` `:946`、`restrict` `:1071`、`guard` `:1110`、`get` `:1204`、`schemas` `:1234`、`executionMode` `:1276`、`execute` `:1342`。
+管线顺序（README:5 原文）：`tools/pre-execute` → 单调 guard → `tools/execute` → `tools/post-execute` → 定义自带的 `finalizeContent` → `tools/result`。公开方法：`register` `:1037`、`presentAs` `:946`、`restrict` `:1071`、`guard` `:1110`、`get` `:1204`、`schemas` `:1234`、`executionMode` `:1276`、`execute` `:1342`。一次工具调用穿过这条管线的样子：
+
+```mermaid
+flowchart TD
+    ENTRY["<b>创建 execution</b><br/>Code Mode 下先判 UNKNOWN_TOOL，早于以下全部环节"]
+    A["<b>tools/pre-execute</b><br/>waterfall，allow / deny / ask 闸门"]
+    B["<b>单调 guard</b><br/>只能收紧不能放宽"]
+    C["<b>tools/execute</b><br/>waterfall，around-dispatch<br/>唯一允许替换 exec.signal 处"]
+    D["<b>tools/post-execute</b><br/>waterfall，换 content/value、block、挂 additionalContexts"]
+    E["<b>finalizeContent</b><br/>定义自带的收尾逻辑"]
+    F["<b>tools/result</b><br/>emit，只读、已冻结的最终结果"]
+
+    ENTRY --> A --> B --> C --> D --> E --> F
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class ENTRY entry
+    class A,B,C,D,E main
+    class F data
+```
 
 ## 配置项
 

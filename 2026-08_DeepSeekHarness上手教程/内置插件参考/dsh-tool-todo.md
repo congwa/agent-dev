@@ -34,7 +34,20 @@ README:5 原话：`The model-facing todo_write tool: the agent's whole task list
 
 **没有事件监听**——它不参与任何 waterfall，纯粹是个工具注册者。`docs/event-producer-consumer.md:71` 把它列为 `internal/dispatch` 消费方，那条来自伴生插件（`src/invariant.ts:52`），不是主插件。
 
-`todos` unit 的 fold 是「standing plan」语义（`src/index.ts:140-144`）：`todo/write` 覆盖整张表，`turn/start` 清成 `null`，`turn/end` **不清**（跑完的清单要留在屏幕上），其余事件原样返回同一个 state 引用。
+`todos` unit 的 fold 是「standing plan」语义（`src/index.ts:140-144`）：`todo/write` 覆盖整张表，`turn/start` 清成 `null`，`turn/end` **不清**（跑完的清单要留在屏幕上），其余事件原样返回同一个 state 引用。四种事件对这个状态的影响画成状态机就是这样：
+
+```mermaid
+stateDiagram-v2
+    [*] --> Empty
+    Empty --> Empty: turn/start，清空
+    Empty --> Filled: todo/write，整表覆盖
+    Filled --> Filled: todo/write，整表覆盖
+    Filled --> Empty: turn/start，清空
+    Filled --> Filled: turn/end，不清空
+    Filled --> Filled: 其余事件，原样返回同一引用
+    Empty: 无清单（null）
+    Filled: 有清单（TodoItem[]）
+```
 
 ## 配置项
 
