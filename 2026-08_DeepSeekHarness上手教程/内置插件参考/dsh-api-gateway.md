@@ -29,7 +29,29 @@ README 首句：“Two-sided Typert RPC endpoint for Host and Client Cordis envi
 
 认领规则（`packages/api/gateway/src/index.ts:114`）：端点必须正好两段且两段非空；然后满足以下任一——`ctx.typert.local.get(endpoint)` 有严格描述符、或 `hasSeen(endpoint)` 为真、或落在 SRC 标记扫描出的集合里（`:117`、`:122`）。
 
-一次 `invoke()` 的顺序（`packages/api/gateway/src/index.ts:145`）：解析描述符 → `assertExactArguments`（`:148`、`:586`：多一个字段、少一个非可省字段都拒）→ 解析 receiver Context（`:359`，`@RemoteScope` 走 `contexts.getHost`，`:366`）→ 取服务并校验 `typertRemote` 绑定（`:158`、`:495`）→ 逐参数 decode / lookup 解析（`:407`）→ 有 `cancellation` 时把 signal 追加在业务参数之后（`:161`，缺 signal 时用一个永不 abort 的常量 `:41`）→ 调用 → 校验返回值（`:183`）。
+一次 `invoke()` 的顺序（`packages/api/gateway/src/index.ts:145`）：解析描述符 → `assertExactArguments`（`:148`、`:586`：多一个字段、少一个非可省字段都拒）→ 解析 receiver Context（`:359`，`@RemoteScope` 走 `contexts.getHost`，`:366`）→ 取服务并校验 `typertRemote` 绑定（`:158`、`:495`）→ 逐参数 decode / lookup 解析（`:407`）→ 有 `cancellation` 时把 signal 追加在业务参数之后（`:161`，缺 signal 时用一个永不 abort 的常量 `:41`）→ 调用 → 校验返回值（`:183`）。九步串成一条线，中间任何一步失败都直接短路：
+
+```mermaid
+flowchart TD
+    A["<b>invoke() 调用进来</b><br/>namespace/method + 参数"]
+    B["<b>解析描述符</b><br/>严格 or SRC"]
+    C["<b>assertExactArguments</b><br/>字段多/少一律拒"]
+    D["<b>解析 receiver Context</b><br/>RemoteScope 走 contexts.getHost"]
+    E["<b>取服务并校验绑定</b><br/>typertRemote 绑定检查"]
+    F["<b>逐参数 decode/lookup</b><br/>解析每个参数"]
+    G["<b>追加 cancellation signal</b><br/>缺省用永不 abort 的常量"]
+    H["<b>调用业务方法</b>"]
+    I["<b>校验返回值</b><br/>JSON 安全性 + weak/strict 规则"]
+
+    A --> B --> C --> D --> E --> F --> G --> H --> I
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class A entry
+    class B,C,D,E,F,G,H main
+    class I data
+```
 
 ## 配置项
 
@@ -56,7 +78,28 @@ README 的 Known Limitations（`packages/api/gateway/README.md:35`）要点：Co
 
 读源码补充：
 
-- **错误码有 17 个**（`docs/subsystems/typert.md:158`），但过了 RPC 边界只剩三种形态：`cancelled`（业务在 signal abort 后抛错，`packages/api/gateway/src/index.ts:176`、`:472`）、`TypertLookupFailure` 原样透传（`:478`）、其余一律 `internal` 且 `details: {}`（`:481`）。排查时看 host 日志，别看浏览器拿到的码。
+- **错误码有 17 个**（`docs/subsystems/typert.md:158`），但过了 RPC 边界只剩三种形态：`cancelled`（业务在 signal abort 后抛错，`packages/api/gateway/src/index.ts:176`、`:472`）、`TypertLookupFailure` 原样透传（`:478`）、其余一律 `internal` 且 `details: {}`（`:481`）。排查时看 host 日志，别看浏览器拿到的码。17 种错误码在边界上被收窄成三种形态：
+
+```mermaid
+flowchart TD
+    A["<b>业务/派发失败</b><br/>17 种错误码之一"]
+    B{"<b>属于哪一类</b>"}
+    C["<b>cancelled</b><br/>signal abort 后抛错"]
+    D["<b>TypertLookupFailure</b><br/>原样透传"]
+    E["<b>internal</b><br/>details: {}"]
+
+    A --> B
+    B -- "取消" --> C
+    B -- "lookup 失败" --> D
+    B -- "其余全部" --> E
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class A entry
+    class B main
+    class C,D,E danger
+```
 - **严格定义撤销后不会退化成 SRC**：`hasSeen` 命中就抛 `definition-unavailable`（`packages/api/gateway/src/index.ts:227`），README 的说法是 “Withdrawing an observed strict definition fails instead of weakening validation.”（`packages/api/gateway/README.md:11`）。热卸载一个包不会悄悄放松校验。
 - **SRC 靠 `Function.prototype.toString()` 抠参数名**（`packages/api/gateway/src/index.ts:562`）：只接受唯一标识符形参，解构、默认值、rest、重名一律抛 `signature-invalid`（`:578`）。非 lookup 参数的 wire 字段名**就是**形参名（`:300`），所以压缩/转译改名不会触发 `signature-invalid`，而是让调用方的 `args` 对不上，落到 `arguments-invalid`（`:611`）。同一端点被两个活服务导出则抛 `ambiguous-endpoint`（`:256`）。
 - **返回值也要过 JSON 安全检查**：非有限数、循环引用、稀疏数组、带 symbol 属性的对象、非 plain 原型对象全部判 `result-invalid`（`packages/api/gateway/src/index.ts:640`）。业务方法返回一个类实例会在边界上炸，而不是被静默序列化。

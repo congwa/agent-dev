@@ -38,6 +38,37 @@
 
 ## 判定顺序
 
+触发点在 `tools/post-execute` 内部，谁被直接放过、谁才会走到字节封顶，分支关系是这样：
+
+```mermaid
+flowchart TD
+    A["<b>tools/post-execute 触发</b><br/>先 await next() 拿下游终稿"]
+    B["<b>命中跳过条件？</b><br/>嵌套执行 / value 替换 / read / 非 accept 决定"]
+    C["<b>原样放过</b><br/>不做任何改写"]
+    D["<b>内容全是 text 块？</b>"]
+    E["<b>原样放过</b><br/>含非文本块不展平"]
+    F["<b>UTF-8 字节 ≤ maxInlineBytes？</b>"]
+    G["<b>不动</b><br/>内联结果保持原样"]
+    H["<b>存全文并替换</b><br/>预览+空行+告示，整体仍 ≤ 上限"]
+
+    A --> B
+    B -- "命中任一条件" --> C
+    B -- "都不命中" --> D
+    D -- "含非文本块" --> E
+    D -- "全是 text" --> F
+    F -- "是" --> G
+    F -- "否" --> H
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,D,F main
+    class H data
+    class C,E,G note
+```
+
 1. 先 `next()` 让工具跑完，所以它封顶的是下游 hook 最终接受的内容。
 2. 跳过嵌套执行（`exec.parent` 存在）、被接受的 value 替换、`read`（避免 `read → spill → read again` 循环）、以及一切非 `accept` 决定（`block` 的纠正反馈原样通过）。
 3. 只在内容**全是** `text` 块时才展平；含任何非文本块的结果原样放过。

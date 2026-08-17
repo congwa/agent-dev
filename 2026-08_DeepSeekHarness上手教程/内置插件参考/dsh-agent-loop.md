@@ -54,6 +54,25 @@ static inject = ['agents', 'sessions', 'llm', 'tools', 'systemPrompt']
 3. 渲染 dynamic contexts，`RuntimeContextProjection.project()` 决定要不要产出一条快照消息（`:232`–`:233`）；
 4. 最后跑 `agent/pre-step` waterfall（`:234`），**默认值**是 `claimed` 后面接那条 runtime-context 快照（`:236`–`:239`）。
 
+```mermaid
+flowchart TD
+    A["<b>1. inbox.claim(target, turn)</b><br/>批次从 inbox 里删走"]
+    B["<b>2. systemPrompt.assemble()</b><br/>渲染 per-agent system prompt"]
+    C["<b>3. RuntimeContextProjection.project()</b><br/>决定要不要产出快照消息"]
+    D["<b>4. agent/pre-step waterfall</b><br/>默认批次：claimed + runtime-context 快照"]
+    E["<b>agent-instructions 监听</b><br/>把基线折进 claimed 之后、runtime context 之前"]
+
+    A --> B --> C --> D
+    D -- "在这里插入" --> E
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class A,B,C entry
+    class D main
+    class E data
+```
+
 这个顺序解释了 [agent-instructions](./dsh-agent-instructions.md) 为什么把自己的消息折在"claimed 批次之后、runtime context 之前"——它是在 waterfall 里改这个默认批次。runtime-context 快照的 source 署名写死成 `@deepseek-ai/dsh-system-prompt`（`src/runtime-context.ts:12`），清空时发一条固定文案 `Current runtime context: none. Earlier runtime-context snapshots no longer apply.`（`src/runtime-context.ts:13`）。
 
 ## 配置项

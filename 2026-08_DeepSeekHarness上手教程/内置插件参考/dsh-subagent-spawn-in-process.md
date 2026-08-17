@@ -54,7 +54,28 @@ provider 对象两个静态面（`src/index.ts:41-46`）：
 
 ## 什么时候你会想换掉它 / 怎么换
 
-这是 base 的默认后端，`tool-subagent`（`subagent` 工具）和 [tool-ralph](./dsh-tool-ralph.md) 都默认指向它，一般不动。会动的场景：
+这是 base 的默认后端，`tool-subagent`（`subagent` 工具）和 [tool-ralph](./dsh-tool-ralph.md) 都默认指向它，一般不动。两个 provider 从同一个父分岔出去，子侧拿到的东西完全不同：
+
+```mermaid
+flowchart TD
+    P["<b>父会话</b><br/>已完成若干 turn"]
+    S["<b>spawn provider</b><br/>inheritsParentContext: false"]
+    F["<b>fork provider</b><br/>inheritsParentContext: true"]
+    S1["<b>子收到</b><br/>零条父对话消息，全新 session"]
+    F1["<b>子收到</b><br/>父已完成 turn 前缀 + 新任务"]
+
+    P -- "开全新子" --> S --> S1
+    P -- "开延续子" --> F --> F1
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class P entry
+    class S,F main
+    class S1,F1 data
+```
+
+会动的场景：
 
 - 想让子**看得见**父已完成的对话 → 用 [fork provider](./dsh-subagent-fork-in-process.md)，base 已经并行装好了。
 - 想让子跑在别的进程/别的产品里 → 换成 `-acp` / `-codex` / `-claude-code` / `-dsh-sdk` 之一，再新开一个 `tool-subagent` 实例绑过去。

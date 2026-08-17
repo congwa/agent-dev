@@ -33,6 +33,36 @@
 
 ## 命令契约
 
+从收到 `/compact` 到给出结果，中间是一道 idle 门加一次后端结果映射：
+
+```mermaid
+flowchart TD
+    A["<b>/compact 收到</b><br/>不接受参数"]
+    B{"<b>agent 是否 idle</b>"}
+    C["<b>busy</b><br/>直接返回，不排队"]
+    D["<b>调用 ctx.compaction.compactNow()</b>"]
+    E{"<b>后端结果</b>"}
+    F["<b>成功</b><br/>Compacted N history items"]
+    G["<b>无可压缩历史</b><br/>No compactable history yet."]
+    H["<b>ManualCompactionError</b><br/>映射为稳定文案"]
+
+    A --> B
+    B -- "忙" --> C
+    B -- "闲" --> D --> E
+    E -- "有效压缩" --> F
+    E -- "无需压缩" --> G
+    E -- "cancelled/changed/summary/commit/persistence" --> H
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class A entry
+    class B,D,E main
+    class F,G data
+    class C,H danger
+```
+
 | 输入 | 结果 |
 |---|---|
 | `/compact` | 压缩一段平衡的较早历史，成功后报告替换掉的条目数与估算 token：`Compacted N history items (~M tokens).` |

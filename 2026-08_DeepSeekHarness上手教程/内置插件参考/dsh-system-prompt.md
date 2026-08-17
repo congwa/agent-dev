@@ -67,7 +67,36 @@ schema 默认值在 `src/index.ts:339`–`:345`；`toolOrder` 刻意保留"未�
 
 ## 模型看得见什么
 
-默认每次装配的开头是那句身份行，然后是 persona 和按 order 排列的插件段，全部经过严格变量插值。空段消失；scoped 段和变量可以为单个 agent 遮蔽全局值。有一个 section 声明 `complete: true` 时，它成为**整个** system prompt，而 waterfall 产出的 contexts、tools、variables 仍保留（`README.md:55`）。
+默认每次装配的开头是那句身份行，然后是 persona 和按 order 排列的插件段，全部经过严格变量插值。空段消失；scoped 段和变量可以为单个 agent 遮蔽全局值。有一个 section 声明 `complete: true` 时，它成为**整个** system prompt，而 waterfall 产出的 contexts、tools、variables 仍保留（`README.md:55`）。从贡献到落地渲染，走的是这条装配管线：
+
+```mermaid
+flowchart TD
+    A["<b>各插件贡献</b><br/>section / context / tools / variable"]
+    B["<b>system-prompt/assemble</b><br/>waterfall，order 由低到高"]
+    C["<b>harness:identity</b><br/>order -100，固定身份句"]
+    D["<b>deployment:persona</b><br/>order 0，config.persona"]
+    E["<b>工具指引段</b><br/>order 100-199"]
+    F["<b>有 complete:true 的段？</b>"]
+    G["<b>该段独占为整个 prompt</b><br/>contexts/tools/variables 仍保留"]
+    H["<b>按 order 拼接所有段</b><br/>严格插值 {{model}} {{cwd}} 等变量"]
+    I["<b>渲染成最终 system prompt</b><br/>空段丢弃，未知引用抛错"]
+
+    A --> B
+    B --> C --> F
+    B --> D --> F
+    B --> E --> F
+    F -- "是" --> G --> I
+    F -- "否" --> H --> I
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,F main
+    class C,D,E,H,I data
+    class G note
+```
 
 固定开场白原文（`README.md:60`，实现 `src/index.ts:361`）：
 

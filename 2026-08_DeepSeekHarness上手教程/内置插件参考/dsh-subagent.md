@@ -39,13 +39,52 @@
 
 ## 配置项
 
-无配置项。行为完全由「注册了哪些 provider」和「`agents` / `sessionProjections` / 会话持久化是否在场」决定：没有 `ctx.agents` 就没有 continuation manager，所有可续操作以 `CONTINUATION_UNAVAILABLE` 失败（`src/index.ts:458-465`）；没有 projection registry，`listChildren()` 以 `SUBAGENT_CONTROL_PROJECTIONS_UNAVAILABLE` 失败（README「Collection model」一节）。
+无配置项。行为完全由「注册了哪些 provider」和「`agents` / `sessionProjections` / 会话持久化是否在场」决定：没有 `ctx.agents` 就没有 continuation manager，所有可续操作以 `CONTINUATION_UNAVAILABLE` 失败（`src/index.ts:458-465`）；没有 projection registry，`listChildren()` 以 `SUBAGENT_CONTROL_PROJECTIONS_UNAVAILABLE` 失败（README「Collection model」一节）。两块可选能力各自独立判定：
+
+```mermaid
+flowchart TD
+    A["<b>dsh-subagent 加载</b><br/>无 config，服务无条件挂载"]
+    B["<b>ctx.agents 在场？</b>"]
+    C["<b>建立 continuation manager</b><br/>可续三件套可用"]
+    D["<b>可续操作失败</b><br/>CONTINUATION_UNAVAILABLE"]
+    E["<b>ctx.sessionProjections 在场？</b>"]
+    F["<b>注册两个 projection 单元</b><br/>subagentTiming、subagent"]
+    G["<b>listChildren 失败</b><br/>SUBAGENT_CONTROL_PROJECTIONS_UNAVAILABLE"]
+
+    A --> B
+    B -- "是" --> C
+    B -- "否" --> D
+    A --> E
+    E -- "是" --> F
+    E -- "否" --> G
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class A entry
+    class B,E main
+    class C,F data
+    class D,G danger
+```
 
 ## 模型看得见什么
 
 两处，都来自 README 的 Model Experience：
 
-1. **结算通知（settlement notice）**——可续子的 Activation 一结束，父就收到一条 user-role 消息。首行由 stop reason 决定，例如 completed 时是 `Background subagent <child-id> finished and will do no further work unless you send it more.`（`src/continuation.ts:291-311`），随后是 `Its closing message:` 加子的最后一段 assistant 内容，或 `It left no closing message.`。来源标 `{ kind: 'subagent-settled', form: 'notice', senderSessionId: <child-id> }`，与子自己写的 `subagent-report` 区分开，「a transcript never credits the child with words the runtime wrote」。这是本服务在父侧唯一的直接贡献。
+1. **结算通知（settlement notice）**——可续子的 Activation 一结束，父就收到一条 user-role 消息。首行由 stop reason 决定，例如 completed 时是 `Background subagent <child-id> finished and will do no further work unless you send it more.`（`src/continuation.ts:291-311`），随后是 `Its closing message:` 加子的最后一段 assistant 内容，或 `It left no closing message.`。来源标 `{ kind: 'subagent-settled', form: 'notice', senderSessionId: <child-id> }`，与子自己写的 `subagent-report` 区分开，「a transcript never credits the child with words the runtime wrote」。这是本服务在父侧唯一的直接贡献。这条链路谁先谁后：
+
+```mermaid
+sequenceDiagram
+    participant Child as 可续子
+    participant Svc as subagent 服务
+    participant Parent as 父 agent
+
+    Child->>Svc: Activation 结束，带着 stop reason
+    Svc->>Svc: emit subagent/end
+    Svc->>Parent: 投递 user-role 结算通知
+    Note over Parent: 首行由 stop reason 决定<br/>随后附子的最后一段 assistant 内容<br/>或标注未留结束语
+```
 2. **子的委派范围声明**——每个进程内子的 runtime-context 快照里带 `subagent:delegation` 一段，告诉它权限在启动时就定死、需要审批的操作会被自动拒绝、超范围时应当在回复里说明限制而不是重试。
 
 ## 什么时候你会想换掉它 / 怎么换

@@ -33,7 +33,27 @@ Every plugin (UI, hooks, orchestrators) programs against the `Agent` handle defi
 | 事件声明（serial） | `agent/turn-stopping` | `src/runtime-types.ts:278` |
 | 自身监听（waterfall） | `system-prompt/assemble` + `agent/request` | `installModelSelection()` 装在单个 agent 的 scope 上，`src/model-selection.ts:40`、`:54` |
 
-**声明 ≠ 派发**：本包只自己派发 `agent/created` 与 `agent/disposed`（`docs/event-producer-consumer.md:12`、`:13`），其余 `agent/*` 全部由 agent-loop 派发。三个 waterfall 是整台机器的拦截点，同样**声明在这里、派发在 agent-loop**（`docs/event-producer-consumer.md:18`–`:20`）：
+**声明 ≠ 派发**：本包只自己派发 `agent/created` 与 `agent/disposed`（`docs/event-producer-consumer.md:12`、`:13`），其余 `agent/*` 全部由 agent-loop 派发。
+
+```mermaid
+flowchart TD
+    A["<b>dsh-agent</b><br/>声明全部 agent/* 事件词表"]
+    B["<b>agent/created、agent/disposed</b><br/>自己派发"]
+    C["<b>其余 agent/* 事件</b><br/>emit + waterfall + serial"]
+    D["<b>dsh-agent-loop</b><br/>实际派发方"]
+
+    A --> B
+    A --> C --> D
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class A entry
+    class B,C main
+    class D data
+```
+
+三个 waterfall 是整台机器的拦截点，同样**声明在这里、派发在 agent-loop**（`docs/event-producer-consumer.md:18`–`:20`）：
 
 - `agent/pre-step`：可以 reject 掉一个 step，也可以替换进入该 step 的消息批次。[agent-instructions](./dsh-agent-instructions.md) 就是靠它把 workspace 指令折进首个 batch 的。
 - `agent/request`：`await next()` 拿到机器本来要用的 config，返回替换值即改路由。当前唯一监听方是本包自己（`docs/event-producer-consumer.md:19`）。

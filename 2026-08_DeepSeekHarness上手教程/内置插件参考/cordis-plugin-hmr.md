@@ -32,6 +32,38 @@ vendored 包，上游 `@cordisjs/plugin-hmr`（`vendor/README.md:22`）；`vendo
 
 它**不监听**任何 Cordis 事件，只发。三个事件没有一个是 waterfall——没人能拦它、改它的结果。它也不注册工具、prompt 段、命令。
 
+一次文件变更具体走哪条路，判断顺序是外部依赖优先、配置其次、插件模块兜底：
+
+```mermaid
+flowchart TD
+    A["<b>文件变更</b><br/>chokidar watcher 触发"]
+    B["<b>命中 externals？</b><br/>CLI worker 依赖树内"]
+    C["<b>整进程退出重启</b><br/>loader.exit()"]
+    D["<b>命中已注册配置路径？</b><br/>registerConfig 监听的文件"]
+    E["<b>按 key 串行刷新配置</b><br/>刷新中再变更只置脏"]
+    F["<b>能映射到 loader 插件条目？</b><br/>依赖分析定位受影响插件"]
+    G["<b>只重载受影响插件</b><br/>失败则回滚 loadCache/require.cache"]
+    H["<b>广播 hmr/change</b><br/>仅通知 URL，不做处理"]
+
+    A --> B
+    B -- "是" --> C
+    B -- "否" --> D
+    D -- "是" --> E
+    D -- "否" --> F
+    F -- "是" --> G
+    F -- "否" --> H
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class A entry
+    class B,D,F main
+    class C danger
+    class E,G data
+    class H main
+```
+
 ## 配置项
 
 Schema 在 `vendor/hmr/src/index.ts:560`：
@@ -55,6 +87,29 @@ Schema 在 `vendor/hmr/src/index.ts:560`：
 
 - 默认 web / headless 树把 `hmr` 行关掉，于是 `apps/cli/src/profile-boot.ts:279` 在启动后检查 `ctx.get('hmr') === undefined`，缺 [timer](./cordis-plugin-timer.md) 就先补一个（`apps/cli/src/profile-boot.ts:280`），再挂一个**只看配置、不看模块**的实例：`ctx.loader.create({ name: '@deepseek-ai/cordis-plugin-hmr', config: { root: [] } })`（`apps/cli/src/profile-boot.ts:283`）。
 - 这个实例的唯一用途是 `watchUserPatches` → `hmr.registerConfig(filename, ...)`（`packages/boot/app-boot/src/index.ts:241`），让 `cordis.patch.yml` 的编辑实时生效；缺服务时它直接抛错而不是静默跳过（`packages/boot/app-boot/src/index.ts:238`）。
+
+两层 bundle 关掉之后，启动器又补回来一个阉割版实例，链路是这样的：
+
+```mermaid
+flowchart TD
+    A["<b>base bundle</b><br/>hmr 行默认开启<br/>监听模块根目录"]
+    B["<b>web / headless bundle</b><br/>覆盖为 disabled: true"]
+    C["<b>启动器检查</b><br/>ctx.get('hmr') 是否 undefined"]
+    D["<b>缺 timer 先补一个</b><br/>profile-boot.ts:280"]
+    E["<b>再挂一个只看配置的实例</b><br/>不看模块，仅用于 registerConfig"]
+    F["<b>watchUserPatches 调用</b><br/>hmr.registerConfig(filename)"]
+    G["<b>cordis.patch.yml 编辑实时生效</b>"]
+
+    A --> B --> C
+    C -- "是" --> D --> E --> F --> G
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class A,B entry
+    class C,D,E,F main
+    class G data
+```
 
 想在自己的 profile 里把模块热重载打开，就在自己的 patch 层重新开这一行并给出模块根：
 

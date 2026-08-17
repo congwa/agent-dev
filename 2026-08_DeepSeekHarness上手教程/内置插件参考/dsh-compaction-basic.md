@@ -36,7 +36,34 @@ web profile 把它关掉了：
 | 事件监听 | `session/event`（emit） | 见到 `assistant/message` 就重置 overflow 序列（`packages/compaction/compaction-basic/src/index.ts:173`） |
 | 会话事件 | `compaction/start` / `compaction/summary` / `compaction/end` | 三个都是 log-only，不进 surface；替换本身骑在一条带 `surfaceOp: { op: 'replace' }` 的 `user/message` 上（`docs/subsystems/compaction.md:11-19`） |
 
-没有注册工具，也没有 prompt 段。以上监听只在 `auto: true`（默认）时安装（`packages/compaction/compaction-basic/src/index.ts:129`）。
+没有注册工具，也没有 prompt 段。以上监听只在 `auto: true`（默认）时安装（`packages/compaction/compaction-basic/src/index.ts:129`）。两个 waterfall 监听各自守着一条触发路径，压力检查在请求前，溢出恢复在请求后：
+
+```mermaid
+flowchart TD
+    A["<b>agent/pre-step</b><br/>请求派生之前（waterfall）"]
+    B{"<b>压力是否超过 thresholdRatio</b>"}
+    D["<b>继续 step</b><br/>不压缩"]
+    E["<b>agent/request-error</b><br/>waterfall"]
+    F{"<b>是否 CONTEXT_WINDOW_EXCEEDED</b>"}
+    H["<b>不处理</b><br/>交给其他监听者"]
+    C["<b>compactIfNeeded</b><br/>换掉最老一段 surface"]
+    G["<b>压缩后重放</b><br/>{ kind: 'retry' }"]
+
+    A --> B
+    B -- "超过阈值" --> C
+    B -- "未超过" --> D
+    E --> F
+    F -- "是" --> C
+    F -- "否" --> H
+    C --> G
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class A,E entry
+    class B,F,D,H main
+    class C,G data
+```
 
 ## 配置项
 
@@ -63,7 +90,31 @@ web profile 把它关掉了：
 This is an automatically generated checkpoint condensing an earlier span of the conversation to free up context. Treat the captured context as established background and build on it without restating it. Continue the task directly from the messages that follow, without acknowledging this checkpoint.
 ```
 
-摘要请求是一次独立的 `ctx.llm.stream()` 调用（`purpose: 'compaction'`，`packages/compaction/compaction-basic/src/summarizer.ts:161`），它**逐字重放**对话自己的 system prompt、tools 和被影子化区间的消息，只在末尾追加一条固定的压缩指令 user 消息——README 的 KV Cache effect 一节说明这样做是为了复用 provider 的热前缀缓存，只有那条指令和输出是未缓存的。会话模型永远看不到这次私有请求；只有返回的**文本**进检查点，图像输出会以 `UNSUPPORTED_CONTENT` 失败而不是被悄悄丢掉（`packages/compaction/compaction-basic/src/summarizer.ts:220-221`）。
+摘要请求是一次独立的 `ctx.llm.stream()` 调用（`purpose: 'compaction'`，`packages/compaction/compaction-basic/src/summarizer.ts:161`），它**逐字重放**对话自己的 system prompt、tools 和被影子化区间的消息，只在末尾追加一条固定的压缩指令 user 消息——README 的 KV Cache effect 一节说明这样做是为了复用 provider 的热前缀缓存，只有那条指令和输出是未缓存的。会话模型永远看不到这次私有请求；只有返回的**文本**进检查点，图像输出会以 `UNSUPPORTED_CONTENT` 失败而不是被悄悄丢掉（`packages/compaction/compaction-basic/src/summarizer.ts:220-221`）。这次私有请求里"重放什么、新增什么、只收什么"是三件不同的事：
+
+```mermaid
+flowchart TD
+    A["<b>摘要请求构建</b><br/>purpose: 'compaction'"]
+    B["<b>逐字重放</b><br/>system prompt + tools + 被影子化区间消息"]
+    C["<b>追加固定压缩指令</b><br/>唯一未缓存的 user 消息"]
+    D["<b>ctx.llm.stream() 独立调用</b><br/>会话模型看不到这次请求"]
+    E{"<b>返回内容</b>"}
+    F["<b>文本</b><br/>写入 &lt;compacted-summary&gt; 检查点"]
+    G["<b>图像</b><br/>UNSUPPORTED_CONTENT 失败"]
+
+    A --> B --> C --> D --> E
+    E -- "文本" --> F
+    E -- "图像" --> G
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class A entry
+    class B,C,D,E main
+    class F data
+    class G danger
+```
 
 ## 什么时候你会想换掉它 / 怎么换
 

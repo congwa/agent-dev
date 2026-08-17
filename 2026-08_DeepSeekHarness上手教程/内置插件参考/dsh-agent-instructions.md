@@ -43,6 +43,23 @@ The plugin does not statically inject `fs`, so providerless product trees still 
 
 waterfall 的处理很讲究（`src/index.ts:326`–`:347`）：决定是 `reject`、或者第一个 step 的批次为空时（`:333`），基线**留在** `next-step` inbox 里等下次唤醒；否则移除 pending 副本（`:339`），并把消息插在"最后一条被 claim 的消息之后"（`:345`–`:346`）——于是直接 prompt 在前、基线在中、[agent-loop](./dsh-agent-loop.md) 追加的 runtime context 在后。
 
+```mermaid
+flowchart LR
+    A["<b>claimed 批次</b><br/>直接 prompt"]
+    B["<b>基线指令</b><br/>用户全局 + 项目 AGENTS.md"]
+    C["<b>新增/更新/移除通知</b><br/>插在最后一条被 claim 的消息之后"]
+    D["<b>runtime context 快照</b><br/>agent-loop 追加"]
+
+    A --> B --> C --> D
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class A entry
+    class B,C main
+    class D data
+```
+
 ## 配置项
 
 | 字段 | 类型 | 默认值 | 作用 |
@@ -74,6 +91,18 @@ Instructions from: AGENTS.md
 
 <project-instructions>
 </system-reminder>
+```
+
+一份指令文件在会话里经历的状态迁移，全部由成功的 fs 工具调用驱动：
+
+```mermaid
+stateDiagram-v2
+    [*] --> Discovered: 成功的read/write/edit命中新目录
+    Discovered --> Loaded: 首次渲染进批次
+    Loaded --> Updated: 内容变化后再次touch
+    Updated --> Loaded: 更新通知发出
+    Loaded --> Removed: 文件消失或塌缩为重复项
+    Removed --> [*]
 ```
 
 新发现的更深目录用 `Additional instructions from: <path>`；同一文件改了用 `Updated instructions from: <path>`；文件消失或变成同目录内更早候选的重复项，则发（`README.md:147`–`:151`）：

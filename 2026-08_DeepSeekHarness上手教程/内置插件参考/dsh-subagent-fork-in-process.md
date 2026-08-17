@@ -32,7 +32,33 @@
 
 ### 种子边界（这个包唯一的实质差异）
 
-子 agent 启动时，父那一轮工具调用还开着：日志里有 assistant 的 tool call，却还没有对应的 tool result 和 `turn/end`。原样拷贝会给子一个不平衡的、非法的 session。所以 `completedTurnPrefix()` 用 `events.findLast(e => e.type === 'turn/end')` 取到最后一个 `turn/end`，再 `events.slice(0, lastEnd.seq + 1)`——依赖 append 契约里 `seq === 数组下标`（`src/index.ts:48-54`）。父还没跑完任何一轮时种子为空，直接省略，子等价于一次 fresh spawn（`:70-75`）。
+子 agent 启动时，父那一轮工具调用还开着：日志里有 assistant 的 tool call，却还没有对应的 tool result 和 `turn/end`。原样拷贝会给子一个不平衡的、非法的 session。所以 `completedTurnPrefix()` 用 `events.findLast(e => e.type === 'turn/end')` 取到最后一个 `turn/end`，再 `events.slice(0, lastEnd.seq + 1)`——依赖 append 契约里 `seq === 数组下标`（`src/index.ts:48-54`）。父还没跑完任何一轮时种子为空，直接省略，子等价于一次 fresh spawn（`:70-75`）。这条切片规则画出来是这样：
+
+```mermaid
+flowchart LR
+    A["<b>父会话事件日志</b><br/>…turn/end, turn/end, 未结束的 tool call"]
+    B["<b>找最后一个 turn/end</b><br/>events.findLast(...)"]
+    C["<b>按 seq 切片</b><br/>events.slice(0, lastEnd.seq+1)"]
+    D["<b>子的种子前缀</b><br/>只含已完成的 turn"]
+    E["<b>父进行中的 turn</b><br/>整轮排除在外"]
+    F["<b>一个 turn/end 都没有</b><br/>种子为空"]
+    G["<b>退化成 fresh spawn</b><br/>子没有可继承的历史"]
+
+    A --> B
+    B --> C
+    C --> D
+    C -- "排除" --> E
+    B -- "父还没跑完任何一轮" --> F --> G
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,C main
+    class D data
+    class E,F,G note
+```
 
 **种子只搬对话历史。** 子仍然拿到一个全新的扁平注册作用域，不继承父的工具限制或授权。
 

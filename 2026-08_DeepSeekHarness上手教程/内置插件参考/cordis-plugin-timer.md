@@ -39,6 +39,28 @@
 
 关键机制只有一条：每个定时器都包在 `this.ctx.effect(...)` 里（例如 `vendor/timer/src/index.ts:35`、`:63`、`:108`），所以 handle 注册在**调用方的 fiber** 上，而不是 timer 服务自己的 fiber 上——谁创建谁负责，卸载谁清谁的。
 
+```mermaid
+flowchart TD
+    A["<b>插件 A 调用</b><br/>ctx.timeout(cb, delay)"]
+    B["<b>包进 ctx.effect(...)</b><br/>句柄挂在调用方 fiber 上"]
+    C["<b>谁创建谁负责</b><br/>不挂在 timer 服务的 fiber 上"]
+    D["<b>插件 A 被卸载</b><br/>fiber 销毁"]
+    E["<b>定时器自动清理</b><br/>无需 timer 服务介入"]
+    F["<b>timer 服务自身被卸载</b>"]
+    G["<b>已创建的定时器不受影响</b>"]
+
+    A --> B --> C
+    C --> D --> E
+    C --> F --> G
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class A entry
+    class B,C,D,F main
+    class E,G data
+```
+
 ## 配置项
 
 无配置项。源码里没有 `Config` 导出，行为完全由调用点的参数决定。

@@ -33,6 +33,30 @@
 |---|---|
 | 进程树 | POSIX 子进程 `detached`（自己一个进程组），用负 pgid 发信号，失败回落直接子进程；Windows 走 `taskkill /PID <pid> /T /F`（README.md:9） |
 | 终止 | `terminate()` 是句柄**唯一**的终止动词：SIGTERM → 等 spec 的 grace → SIGKILL；树已消失时是 no-op。`waitForExit()` 轮询整树存活，所以调用方拆解时确认的是真正的静默（README.md:9） |
+
+`terminate()` 内部的状态流转：
+
+```mermaid
+stateDiagram-v2
+    state "运行中" as Running
+    state "terminate() 调用" as Called
+    state "树已消失（no-op）" as Gone
+    state "已发送 SIGTERM（负 pgid）" as SigtermSent
+    state "等待 spec 的 grace" as Grace
+    state "已发送 SIGKILL" as SigkillSent
+    state "已退出" as Exited
+
+    [*] --> Running
+    Running --> Called
+    Called --> Gone
+    Called --> SigtermSent
+    SigtermSent --> Exited: 宽限期内自行退出
+    SigtermSent --> Grace
+    Grace --> SigkillSent: 宽限期耗尽
+    SigkillSent --> Exited
+    Gone --> [*]
+    Exited --> [*]
+```
 | 输出 | `'pipe'` 把原始流原样交给调用方（协议分帧归消费者）；`'inherit'` 透传父描述符；collect 模式保留超出上限的**尾部**（错误和结果都堆在末尾——pi/OpenCode 的理由），完整流在配置了 spill 上限时追加到私有临时文件（README.md:10） |
 | spill 文件 | `0600`，随机名，位于惰性创建的 `0700` per-process 目录下；超过 spill 上限的流会丢弃已不完整的 spill 只返回标记为截断的尾部；结算时封 fd，最终 close 失败则**不**给出路径而不是给一个不完整的文件（README.md:10） |
 | 环境 | `process.env` 减去凭据形状的名字与**所有** `DSH_*`，再合入 spec 的显式 `env`。凭据判据是 `SENSITIVE_ENV_PATTERN = /KEY\|PASSWORD\|SECRET\|TOKEN/i`（`packages/subprocess/subprocess/src/index.ts:44, 60-66`）；两种擦洗都大小写不敏感，因为 Windows 环境名大小写不敏感 |

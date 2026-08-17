@@ -47,6 +47,28 @@ schema 在 `src/index.ts:65-68`，两个字段都是 `required`。
 
 合成关系：composition 那一行是 section 的 base，挂了 settings 服务时用户选择叠在上面，改动在**下一次** `currentSelection()` 读取时可见——因为每个消费者都走 `currentSelection()`，所以 `onChange` 是空的，没有注册级事实需要重建（`src/index.ts:78-80`）。
 
+值从哪来、最终被谁读到，是同一条链路：
+
+```mermaid
+flowchart TD
+    A["<b>bundle 出厂值</b><br/>provider: deepseek-official<br/>model: deepseek-v4-flash"]
+    B["<b>settings section 覆盖</b><br/>用户 saveSelection() 写入<br/>没挂 settings 则 no-op"]
+    C["<b>currentSelection()</b><br/>投影后的脱钩值"]
+    D["<b>ApiProxy</b><br/>defaultModelSelection"]
+    E["<b>headless bundle</b><br/>直接入口"]
+
+    A --> B --> C
+    C --> D
+    C --> E
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class A entry
+    class B,C main
+    class D,E data
+```
+
 ## 模型看得见什么
 
 Model Experience 原文（`README.md:14-16`）：

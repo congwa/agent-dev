@@ -64,7 +64,23 @@ KV cache 方面：替换一条更早的结果会从第一个改变的 token 起�
 - **想少剪一点**：调大 `thresholdChars`（同时保证头尾加标记仍装得下）。
 - **想彻底关掉**：`disabled: true`。compaction-basic 会通过 `ctx.get()` 拿到 `undefined` 并跳过整个 model-free 通道，只剩摘要压缩，两个包各自独立可组合。
 - **换实现**：这是一个普通 cordis service，写一个同名服务的替代 provider 即可（同一 context 内一个服务只能有一个实现）。
-- 它和 [spill-policy](./dsh-spill-policy.md) 治的是同一类症状但层次不同：spill-policy 在**工具执行时**按 UTF-8 字节封顶模型可见结果（append-only）；本插件在**压缩时**按 Unicode 码点重写**已经进了日志的** surface 节点（replace）。两者都开时，先被 spill 截断的结果通常已在 `maxInlineBytes` 之下，不会再触发这里的阈值。
+- 它和 [spill-policy](./dsh-spill-policy.md) 治的是同一类症状但层次不同：spill-policy 在**工具执行时**按 UTF-8 字节封顶模型可见结果（append-only）；本插件在**压缩时**按 Unicode 码点重写**已经进了日志的** surface 节点（replace）。两者都开时，先被 spill 截断的结果通常已在 `maxInlineBytes` 之下，不会再触发这里的阈值：
+
+```mermaid
+flowchart LR
+    subgraph S1["spill-policy"]
+        A1["<b>工具执行时封顶</b><br/>按 UTF-8 字节，append-only"]
+    end
+    subgraph S2["tool-result-pruner"]
+        A2["<b>压缩时重写</b><br/>按 Unicode 码点，replace 已入日志节点"]
+    end
+    A1 -- "通常已在阈值之下" --> A2
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class A1 main
+    class A2 data
+```
 
 ## 坑与边界
 

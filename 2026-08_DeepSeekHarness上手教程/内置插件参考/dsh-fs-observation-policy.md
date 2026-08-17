@@ -25,7 +25,38 @@ web profile **没有**关掉它（`packages/bundle/web-app/cordis.patch.yml` 里
 | 事件监听 | `fs/edit-intent`（**waterfall**） | 未见过 → 抛 `FS_NOT_OBSERVED`；确认缺失 → 抛 `FS_NOT_FOUND`；确认存在 → `{ version }` 作 CAS 基准。同样独占单槽（`src/index.ts:122`，决策体在 `:78-88`） |
 | 事件监听 | `fs/observed`（emit） | 同步记录 `present`/`absent`，实现就是一次 `WeakMap.set`（`src/index.ts:127-129`） |
 
-没有 service，没有工具，没有 prompt 段，没有命令。两个 waterfall 的 listener 都包在 `Promise.resolve().then(...)` 里，好让抛出变成 reject 而不是穿过 waterfall 同步逃逸（`src/index.ts:116-122`）。
+没有 service，没有工具，没有 prompt 段，没有命令。两个 waterfall 的 listener 都包在 `Promise.resolve().then(...)` 里，好让抛出变成 reject 而不是穿过 waterfall 同步逃逸（`src/index.ts:116-122`）。两个决策槽读的是同一套三态观察状态，但 write 和 edit 对"没见过/确认缺失"的容忍度不一样：
+
+```mermaid
+flowchart TD
+    A["<b>fs/write-intent</b><br/>waterfall，独占单槽"]
+    B{"<b>owner 曾观察到什么</b>"}
+    C["<b>未见过 / 确认缺失</b><br/>createIfAbsent"]
+    D["<b>确认存在</b><br/>replaceIfVersion(version)"]
+
+    E["<b>fs/edit-intent</b><br/>waterfall，独占单槽"]
+    F{"<b>owner 曾观察到什么</b>"}
+    G["<b>未见过</b><br/>抛 FS_NOT_OBSERVED"]
+    H["<b>确认缺失</b><br/>抛 FS_NOT_FOUND"]
+    I["<b>确认存在</b><br/>{ version } 作 CAS 基准"]
+
+    A --> B
+    B -- "unseen/absent" --> C
+    B -- "present" --> D
+    E --> F
+    F -- "unseen" --> G
+    F -- "absent" --> H
+    F -- "present" --> I
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class A,E entry
+    class B,F main
+    class C,D,I data
+    class G,H danger
+```
 
 派发方有两个：[tool-fs](./dsh-tool-fs.md) 与 [tool-str-replace-editor](./dsh-tool-str-replace-editor.md)；`fs/observed` 这一槽上本插件不是唯一监听者，`skill-filesystem` 也在听（`docs/event-producer-consumer.md:34-36`）。
 

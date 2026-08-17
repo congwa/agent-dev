@@ -50,7 +50,33 @@
 | `workspace-write` | 只能写 `workspaceRoot` + `/tmp`（bwrap 下是临时的，Landlock 下是宿主 `/tmp`，Seatbelt 下是 `/private/tmp` 加每用户 temp 目录） |
 | `danger-full-access` | 完全不限制，**根本不咨询 provider**；前台结果带 `sandbox: { mode, denied: false }`，后台句柄不带沙箱事实 |
 
-README.md:11-15。该表把 `read-only` 标为 default，那是包自身文档的口径；**base bundle 实际默认是 `workspace-write`**（见上一节的 `sandbox-policy` 行）。代码里 `danger-full-access` 是 `run()` / `start()` 的第一个分支，直接走 `super`（`src/index.ts:91-94, 119`）。
+README.md:11-15。该表把 `read-only` 标为 default，那是包自身文档的口径；**base bundle 实际默认是 `workspace-write`**（见上一节的 `sandbox-policy` 行）。代码里 `danger-full-access` 是 `run()` / `start()` 的第一个分支，直接走 `super`（`src/index.ts:91-94, 119`）。一条命令从进来到落地按模式分岔：
+
+```mermaid
+flowchart TD
+    A["<b>ctx.shell 收到命令</b><br/>argv 是 bash -c command"]
+    B["<b>查 sandboxMode</b><br/>ctx.sandboxPolicy.defaultMode"]
+    C{"<b>模式</b>"}
+    D["<b>danger-full-access</b><br/>不咨询 ctx.sandbox，直接 spawn"]
+    E["<b>read-only / workspace-write</b><br/>ctx.sandbox 判定文件访问"]
+    F["<b>放行</b><br/>spawn 成功"]
+    G["<b>拒绝</b><br/>非零退出码 + stderr 命中签名"]
+
+    A --> B --> C
+    C -- "danger-full-access" --> D
+    C -- "受限模式" --> E
+    E -- "允许" --> F
+    E -- "拒绝" --> G
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class A entry
+    class B,C,E main
+    class D,F data
+    class G danger
+```
 
 ## 模型看得见什么
 
