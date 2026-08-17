@@ -115,6 +115,30 @@ WHERE tenant_id = 7 AND status = 1 ORDER BY created_at DESC LIMIT 20;
 | 索引失效 | 加了 `tenant_id` 反而更慢，执行计划乱跳 | 索引重建 + 应对数据倾斜 | 第 3 节（主菜） |
 | 资源不隔离 | 一个租户的大查询砸到所有人 | 换模式，或者给大租户单独拆出去 | 第 1 节 + 第 4 节 |
 
+这三条死穴摆成一条线，难度顺序和直觉正好相反：
+
+```mermaid
+flowchart TD
+    A["<b>直觉排序</b><br/>越权最吓人，最先想到"]
+    B["<b>死穴一：越权</b><br/>最好解，一个拦截器兜住四类语句"]
+    C["<b>死穴二：索引</b><br/>没人想到最贵——索引全部要推倒重建"]
+    D["<b>死穴三：资源隔离</b><br/>共享表模式解不掉，只能靠换模式"]
+
+    A -- "实际难度排序" --> B
+    B -- "解决之后才看见" --> C
+    C -- "解决之后才看见" --> D
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B main
+    class C note
+    class D danger
+```
+
 三个死穴不是三选一，是层层递进：治好前一个才看得见后一个。
 
 ---
@@ -175,7 +199,38 @@ PostgreSQL 的 `search_path` 让这个模式特别自然（MySQL 里 schema 约�
               每条 SQL 都必须带 tenant_id。谁来保证？→ 第 2 节
 ```
 
-三个模式的架构图摆完，现在上对照表。
+三个模式的架构图摆完，先把三者的资源共享方式并排放一起看：
+
+```mermaid
+flowchart LR
+    subgraph A["独立库"]
+        A1["<b>连接池</b><br/>每租户独立，互不影响"]
+        A2["<b>隔离强度</b><br/>物理隔离，最强"]
+    end
+    subgraph B["独立 schema"]
+        B1["<b>连接池</b><br/>同实例共享"]
+        B2["<b>隔离强度</b><br/>逻辑隔离，中等"]
+    end
+    subgraph C["共享表+租户ID"]
+        C1["<b>连接池</b><br/>全部共享，最省"]
+        C2["<b>隔离强度</b><br/>全靠一句 WHERE，最弱"]
+    end
+
+    A --> D["<b>选哪个？</b><br/>看你更怕数据泄露还是运维成本"]
+    B --> D
+    C --> D
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A1,B1,C1 main
+    class A2,B2,C2 data
+    class D note
+```
+
+现在上对照表。
 
 ### 1.4 六个维度的对照表
 
@@ -197,7 +252,25 @@ PostgreSQL 的 `search_path` 让这个模式特别自然（MySQL 里 schema 约�
    运维成本    ●○○○○(贵)  ●●●○○       ●●●●●(省)
 ```
 
-所以没有"更好的模式"，只有"你更怕哪一件事"。怕数据泄露和噪声邻居 → 往左；怕运维成本和跨租户报表 → 往右。
+所以没有"更好的模式"，只有"你更怕哪一件事"。怕数据泄露和噪声邻居 → 往左；怕运维成本和跨租户报表 → 往右。这道二选一画成决策树是这样：
+
+```mermaid
+flowchart TD
+    A["<b>选哪种隔离模式？</b><br/>先问自己更怕哪件事"]
+    A -- "怕数据泄露/噪声邻居" --> B["<b>往独立库/schema 走</b><br/>隔离强度优先"]
+    A -- "怕运维成本/跨租户报表" --> C["<b>往共享表走</b><br/>成本和统计优先"]
+    B --> D["<b>大客户单独批</b><br/>独立库或独立 schema"]
+    C --> E["<b>长尾客户统一批</b><br/>共享表 + tenant_id"]
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,D main
+    class C,E data
+```
 
 一个额外的观察：PHP 生态的 `archtechx/tenancy`（4,381 star，2026-08-05 实测）把这三种模式的边界讲得特别干净，Laravel 用户可以直接拿来当模式对照的教材读（**具体源码路径本次未核实，以官方仓库为准**）。
 
@@ -209,6 +282,16 @@ PostgreSQL 的 `search_path` 让这个模式特别自然（MySQL 里 schema 约�
    长尾租户 180 家（各几千行）  → 共享表 + tenant_id，全塞一个库
    腰部租户  19 家（各几十万行）→ 共享表，但按租户分了库（第 14 篇）
    头部 T-007 1 家（800 万行） → 独立库、独立实例，甚至独立部署
+```
+
+这条成长路径本身就是一个状态机，触发迁移的是数据量：
+
+```mermaid
+stateDiagram-v2
+    [*] --> 共享表模式: 起步阶段，几千行的长尾租户
+    共享表模式 --> 独立库分库: 涨到几十万行的腰部租户
+    独立库分库 --> 独立库独立实例: 占比逼近全库四成的头部租户
+    独立库独立实例 --> [*]
 ```
 
 **模式不是选一次，是一条随租户成长的迁移路径。** 开场那个事故的终局解法就在这张图里：把 T-007 搬出去。而"能不能搬"取决于你第一天有没有把 `tenant_id` 设计成一个干净的分片键——这就接到第 14 篇了，第 6 节还会再说。
@@ -313,6 +396,26 @@ MyBatis-Plus 里通过实现 `TenantLineHandler` 的忽略表方法来配置白�
 
 - **少配一张全局表** → 页面数据为空，一眼能发现，属于良性故障；
 - **多配一张业务表** → 那张表**彻底没有租户隔离**，而且页面一切正常，谁也发现不了。
+
+两种配错的后果完全不对称：
+
+```mermaid
+flowchart TD
+    A["<b>白名单配置</b><br/>决定哪些表不加租户条件"]
+    A --> B["<b>少配一张全局表</b><br/>该表被误加了租户条件"]
+    A --> C["<b>多配一张业务表</b><br/>该表被误放进白名单"]
+    B --> D["<b>页面数据为空</b><br/>一眼能发现，良性故障"]
+    C --> E["<b>彻底没有租户隔离</b><br/>页面一切正常，没人发现"]
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,D note
+    class C,E danger
+```
 
 ⚠️ 所以白名单这份配置必须走 code review，并且最好写成"默认全部拦截、显式列出豁免"，绝不能写成"匹配某个前缀就豁免"这种模糊规则。一个 `t_sys_*` 的前缀规则，某天有人建了张 `t_sys_customer_tag` 业务表，隔离就悄悄破了。
 
@@ -642,6 +745,28 @@ UNIQUE KEY uk_tenant_phone (tenant_id, phone)
    "遍历租户、逐个切上下文执行"的封装。
 ```
 
+这两个选项分叉画出来是这样：
+
+```mermaid
+flowchart TD
+    A["<b>上下文里没有 tenant_id</b><br/>定时任务、MQ 消费者线程里没有登录态"]
+    A --> B["<b>选项 A：不加条件放行</b><br/>扫到全部租户"]
+    A --> C["<b>选项 B：抛异常拒绝</b><br/>定时任务全挂"]
+    B --> D["<b>静默越权，最危险</b><br/>没人发现，直到出事"]
+    C --> E["<b>吵，但安全</b><br/>正确做法"]
+    E --> F["<b>配套封装</b><br/>遍历租户、逐个切上下文执行"]
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,D danger
+    class C,E main
+    class F data
+```
+
 芋道的租户 starter 就提供了这类"在指定租户上下文中执行一段逻辑"的封装能力（**具体类名与方法名未核实，以官方仓库为准**）。这个封装是独立库/共享表两种模式都需要的基础设施——**没有它，你的后台任务就是隔离体系上一个长期敞开的洞。**
 
 ### 5.3 缓存这条最容易忘
@@ -796,6 +921,29 @@ PostgreSQL 的行级安全（Row Level Security）是路线甲更轻量的一个
 **这张表就是优先级的全部内容**：租户条件比数据权限条件"硬"一级。
 
 最容易出事的是第三行。系统里通常有一个"忽略数据权限"的开关（注解或者上下文标记），给租户的超管、或者给某些必须全量查询的场景用。**危险在于：如果这个开关的实现是"跳过整个 MyBatis 拦截器链"，那它会顺手把租户条件也跳过。**
+
+同一个注解，两种实现走向完全不同的后果：
+
+```mermaid
+flowchart TD
+    A["<b>@IgnoreDataPermission 注解</b><br/>意图：跳过数据权限过滤"]
+    A --> B["<b>错误实现</b><br/>跳过整条拦截器链"]
+    A --> C["<b>正确实现</b><br/>两个拦截器各自独立判断"]
+
+    B --> D["<b>租户条件也被跳过</b><br/>超管看到全平台数据，日志无异常"]
+    C --> E["<b>数据权限拦截器</b><br/>看到标记，不加条件"]
+    C --> F["<b>租户拦截器</b><br/>无视标记，照常加 tenant_id"]
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,D danger
+    class C main
+    class E,F data
+```
 
 ```
    ✗ @IgnoreDataPermission        // 意图：这个方法不做数据权限过滤
