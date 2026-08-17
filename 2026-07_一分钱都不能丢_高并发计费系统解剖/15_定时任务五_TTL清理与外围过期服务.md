@@ -6,6 +6,34 @@
 
 ---
 
+三个任务的复杂度是一路递减再变形的:调外部 API 的清理最重,内部状态更新最轻,一次性任务执行器则是另一个维度(双重并发闸门)。
+
+```mermaid
+flowchart LR
+    subgraph S1["生图产物 TTL 清理"]
+        A1["<b>调外部 API 删除</b><br/>会失败/超时/404"]
+    end
+    subgraph S2["账号 / 代理过期"]
+        A2["<b>内部状态 UPDATE</b><br/>无外部副作用"]
+    end
+    subgraph S3["用量记录清理"]
+        A3["<b>一次性任务执行器</b><br/>双重并发闸门"]
+    end
+
+    A1 --> N1["<b>复杂度来源</b><br/>需要面向状态判成功"]
+    A2 --> N2["<b>复杂度来源</b><br/>什么都没配"]
+    A3 --> N3["<b>复杂度来源</b><br/>CAS + 租约认领"]
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A1,A2,A3 entry
+    class N1,N3 note
+    class N2 data
+```
+
 ## 15.1 生图产物 TTL 清理:调外部 API 的删除任务
 
 ### 问题
@@ -52,6 +80,42 @@ appendCleanupEvent(...cleanup_failed...)                        // 审计留痕
 
 **标记删除在 API 成功之后。** 顺序是 先调 provider 删除 → 成功才写 `MarkBatchImageInputDeleted`。反过来写(先标记后删除)一旦删除失败,job 带着"已删"标记退出扫描范围,文件永久残留——和第 14 章"先转 failed 再退款"看似矛盾,其实同构:**哪一步不可回退,哪一步就放后面;两步都可回退时,把"退出扫描范围"的那步放最后**。
 
+`cleanupJob` 里的这几道防御按先后顺序串成一条决策链:
+
+```mermaid
+flowchart TD
+    S["<b>扫描到期 job</b><br/>ListXxxDueForCleanup"]
+    T{"<b>是否终态</b><br/>IsTerminalBatchImageJobStatus"}
+    D{"<b>是否已删</b><br/>InputDeletedAt != nil"}
+    OK1["<b>幂等出口</b><br/>直接返回成功"]
+    SKIP["<b>跳过</b><br/>还在跑,文件不能动"]
+    CALL["<b>调 provider 删除 API</b><br/>会失败/超时"]
+    NF{"<b>返回 404</b><br/>NOT_FOUND"}
+    OK2["<b>视为成功</b><br/>文件本来就不在了"]
+    ERR["<b>真失败</b><br/>记录失败码+审计事件"]
+    MARK["<b>标记已删</b><br/>MarkBatchImageInputDeleted"]
+
+    S --> T
+    T -- "否,非终态" --> SKIP
+    T -- "是,终态" --> D
+    D -- "已删" --> OK1
+    D -- "未删" --> CALL
+    CALL -- "调用出错" --> NF
+    CALL -- "调用成功" --> MARK
+    NF -- "404" --> OK2
+    NF -- "其他错误" --> ERR
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class S entry
+    class T,D main
+    class OK1,OK2,MARK data
+    class SKIP,ERR danger
+```
+
 ## 15.2 上游账号 / 代理过期:最简形态的定时任务
 
 `AccountExpiryService` 和 `ProxyExpiryService`(各每 60 秒)是全部任务里最简单的:
@@ -64,6 +128,34 @@ updated, _ := s.accountRepo.AutoPauseExpiredAccounts(ctx, time.Now())
 存在的理由:上游账号(购买的 Claude/OpenAI 订阅)有有效期,过期账号若继续留在调度池里,打过去的请求全部失败——用户侧表现为莫名其妙的批量报错,而故障源头(某个账号昨天到期了)藏在几十个账号的列表里极难定位。定时置为 paused,让调度器(第 8 章讲过的快照体系)自然把它剔出去。
 
 结构上值得注意的是它**什么都没配**:没有 leader 锁(幂等 UPDATE)、没有批量限制(账号表就几十上百行)、没有复核(置 paused 错了也只是保守,管理员可手动恢复)。对照前几章的重装任务,这就是**复杂度与风险匹配**的示范——第 10 章的三条纪律,每一条都要先问"这个任务配得上吗",而不是无脑全上。订阅过期(第 12 章)和它形状几乎相同,却因为带了发邮件这个副作用而多出一整套选主——差异全部来自后果,不来自形式。
+
+同样是"过期就 UPDATE",本章的账号/代理过期和第 12 章的订阅过期形状几乎一样,配置却差一整级——差异全部来自后果:
+
+```mermaid
+flowchart LR
+    subgraph L["账号 / 代理过期(本章)"]
+        L1["<b>UPDATE 状态</b><br/>无副作用,幂等"]
+        L2["<b>无 leader 锁</b><br/>无批量限制,无复核"]
+    end
+    subgraph R["订阅过期(第 12 章)"]
+        R1["<b>UPDATE 状态 + 发邮件</b><br/>副作用不可重复"]
+        R2["<b>需要选主</b><br/>整套互斥机制"]
+    end
+
+    L1 --> L2
+    R1 --> R2
+    L2 --> NOTE["<b>差异来自后果</b><br/>不来自形式"]
+    R2 --> NOTE
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class L1,L2 data
+    class R1,R2 danger
+    class NOTE note
+```
 
 ## 15.3 用量记录清理:定时唤醒的一次性任务执行器
 
@@ -93,6 +185,40 @@ if task == nil { return }   // 没任务,或都被别的实例认领了
 `ClaimNextPendingTask` 是第 6 章幂等抢占的任务版:一条原子 UPDATE 把 pending 任务标记为"我在执行,租约 N 秒"。两个实例同时醒来,只有一个抢到;抢到的实例死了,**租约超时后任务可被重新认领**——一次性任务的崩溃恢复不靠人工,靠租约。
 
 执行阶段则复用第 13 章的功课:按批删除(batchSize 可配),**每批把 `DeletedRows` 进度落库**——任务中断后重新认领,从计数处继续,不重头再来。删除幂等(同一谓词删两遍,第二遍 0 行),所以"断点+重删几行"无害,进度不需要精确,只需要单调。
+
+两道闸门加断点续传落库,把"唤醒—抢占—执行—崩溃恢复"串成一条闭环:
+
+```mermaid
+flowchart TD
+    WAKE["<b>定时唤醒</b><br/>周期唤醒 or 管理员创建即触发"]
+    CAS{"<b>闸门①CAS</b><br/>单实例防重入"}
+    SKIP1["<b>跳过</b><br/>上一轮还没删完"]
+    CLAIM{"<b>闸门②DB 认领</b><br/>ClaimNextPendingTask"}
+    SKIP2["<b>跳过</b><br/>没任务或被别的实例抢走"]
+    RUN["<b>按批删除</b><br/>batchSize 可配"]
+    SAVE["<b>落库进度</b><br/>DeletedRows"]
+    CRASH["<b>租约超时</b><br/>任务可被重新认领"]
+
+    WAKE --> CAS
+    CAS -- "抢占失败" --> SKIP1
+    CAS -- "抢占成功" --> CLAIM
+    CLAIM -- "认领失败" --> SKIP2
+    CLAIM -- "认领成功" --> RUN
+    RUN --> SAVE
+    SAVE -- "中断" --> CRASH
+    CRASH -- "租约到期" --> CLAIM
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class WAKE entry
+    class CAS,CLAIM main
+    class RUN,SAVE data
+    class SKIP1,SKIP2 note
+    class CRASH danger
+```
 
 ## 15.4 第二部分总结:定时任务设计的完整清单
 

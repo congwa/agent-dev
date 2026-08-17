@@ -24,6 +24,28 @@
 
 这就是经典的**缓存击穿（cache breakdown）**，也叫 **惊群效应 / dog-piling / thundering herd**。下游服务（数据库、账户服务）本来只需要处理 1 次查询就够了，结果被同一个请求"复制"了 5000 份，瞬间被打垮，甚至引发雪崩（下游超时 → 更多重试 → 更大压力）。
 
+这个"1 次查询变 5000 次"的过程画出来是这样：
+
+```mermaid
+flowchart TD
+    A["<b>5000 个并发请求</b><br/>同时查同一个 uid 的余额"]
+    B["<b>查缓存</b><br/>这个 uid 恰好没命中"]
+    C["<b>5000 次全部回源</b><br/>各自去查数据库/账户服务"]
+    D["<b>下游瞬间过载</b><br/>缓存击穿/惊群效应"]
+    E["<b>可能引发雪崩</b><br/>超时→更多重试→更大压力"]
+
+    A --> B --> C --> D --> E
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B main
+    class C,D,E danger
+```
+
 ### 1.2 我们真正需要的是什么
 
 仔细想想，这 5000 个请求要的其实是**同一个答案**——"uid=123 现在余额是多少"。既然答案只有一个，我们完全没必要真的去查 5000 次数据库，只要：
@@ -33,6 +55,33 @@
 - 全部返回同一个结果。
 
 这件"把重复的并发请求合并成一次真实执行，然后把结果分发给所有等待者"的事情，就是 **singleflight** 要做的。
+
+对应到刚才的 5000 个请求，变化是这样的：
+
+```mermaid
+flowchart TD
+    A["<b>5000 个并发请求</b><br/>同一个 uid，缓存未命中"]
+    B["<b>第一个请求成为 leader</b><br/>真正执行一次回源查询"]
+    C["<b>其余 4999 个请求原地等待</b><br/>不发起自己的回源调用"]
+    D["<b>leader 查询完成</b><br/>拿到真实结果"]
+    E["<b>结果分发给所有等待者</b><br/>全部返回同一个答案"]
+
+    A --> B
+    A --> C
+    B --> D
+    C --> E
+    D --> E
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B main
+    class C note
+    class D,E data
+```
 
 ---
 
@@ -52,6 +101,27 @@
 - 于是客服只查了**一次**，你和邻居拿到的是**同一个答案**。
 
 singleflight 就是那个"客服"角色——它站在你的业务代码和"真正昂贵的操作"（查数据库、调远程服务、算一个耗时任务）之间，负责按 key 去重、合并、分发结果。
+
+把"客服"类比换成具体的 3 个并发请求，时序是这样的：
+
+```mermaid
+sequenceDiagram
+    participant R1 as 请求1(leader)
+    participant R2 as 请求2
+    participant R3 as 请求3
+    participant SF as singleflight.Group
+    participant DB as 数据库
+
+    R1->>SF: Do(uid123)
+    R2->>SF: Do(uid123)
+    R3->>SF: Do(uid123)
+    SF->>DB: 只发起 1 次真实查询
+    Note over R2,R3: 原地等待，不发起真实查询
+    DB-->>SF: 返回余额结果
+    SF-->>R1: 返回结果 shared=false
+    SF-->>R2: 返回结果 shared=true
+    SF-->>R3: 返回结果 shared=true
+```
 
 ---
 
@@ -141,6 +211,36 @@ func (g *Group) Do(key string, fn func() (interface{}, error)) (v interface{}, e
 
 这就是典型的"用错 context 导致连带失败（error propagation 误伤无辜请求）"的坑。
 
+两种做法在"leader 提前断开"这一步会走向完全不同的结局：
+
+```mermaid
+flowchart TD
+    subgraph WRONG["错误：fn 里用请求1自己的 reqCtx"]
+        A1["<b>fn 内查库</b><br/>用的是请求1的 reqCtx"]
+        A2["<b>请求1提前断开</b><br/>reqCtx 被 cancel"]
+        A3["<b>fn 内查询被打断</b><br/>返回 context canceled"]
+        A4["<b>4999 个等待者全部收到</b><br/>同一个错误，无辜被连累"]
+        A1 --> A2 --> A3 --> A4
+    end
+    subgraph RIGHT["正确：fn 里用独立的 bgCtx"]
+        B1["<b>fn 内查库</b><br/>用的是独立的 bgCtx"]
+        B2["<b>请求1提前断开</b><br/>bgCtx 不受影响"]
+        B3["<b>fn 内查询正常完成</b><br/>拿到真实结果"]
+        B4["<b>所有等待者都拿到</b><br/>正确的余额结果"]
+        B1 --> B2 --> B3 --> B4
+    end
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A1,A2 main
+    class A3,A4 danger
+    class B1,B2 main
+    class B3,B4 data
+```
+
 所以正确做法是：`fn` 内部发起下游调用时，使用一个**独立于任何单个请求的 context**——通常是 `context.Background()`，或者基于它加一个合理的超时（比如 `context.WithTimeout(context.Background(), 2*time.Second)`），这样：
 
 - 这次"合并后的真实回源调用"的生命周期，**不跟随**任何一个具体请求的取消而取消；
@@ -209,6 +309,36 @@ func GetBalance(reqCtx context.Context, uid string) (int64, error) {
 
 1. **key 设计错了**：如果 key 设计得太粗（比如所有用户共用一个 key `"balance"`），会导致不同用户的查询也被"误合并"，A 查到的余额可能被当成 B 的结果返回——这是严重 bug。key 一定要能唯一标识"这次要查的是什么"（这里是 `uid`）。
 
+两种 key 设计方式的差别：
+
+```mermaid
+flowchart TD
+    subgraph GOOD["正确：key 用 uid"]
+        A1["<b>查 uid123</b><br/>key 为「uid123」"]
+        A2["<b>查 uid456</b><br/>key 为「uid456」"]
+        A3["<b>互不干扰</b><br/>各自独立执行、各拿各的结果"]
+        A1 --> A3
+        A2 --> A3
+    end
+    subgraph BAD["错误：key 写死成一个值"]
+        B1["<b>查 uid123</b><br/>key 都写成「balance」"]
+        B2["<b>查 uid456</b><br/>key 都写成「balance」"]
+        B3["<b>被误合并</b><br/>B 可能拿到 A 的余额结果"]
+        B1 --> B3
+        B2 --> B3
+    end
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A1,A2 entry
+    class A3 data
+    class B1,B2 entry
+    class B3 danger
+```
+
 2. **用了请求自身的 ctx 导致连带取消**：上一节详细讲过，切记 `fn` 内部要用独立的、生命周期不依赖单个请求的 ctx。
 
 3. **`fn` 里发生 panic**：`fn` 内部如果 panic 且没有 recover，会影响所有在等待的调用方，一定要在 `fn` 里做好 `recover`，把 panic 转成 error 返回。
@@ -216,6 +346,31 @@ func GetBalance(reqCtx context.Context, uid string) (int64, error) {
 4. **误以为 singleflight 能防止"限流/防重放"**：singleflight 只合并"并发中"的相同 key 调用。如果两次调用**先后发生**（第一次已经返回了），第二次还是会重新触发 `fn`，它不是缓存，不会帮你"记住"结果，需要配合真正的缓存层使用（就像本例：查完之后还要 `writeToCache`）。
 
 5. **忘记它是进程内的**：`singleflight.Group` 的合并只在**同一个进程/同一份内存**里生效。如果你的服务部署了多个实例，A 实例和 B 实例各自的 singleflight 互不知情，5000 个请求如果分散到 10 台机器，每台机器上还是可能各查一次数据库（10 次而不是 5000 次，已经好很多，但不是"全局只查一次"）。如果需要"全局唯一"，需要配合分布式锁等其他机制。
+
+部署形态一变，"只查一次"的边界也跟着变：
+
+```mermaid
+flowchart TD
+    subgraph ONE["单实例部署"]
+        A1["<b>5000 个请求</b><br/>全部落在同一个进程"]
+        A2["<b>singleflight 生效</b><br/>只查 1 次数据库"]
+        A1 --> A2
+    end
+    subgraph MANY["10 台机器部署"]
+        B1["<b>5000 个请求分散</b><br/>落到 10 个不同进程"]
+        B2["<b>每个进程各自合并</b><br/>最终查了 10 次数据库"]
+        B1 --> B2
+    end
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A1,B1 entry
+    class A2 data
+    class B2 note
+```
 
 ---
 
