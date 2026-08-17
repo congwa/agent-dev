@@ -70,6 +70,42 @@ while true:
 
 **事件流。** 一次 `prompt()` 的事件序列是严格嵌套的：`agent_start` → (`turn_start` → `message_start`/`message_update`*/`message_end` → `tool_execution_start`/`update`*/`end` → `message_start`/`end`(toolResult) → `turn_end`)* → `agent_end`。`message_update` 只对 assistant 消息发出，且携带原始的 `assistantMessageEvent`（text_delta / thinking_delta / toolcall_delta），所以 UI 既能拿到增量 token 也能拿到当前完整快照。
 
+把上面这几段机制拼起来，双层循环加三种停止方式长这样：
+
+```mermaid
+flowchart TD
+    A["<b>开始一轮</b><br/>初始 pendingMessages（含开局 steer）"]
+    B["<b>外层 while(true)</b><br/>agent 本来要停时才会再进来"]
+    C["<b>内层 while</b><br/>hasMoreToolCalls 或 pendingMessages 非空"]
+    D["<b>streamAssistantResponse</b><br/>一次采样请求"]
+    E["<b>error / aborted</b><br/>直接返回"]
+    F["<b>执行 toolCalls</b><br/>stopReason=length 时整批失败"]
+    G["<b>停止判定</b><br/>shouldStopAfterTurn 或全部 terminate"]
+    H["<b>agent_end</b><br/>收工"]
+    I["<b>查 followUpMessages</b><br/>还有排队消息吗"]
+
+    A --> B --> C --> D
+    D -- "error/aborted" --> E --> H
+    D -- "无 toolCall" --> G
+    D -- "有 toolCall" --> F --> G
+    G -- "该停" --> H
+    G -- "继续" --> C
+    C -- "内层跑完" --> I
+    I -- "有" --> B
+    I -- "无" --> H
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,C,D,F,I main
+    class G note
+    class E danger
+    class H data
+```
+
 ### 2.3 源码
 
 主循环全貌，注意内外两层的边界：
@@ -179,6 +215,36 @@ while true:
 
 两种顺序被刻意分开了：`tool_execution_end` 事件在每个工具的闭包里发，所以**按完成先后**到达 UI（快的工具先出结果，体验好）；而 `toolResult` 消息在 `Promise.all` 之后按数组下标发，所以**按 assistant 里的源顺序**进历史（provider 要求的顺序）。预处理阶段（参数校验、`beforeToolCall` 权限检查）仍然是串行的，只有 `execute()` 并发。另外，只要批次里有任何一个工具声明了 `executionMode: "sequential"`，整批降级为串行（`agent-loop.ts:419-425`）——写文件类工具就是这么保护自己的。
 
+两条顺序线在哪里分岔、又在哪里各走各的，画出来更直观：
+
+```mermaid
+flowchart TD
+    A["<b>assistant 消息</b><br/>含多个 toolCall"]
+    B["<b>预处理</b><br/>参数校验、权限检查，串行"]
+    C["<b>批内是否有工具</b><br/>声明 executionMode=sequential"]
+    D["<b>execute 并发</b><br/>默认并行跑"]
+    E["<b>execute 降级串行</b><br/>整批改成顺序执行"]
+    F["<b>事件顺序</b><br/>按完成先后发给 UI"]
+    G["<b>消息顺序</b><br/>按源顺序写回历史"]
+
+    A --> B --> C
+    C -- "有" --> E
+    C -- "无" --> D
+    D --> F
+    D --> G
+    E --> F
+    E --> G
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,C,D,E main
+    class F,G data
+```
+
 重试逻辑**不在这个文件里**。它在应用层：
 
 `packages/coding-agent/src/core/agent-session.ts:1063`
@@ -234,6 +300,38 @@ while true:
 **停止条件。** `needs_follow_up = model_needs_follow_up || has_pending_input`。前者由流里是否出现工具调用等决定，后者是 steer 队列。为 false 时先跑 stop hook——hook 可以「阻止停止」并给出一段续接 prompt，把它记进历史后 `continue`，循环再跑一轮（`stop_hook_active` 标志防止无限阻止）。
 
 **取消。** `CancellationToken` 从 Task 层往下派生子令牌（`cancellation_token.child_token()`）。`Op::Interrupt` → `abort_all_tasks` → `handle_task_abort`：先 cancel 令牌，等最多 `GRACEFULL_INTERRUPTION_TIMEOUT_MS` 让任务优雅收尾，超时就 `handle.abort()` 硬杀，最后往历史里写一条「被中断」的标记项，让下一轮模型知道上一轮是被打断的。
+
+三层嵌套 + 取消令牌的整体骨架：
+
+```mermaid
+flowchart TD
+    A["<b>外层 Task loop</b><br/>RegularTask::run 反复调 run_turn"]
+    B["<b>中层 run_turn</b><br/>捕获 StepContext 冻结视图"]
+    C["<b>排空 pending_input</b><br/>受 can_drain_pending_input 控制"]
+    D["<b>内层采样请求</b><br/>run_sampling_request 重试壳"]
+    E["<b>should_roll_over</b><br/>token 超限，先压缩再继续"]
+    F["<b>needs_follow_up=false</b><br/>且 stop hook 不阻塞"]
+    G["<b>Task 结束</b><br/>input_queue 无待处理输入"]
+    H["<b>CancellationToken</b><br/>优雅收尾或超时强杀"]
+
+    A --> B --> C --> D
+    D -- "token 超限" --> E --> B
+    D -- "needs_follow_up" --> B
+    D -- "!needs_follow_up" --> F --> G
+    A -- "input_queue 空" --> G
+    H --> G
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,C,D,E main
+    class F note
+    class G data
+    class H danger
+```
 
 ### 3.3 源码
 
@@ -382,6 +480,25 @@ while true:
 
 以及流结束后的收尾（`turn.rs:2705`）：`if in_flight.is_empty() { None } else { Some(begin_tool_blocking()) }` —— 这里专门开了一个计时器区分「等模型」和「等工具」两段时间，说明这两段的重叠程度是他们持续在观测的指标。
 
+把这段时序摊开看，工具执行和模型剩余输出的传输是这样重叠的：
+
+```mermaid
+sequenceDiagram
+    participant M as 模型(SSE流)
+    participant T as run_turn
+    participant W as 工具执行(in_flight)
+    participant H as 历史
+
+    M->>T: OutputItemDone(第一个 tool_call)
+    T->>W: push_back，立刻开始执行
+    M->>T: 继续吐后续文本/tool_call
+    T->>W: 后续 tool_call 也 push_back
+    M-->>T: 流结束
+    T->>W: drain_in_flight，按入队顺序等待
+    W-->>T: 各工具结果依次返回
+    T->>H: 按顺序写入 ResponseInputItem
+```
+
 ### 3.4 代价与适用边界
 
 Codex 这套的强项在于延迟：预热 WebSocket、边流边跑工具、传输降级，三个优化都是冲着 TTFT 和端到端时间去的。同时 `CancellationToken` 树 + 优雅超时 + 中断标记项，让打断在语义上是干净的。
@@ -396,6 +513,32 @@ Codex 这套的强项在于延迟：预热 WebSocket、边流边跑工具、传�
 
 **它不写循环。** `create_agent()` 编译出一张 LangGraph 图——`model` 节点 → 条件边 → `tools` 节点 → 条件边回 `model`——循环是图上的一条环边；真正的执行引擎是 LangGraph 的 Pregel，一个 BSP（Bulk Synchronous Parallel）超步（superstep）调度器。
 
+这是本章「谁拥有循环控制权」这条线索里最不一样的一家，跟另外几家的手写 while 并排放一起看更清楚：
+
+```mermaid
+flowchart LR
+    subgraph APP["循环在应用代码里"]
+        O1["<b>手写 while</b><br/>Pi / Codex / Grok / dsh"]
+        O2["<b>退出条件</b><br/>写在 if/return 里"]
+        O1 --> O2
+    end
+    subgraph FW["循环在框架里"]
+        F1["<b>create_agent</b><br/>编译出 model⇄tools 图"]
+        F2["<b>Pregel 引擎</b><br/>tick() 驱动 BSP 超步"]
+        F3["<b>退出条件</b><br/>一条边指向 END"]
+        F1 --> F2 --> F3
+    end
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class O1,O2 main
+    class F1,F2 note
+    class F3 data
+```
+
 ### 4.2 机制拆解
 
 **图的形状。** 节点只有两个必需的：`model` 和 `tools`。中间件按 hook 类型展开成额外节点：`X.before_agent`、`X.before_model`、`X.after_model`、`X.after_agent`。`factory.py:1606-1632` 计算出四个关键位置——`entry_node`（整个 run 的入口，含 before_agent）、`loop_entry_node`（**循环的入口，不含 before_agent**，所以 before_agent 只跑一次）、`loop_exit_node`（每轮末尾）、`exit_node`（含 after_agent 或 END）。tools → model 的边指向 `loop_entry_node` 而非 `entry_node`，这一个字的差别就是「每轮都跑」和「只跑一次」的区别。
@@ -405,6 +548,37 @@ Codex 这套的强项在于延迟：预热 WebSocket、边流边跑工具、传�
 **并行工具靠 `Send` 扇出。** 待执行的 tool_call 不是打包成一个「tools 节点调用」，而是每个 tool_call 一个 `Send("tools", [tool_call])`。在 Pregel 里这意味着**同一个超步内的 N 个独立任务**，由 runner 并发执行，结果在超步结束时统一写回 `messages` 通道。并行是运行时白送的，`create_agent` 自己没写一行并发代码。
 
 **Pregel 的超步语义。** 这是它和手写 while 最本质的差别：`main.py:2959` 的注释写得很直白——「与 BSP / Pregel 模型类似，计算按步推进，只要还有 channel 更新就继续；第 N 步的 channel 更新只在第 N+1 步可见；在一步之内 channel 保证不可变，更新只在步与步的过渡点应用」。`loop.tick()` 计算这一步该跑哪些任务（`prepare_next_tasks`），runner 并发跑完，`loop.after_tick()` 一次性 `apply_writes` 提交所有写入。没有任务可跑了，`status = "done"`，循环结束。
+
+一次 `tick()` 内部的推进顺序：
+
+```mermaid
+flowchart TD
+    A["<b>loop.tick() 被调用</b><br/>一次超步的入口"]
+    B["<b>step > stop？</b><br/>迭代上限检查"]
+    C["<b>out_of_steps</b><br/>状态标记，结束"]
+    D["<b>prepare_next_tasks</b><br/>计算本超步该跑哪些节点"]
+    E["<b>是否有任务</b><br/>没有任务代表没人再触发节点"]
+    F["<b>status=done</b><br/>循环结束"]
+    G["<b>runner 并发执行</b><br/>本超步内所有任务同时跑"]
+    H["<b>apply_writes</b><br/>一次性提交所有 channel 写入"]
+
+    A --> B
+    B -- "超限" --> C
+    B -- "未超限" --> D --> E
+    E -- "无" --> F
+    E -- "有" --> G --> H --> A
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,D,G,H main
+    class C danger
+    class E note
+    class F data
+```
 
 **迭代上限是 `recursion_limit`。** `tick()` 开头就是 `if self.step > self.stop: self.status = "out_of_steps"`，`stop = step + recursion_limit + 1`。有意思的是 `create_agent` 把它硬编码成 `9_999`（`factory.py:1792`，附了一条 langgraph issue 链接）——因为中间件节点把每一轮 agent 迭代拆成了好几个超步，默认的 25 步限制会被中间件数量而不是 agent 行为提前耗尽。这是「图化」带来的一个真实副作用。
 
@@ -619,6 +793,36 @@ Codex 这套的强项在于延迟：预热 WebSocket、边流边跑工具、传�
 2. **插话二次排水**：pending 插话排到了就 `continue` 不停（turn.rs:2554-2570，两次检查夹住收尾竞态窗口）；
 3. **stop gate**：`Completed` 后还要问一道 `StopGateDecision`，`KeepWorking { feedback }` 时把 feedback 作为用户消息 push 进对话并重开一轮（turn.rs:896-906）——Claude Code stop-hook 的同款语义，对照 Codex 的 `should_stop`。
 
+三道闸的先后顺序、以及各自怎么把循环拉回去，画出来是这样：
+
+```mermaid
+flowchart TD
+    A["<b>assistant 无 tool_call</b><br/>只是必要条件"]
+    B["<b>闸1 TodoGate</b><br/>todos 未清？"]
+    C["<b>闸2 插话排水</b><br/>还有 pending 插话？"]
+    D["<b>闸3 StopGate</b><br/>询问是否真的结束"]
+    E["<b>KeepWorking</b><br/>feedback 当用户消息塞回，重开一轮"]
+    F["<b>Completed</b><br/>真正停止"]
+
+    A --> B
+    B -- "未清，注入 reminder" --> A
+    B -- "已清/超限" --> C
+    C -- "排到插话" --> A
+    C -- "无" --> D
+    D -- "KeepWorking" --> E --> A
+    D -- "Completed" --> F
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,C,D main
+    class E danger
+    class F data
+```
+
 硬上限：`max_turns` 是 `Option<usize>`，`None` = 无限（来自 CLI `--max-turns`），检查在 turn.rs:2697-2708。默认值来源只追到 spawn 参数，⚠️ 未确认全部调用方的默认。
 
 ### 8.3 防转圈：四个样本里唯一的显式 stationarity 熔断
@@ -631,6 +835,32 @@ const MAX_CONSECUTIVE_TRUE_NOOPS: u32 = 4;
 ```
 
 连续相同 (tool, args) 签名 8 次注入 nudge、16 次硬停；`run true` 类空转 4 次即停；常量之间还有编译期 `const _: () = assert!(...)` 断言。硬停返回专用变体 `TurnOutcome::StationarityEnded`，类型注释明确"Distinct from Completed so recovery/goal/stop-hook cannot re-open the sampling loop"——防的是熔断被 8.2 的三道闸（尤其 stop gate）重新点火。本章 §5 对照表里 Pi/Codex 的"硬迭代上限"都填的是"无"，LangChain 靠 recursion_limit 兜底；Grok 是唯一按**行为模式**（而非次数上限）熔断的。
+
+两条判定路径、以及为什么熔断结果要单独开一个变体：
+
+```mermaid
+flowchart TD
+    A["<b>同一 (tool,args) 签名</b><br/>连续出现"]
+    B["<b>连续 8 次</b><br/>注入 nudge 提醒"]
+    C["<b>连续 16 次</b><br/>StationarityEnded 硬停"]
+    D["<b>true noop 连续 4 次</b><br/>如 run true 空转"]
+    E["<b>StationarityEnded</b><br/>与 Completed 是不同变体"]
+    F["<b>stop-hook 无法重开</b><br/>三道闸对它不生效"]
+
+    A --> B --> C --> E
+    A --> D --> E
+    E --> F
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B note
+    class C,D danger
+    class E,F data
+```
 
 ### 8.4 用户插话：排队与打断两种范式并存
 
@@ -663,6 +893,35 @@ const MAX_CONSECUTIVE_TRUE_NOOPS: u32 = 4;
 
 与 Codex 的 `Task → run_turn → sampling`、Grok 的 L0/L1/L2 完全同构——**五个样本里四个产品全部收敛到手写嵌套 loop，图调度依然只有 LangChain 一家**。差别在体量：三层加起来是 `agent.ts:210-401`，192 行（`packages/core/agent-loop/src/` 六个文件共 1643 行，其中 `index.ts` 713 行全是工厂与生命周期，与循环无关）；对照 Codex 一个 `run_turn` 就 400 行。
 
+五个样本收敛成的两派，到这里可以合成一张全景图：
+
+```mermaid
+flowchart TD
+    A["<b>五个样本的主循环</b><br/>形态收敛成两派"]
+    P["<b>Pi</b><br/>双层 while"]
+    C2["<b>Codex</b><br/>Task→Turn→采样 三层"]
+    G2["<b>Grok Build</b><br/>会话→轮→采样 三层"]
+    D2["<b>DeepSeek Harness</b><br/>turn→step→request，192行"]
+    L2["<b>LangChain v1</b><br/>model⇄tools 环边"]
+    E2["<b>LangGraph Pregel</b><br/>BSP 超步引擎执行"]
+
+    A --> P
+    A --> C2
+    A --> G2
+    A --> D2
+    A --> L2 --> E2
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class P,C2,G2,D2 main
+    class L2 note
+    class E2 data
+```
+
 ### 9.2 turn / step 的定义：文档给了定义，代码逐条对得上
 
 `docs/architecture.md:65` 原话：`A **step** is one model request plus the tools it calls. A **turn** is zero or more steps: it opens before its first input is claimed and closes once nothing is owed.` 所以 dsh 的 **step ≈ Pi 的 turn**，dsh 的 **turn ≈ Codex 的 Turn**（本章 §3.2 已指出 Codex 的 Turn 更接近 Pi 的整个 run）。
@@ -689,6 +948,32 @@ if (turnEnds && this.inbox.nextStep.length === 0) break
 这是本章的第五种答案。Pi 的 `shouldStopAfterTurn` 回调、Codex 的 `stop_outcome.should_block`、Grok 的 `StopGateDecision::KeepWorking` **都是返回值决定**——监听器顺序有意义，只有一个能赢；dsh 把停止决策改成读共享队列，几个插件可以同时想续跑而不打架。测试直接叫它 `/loop pattern`（`packages/core/agent-loop/tests/loop.spec.ts:766`），生产用例是把 Claude Code / Codex 的 Stop hook 桥成 `steer`（`packages/hooks/hooks-claude-code/src/index.ts:270`、`packages/hooks/hooks-codex/src/index.ts:260`）。
 
 反向也是数据：任一工具结果带 `concludesTurn` 就提前收尾（`tool-calls.ts:157` → `agent.ts:399`）。对照 Pi 的 `terminate: true` 要**整批**都标才生效，dsh 是**任一**即可，但文档明确它不短路已提交的 next-step 工作。默认出口仍是老规矩：assistant 消息里没有 tool call（`agent.ts:394`）。
+
+「回调决定」和「数据决定」这两条路径的分岔点：
+
+```mermaid
+flowchart TD
+    A["<b>循环走到停止边界</b><br/>该不该继续"]
+    B["<b>Pi / Codex / Grok</b><br/>调回调，取返回值判断"]
+    C["<b>监听器顺序有意义</b><br/>谁先返回谁定结果"]
+    D["<b>dsh：agent/turn-stopping</b><br/>serial 事件，没有 next()"]
+    E["<b>想续跑就 steer/inject</b><br/>把消息塞进 inbox"]
+    F["<b>重读 inbox.nextStep</b><br/>看是否非空"]
+    G["<b>Data decides</b><br/>监听器顺序不影响结果"]
+
+    A --> B --> C
+    A --> D --> E --> F --> G
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,D,E,F main
+    class C note
+    class G data
+```
 
 ### 9.4 硬上限：核心循环里一个都没有，而且它知道
 
@@ -742,6 +1027,34 @@ inbox 只有两个 target（`'next-turn'` / `'next-step'`），三个别名 API 
 claim 发生在 pre-step，顺序是「先全部 next-step，再最多**一条** next-turn」（`packages/core/agent/src/inbox.ts:71-77`）——等于把 Pi 的 `"all"` / `"one-at-a-time"` 两种排空模式**分别定死**给了两个队列。注入粒度是 **step 边界**（同 Grok 的循环边界，比 Pi 的 turn 边界细）；采样流和正在跑的工具都不会被插话打断。
 
 两点是四家都没有的：其一，**inbox 是 durable projection**——每次 splice 写一条 `agent/inbox/spliced` 事件（`inbox.ts:186`），构造时从日志重放（`:32-39`），所以「用户排了三条还没被消费的话」也能跨重启恢复。其二，**打断与补话是一个原子操作**：`cancel(cause)` 默认清空 inbox 并 abort 当前 turn 的 signal（`agent.ts:134-139`），而 abort 之后再发来的唤醒消息会被自动改写 target 到 `next-turn` 并 latch 住，等旧 driver 收敛到 idle 后自动开新 turn（`agent.ts:116-119` + `:172-193`）。`AgentCancelCause` 是 `user | parent | hook | disposed` 的类型级枚举，durable `turn/end` 也照原样记下它——`{ kind: 'aborted'; reason: TurnEndCancelCause }`（`packages/core/session/src/types.ts:143-158`，`agent.ts:304` 写入），只有历史导入的粗粒度记录才落到 `legacy` 变体。
+
+三个写入口、两个队列、claim 时的排空顺序：
+
+```mermaid
+flowchart TD
+    A["<b>上层调用</b><br/>followup / steer / inject"]
+    B["<b>followup</b><br/>进 next-turn 队列，并唤醒"]
+    C["<b>steer</b><br/>进 next-step 队列，并唤醒"]
+    D["<b>inject</b><br/>进 next-step 队列，不唤醒"]
+    E["<b>pre-step claim</b><br/>先清空全部 next-step"]
+    F["<b>再取至多一条</b><br/>next-turn"]
+    G["<b>agent/inbox/spliced</b><br/>每次变更都写事件，可持久恢复"]
+
+    A --> B --> F
+    A --> C --> E
+    A --> D --> E
+    E --> G
+    F --> G
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,C,D,E,F main
+    class G data
+```
 
 ### 9.9 它最像谁 / 哪里是第五种答案
 

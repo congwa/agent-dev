@@ -26,6 +26,27 @@
 
 心智模型可以简化成一句：**MCP 就是"工具定义的包管理器 + 远程过程调用"**。它没有发明任何新的模型交互方式，只是把"harness 从哪儿拿到工具列表"这件事标准化了。
 
+握手、发现、调用、反向提问这几步谁先谁后，画成时序图一目了然：
+
+```mermaid
+sequenceDiagram
+    participant M as 模型
+    participant H as Agent Harness
+    participant S as MCP Server
+
+    H->>S: 握手 initialize
+    S-->>H: 声明能力
+    H->>S: tools/list
+    S-->>H: 工具数组：name/description/inputSchema
+    H->>M: 把 schema 塞进 tools 数组
+    M-->>H: 决定调用某个工具
+    H->>S: tools/call
+    S-->>H: CallToolResult
+    H->>M: 结果回灌进上下文
+    S-->>H: elicitation：反向提问
+    H-->>M: 转给用户确认
+```
+
 ## 1. 为什么这件事很难
 
 **（一）工具声明是每轮都要付的常驻税。**
@@ -42,6 +63,28 @@ MCP server 是第三方代码。给它 blanket 授权等于给第三方任意执
 
 **（五）错误要能传播回模型而不是炸掉整个 run。**
 server 返回 `isError: true` 时，正确处理是包成一条工具消息喂回去让模型自己改参数；但传输层断连、schema 反序列化失败这类错误则完全不同——把它们混在一起处理，要么该重试的直接崩了，要么该崩的被静默吞掉。
+
+这五道坎不是同一个问题的五个侧面，而是五个各自独立的工程决策点，后面几节会看到三个项目各自怎么答：
+
+```mermaid
+flowchart TD
+    T0["<b>MCP 落地要过的五道坎</b><br/>协议之外的工程问题"]
+    T1["<b>常驻税</b><br/>工具 schema 每轮请求都要重发"]
+    T2["<b>生命周期</b><br/>server 是外部进程，会崩会超时"]
+    T3["<b>密钥管理</b><br/>token 不能落进配置文件"]
+    T4["<b>审批粒度</b><br/>要从整个 server 细到单个工具"]
+    T5["<b>错误传播</b><br/>业务错误要回灌，传输错误要终止"]
+    T0 --> T1
+    T0 --> T2
+    T0 --> T3
+    T0 --> T4
+    T0 --> T5
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class T0 entry
+    class T1,T2,T3,T4,T5 danger
+```
 
 ## 2. Pi 的做法
 
@@ -65,6 +108,30 @@ that adds MCP support. [Why?](https://mariozechner.at/posts/2025-11-02-what-if-y
 **替代方案第一层：CLI + README。** 作者那篇博客的核心论证是量化的：Playwright MCP 的 21 个工具占 13.7k token（Claude 上下文的 6.8%），Chrome DevTools MCP 的 26 个工具占 18.0k token（9.0%）；而他自己写的 Node.js 版浏览器控制脚本 + 一个 README，只有 **225 token**。差了约 60 倍。
 
 关键不在"CLI 比 MCP 快"，而在**文档的加载时机**：MCP 的 schema 是 `tools` 数组的一部分，每轮请求都重发；CLI 工具的 README 是磁盘上一个文件，模型**只在需要时 `read` 一次**，之后它作为一条普通消息留在历史里，不会随轮次翻倍。作者的原话是："When I start a session where the agent needs to interact with a browser, I just tell it to read that file in full and that's all it needs."
+
+两条路径的差距不是"CLI 更省"，是加载时机不同导致的复利效果：
+
+```mermaid
+flowchart LR
+    subgraph MCP["MCP 路径：schema 常驻"]
+        M1["<b>tools 数组</b><br/>21~26 个工具全量 schema"]
+        M2["<b>每轮请求</b><br/>随轮次重发,13.7k~18.0k token"]
+        M1 --> M2
+    end
+    subgraph PI["Pi 路径：文档按需读"]
+        P1["<b>README 文件</b><br/>放在磁盘上,约 225 token"]
+        P2["<b>模型按需 read</b><br/>只读一次,留在历史里"]
+        P1 --> P2
+    end
+    N["<b>差距约 60 倍</b><br/>关键在加载时机不同"]
+    M2 -- "每轮重发" --> N
+    P2 -- "读一次不翻倍" --> N
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class M1,M2,P1,P2 main
+    class N note
+```
 
 附带的好处也很实在：CLI 输出可以重定向到文件、可以管道串联（`tool-a | jq | tool-b` 一条命令完成三步，中间结果根本不进上下文），而 MCP 的每次 `tools/call` 结果都必须走一遍上下文。
 
@@ -155,6 +222,25 @@ export function formatSkillsForPrompt(skills: Skill[]): string {
 ### 3.1 一句话概括
 
 全面拥抱：完整的 client 实现（stdio + Streamable HTTP、bearer token + OAuth + `codex mcp login`）、tools/resources 双原语、四档审批模式、每 server 的工具白/黑名单；同时 Codex **自己也能当 MCP server**（`codex mcp-server`）。对于第 1 节的"常驻税"问题，它的工程回应是三层：**工具过滤 → 按需启动 → `defer_loading` 转 tool search**。
+
+三层降本手段是递进关系，前一层解决不完的问题留给下一层：
+
+```mermaid
+flowchart TD
+    A["<b>常驻税问题</b><br/>装几个 server 就是几万 token"]
+    B["<b>第一层：工具过滤</b><br/>enabled_tools / disabled_tools 白黑名单"]
+    C["<b>第二层：按需启动</b><br/>必需死等,可选 1 秒宽限,有缓存用缓存"]
+    D["<b>第三层：defer_loading</b><br/>转 tool search,模型主动搜再展开"]
+    E["<b>结果</b><br/>初始 tools 数组只留真正要用的"]
+    A --> B --> C --> D --> E
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class A entry
+    class B,C,D main
+    class E data
+```
 
 ### 3.2 机制拆解
 
@@ -286,6 +372,33 @@ async fn required_mcp_servers_for_input(
 
 三档策略：**必需的 server 死等**（超时上限是它自己的 `startup_timeout_sec`）；**可选的 server 有缓存就直接用缓存**（`McpToolCatalogCache`，进程内 LRU，容量 32、TTL 30 分钟，见 `tool_catalog_cache.rs:28`）；**既不必需又没缓存的，只给 1 秒宽限**，还没起来就这一轮不要它了。
 
+三档判定画成决策树更直观：
+
+```mermaid
+flowchart TD
+    S0["<b>本轮需要某个 MCP server</b><br/>是否必需?"]
+    S1["<b>必需</b><br/>死等,超时上限是 startup_timeout_sec"]
+    S2["<b>可选,有缓存</b><br/>直接用缓存的工具列表,不等"]
+    S3["<b>可选,无缓存</b><br/>只给 1 秒宽限期"]
+    S4["<b>1 秒内启动成功</b><br/>加入本轮工具目录"]
+    S5["<b>1 秒内未启动</b><br/>本轮不要这个 server"]
+
+    S0 -- "必需" --> S1
+    S0 -- "可选+有缓存" --> S2
+    S0 -- "可选+无缓存" --> S3
+    S3 -- "启动成功" --> S4
+    S3 -- "超时" --> S5
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class S0 entry
+    class S1,S2 main
+    class S4 data
+    class S5 danger
+```
+
 这套设计同时解决了两个问题：第一次启动的延迟被压到 1 秒上限，而工具目录缓存让第二次之后连这 1 秒都不用等。代价是**行为不确定**——同一句话在冷启动和热启动时，模型看到的工具集可能不一样。
 
 **第三层降本：`defer_loading` 与 tool search。** 这是最彻底的一层。Codex 的工具注册表里每个工具有一个 `ToolExposure`（`tools/src/tool_executor.rs:51`，六态：`Direct` / `Deferred` / `DeferredModelOnly` / `DirectModelOnly` / `CodeModeOnly` / `Hidden`）。MCP 工具的曝光度由这段逻辑决定：
@@ -357,6 +470,35 @@ fn requires_mcp_tool_approval_for_mode(
 ```
 
 `Prompt` 每次都问、`Approve` 从不问、`Writes` 信任 server 声明的 `read_only_hint`（缺失时按"要审批"处理，fail-closed）、`Auto` 交给内建启发式。这个 `unwrap_or(false)` 的方向选得很对：注解是 server 自己写的，缺失时默认"不是只读"。
+
+四档模式里只有 `Writes` 需要再往下判断一层，画出来是这样：
+
+```mermaid
+flowchart TD
+    AP0["<b>MCP 工具即将调用</b><br/>按 AppToolApproval 模式判断"]
+    AP1["<b>Prompt</b><br/>每次都问"]
+    AP2["<b>Approve</b><br/>从不问,直接放行"]
+    AP3["<b>Writes</b><br/>信任 read_only_hint"]
+    AP4["<b>Auto</b><br/>内建启发式判断"]
+    AP5["<b>只读工具</b><br/>放行"]
+    AP6["<b>非只读或未声明</b><br/>要审批,fail-closed"]
+
+    AP0 --> AP1
+    AP0 --> AP2
+    AP0 --> AP3
+    AP0 --> AP4
+    AP3 -- "read_only_hint=true" --> AP5
+    AP3 -- "缺失或 false" --> AP6
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class AP0 entry
+    class AP1,AP2,AP4 main
+    class AP5 data
+    class AP6 danger
+```
 
 审批决策还能记忆：`McpToolApprovalPolicy` 带一个 `allow_persistent` 字段（`mcp_tool_call.rs:1018`），server 级审批可以持久化到配置，而"临时选中的 plugin"的审批用 `for_selected_plugin()` 构造，`allow_persistent: false`——**临时授权不会变成永久授权**。
 
@@ -517,6 +659,27 @@ agent = create_agent("openai:gpt-4.1", tools)
 
 支持 `stdio` / `http`（streamable HTTP）/ `sse` / `websocket` 四种传输。注意 `create_agent(model, tools)` 这行——**MCP 工具和本地工具混在同一个 list 里，没有任何区别对待**。这就是"中立管道"的完整含义。
 
+从协议到框架能看到的样子，中间只有一次类型转换，没有分流：
+
+```mermaid
+flowchart LR
+    L1["<b>MCP Server</b><br/>tools/list 返回 inputSchema"]
+    L2["<b>convert_mcp_tool_to_langchain_tool</b><br/>直接把 inputSchema 当 args_schema"]
+    L3["<b>StructuredTool</b><br/>和 @tool 装饰的本地函数无区别"]
+    L4["<b>本地工具</b><br/>普通 BaseTool"]
+    L5["<b>create_agent(model, tools)</b><br/>混在同一个 list 里"]
+
+    L1 --> L2 --> L3 --> L5
+    L4 --> L5
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class L1,L4 entry
+    class L2,L3 main
+    class L5 data
+```
+
 **对"常驻税"的回应：middleware 层，与 MCP 无关。** LangChain 没有在 MCP 层做任何按需加载，因为它根本不知道哪个工具来自 MCP。缓解手段放在通用的 middleware 层，两条路：
 
 `langchain/agents/middleware/provider_tool_search.py:47`
@@ -553,6 +716,24 @@ _SERVER_TOOL_SEARCH_TOOLS: dict[str, _ServerToolSearchSpec] = {
 - **适用边界**：你在造一个应用型 agent，MCP 只是若干工具来源之一，且你有能力自己处理鉴权和进程管理。
 
 ## 5. 三方横向对比
+
+三个项目在"要不要实现 MCP、实现到什么程度"这条轴上分别站在两端和中间：
+
+```mermaid
+flowchart LR
+    X0["<b>光谱起点</b><br/>核心库零协议实现"]
+    P["<b>Pi</b><br/>明确拒绝,CLI+README+Skills"]
+    LC["<b>LangChain v1</b><br/>中立管道,adapter 转 BaseTool"]
+    CX["<b>Codex</b><br/>全面拥抱,三层降本+双向实现"]
+    X1["<b>光谱终点</b><br/>client+server 双向完整实现"]
+
+    X0 --> P --> LC --> CX --> X1
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    class X0,X1 entry
+    class P,LC,CX main
+```
 
 | 维度 | Pi | Codex | LangChain v1 |
 |---|---|---|---|
@@ -657,6 +838,20 @@ server-qualified shape Claude Code and Codex use.
 - **generation 模型**：每次重连是一个新的 `Client` 世代，`isCurrent()` 守卫让 close/error 竞态幂等（`connection.ts:153,173-178`）；失败世代没在 5 秒内关掉就**停止重连**，宁可不恢复也不允许两个子进程重叠（`connection.ts:288-292`）；
 - **`notifications/tools/list_changed` 热重注册**：`syncTools()` 两阶段——先拉全量构建下一代，成功后才 dispose 上一代（`tools.ts:128-174`）；fetch 阶段失败则上一代原样留着继续服务；注册阶段冲突则整代回滚，"模型看到的要么是全集要么是空集，绝不是半个"（`tools.ts:164-172`）。
 
+backoff、稳定窗口、世代切换这几个概念放在一起最容易搞混，画成状态机就清楚了：
+
+```mermaid
+stateDiagram-v2
+    [*] --> Connecting
+    Connecting --> Connected: 握手成功
+    Connected --> Reconnecting: 传输关闭
+    Reconnecting --> Connected: 重连成功,世代加一
+    Connected --> Stable: 存活超过 maxDelayMs
+    Stable --> Reconnecting: 再次断开,预算清零
+    Reconnecting --> CrashLoop: 用尽 10 次尝试预算
+    CrashLoop --> [*]: 注销工具,停止重连
+```
+
 代价老实写在 README 里：Streamable HTTP 的失败是按请求暴露的，监管器只对"传输关闭"起反应，所以**不可达的 HTTP server 是每次调用重试，而不是被重启**（`README.md:113`）。
 
 ### 9.5 凭据方向反转：不是"传什么"，是"删什么"
@@ -719,7 +914,27 @@ MCP 的 `CallToolResult` 在 dsh 里被拆成两份：canonical 值 `{ content: 
 - **最像 LangChain 的定位 + Codex 的实现细节**。定位上 MCP 就是众多工具来源之一，核心（`packages/core/tools`）不知道 MCP 存在，桥接是可插拔的一个包；实现上命名规范化、两阶段换代、错误二分法与 Codex 逐条对应。它不是"中立管道"——LangChain 的 adapter 是约 600 行的一层类型转换，dsh 的是带监管器的 929 行。
 - **第五种答案有两条**：（1）把 MCP server 当**被监管的长驻插件**（backoff + 稳定窗口 + 尝试预算 + generation 换代 + list_changed 热重注册），四家里独一份；（2）**凭据默认 deny**——不是把密钥送进去，是先把像密钥的环境变量全删掉再显式加回。
 - **不推翻本章任何结论，但给第 7 节的核心论断补了一个反例的边界**。第 7 节说"没有人会为不存在的问题写这么多代码"——dsh 是第一个**全面接了 MCP 却一层降本机制都没做**的样本。但它不构成反证：它同时也是唯一一个**官方入口是 Web UI 而不是 CLI**（`README.md:20` 快速开始即 `npx @deepseek-ai/dsh web`）、且 MCP 需要用户手工写 `cordis.yml` row 才会存在的样本，装 3 个 server 是显式动作而非默认配置，常驻税的暴露面本来就小。README 把这笔税明明白白写在 "Token effect" 一节（`README.md:89`）——它是知情地不做，不是没想到。
-- 对照表新增一行的话：**"MCP 配置的落点"**——Pi 无、Codex `config.toml` 的 `[mcp_servers.*]`、LangChain 用户代码里的 dict、Grok `.mcp.json` + config.toml、**dsh 的 DI 插件树 row**。
+- 对照表新增一行的话：**"MCP 配置的落点"**——Pi 无、Codex `config.toml` 的 `[mcp_servers.*]`、LangChain 用户代码里的 dict、Grok `.mcp.json` + config.toml、**dsh 的 DI 插件树 row**。五家的答案摊开来看，正好对应五种"谁来决定接哪个 server"的哲学：
+
+```mermaid
+flowchart TD
+    R["<b>MCP server 怎么接入</b><br/>配置落在哪里"]
+    Q1["<b>Pi：无</b><br/>官方不提供,靠扩展自建"]
+    Q2["<b>Codex：config.toml</b><br/>mcp_servers 配置表"]
+    Q3["<b>LangChain：用户代码</b><br/>MultiServerMCPClient 的 dict"]
+    Q4["<b>Grok：.mcp.json</b><br/>加 config.toml"]
+    Q5["<b>dsh：DI 插件树</b><br/>cordis.yml 里一行 row"]
+    R --> Q1
+    R --> Q2
+    R --> Q3
+    R --> Q4
+    R --> Q5
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    class R entry
+    class Q1,Q2,Q3,Q4,Q5 main
+```
 
 ### 9.11 本节未确认
 
