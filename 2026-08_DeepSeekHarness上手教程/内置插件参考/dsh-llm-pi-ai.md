@@ -31,6 +31,18 @@
 
 **不监听任何事件**（`src/` 下无 `ctx.on`），不注册工具 / prompt 段 / 命令。
 
+休眠与活跃是两个可以来回切换的状态，钥匙是 `providers` 字典是否为空：
+
+```mermaid
+stateDiagram-v2
+    [*] --> 休眠
+    休眠: 零路由 · providers 为空字典
+    活跃: 每个 profile key 一条路由
+    休眠 --> 活跃: providers 非空 → registerAdapter
+    活跃 --> 休眠: providers 清空 → replace(空集)
+    活跃 --> 活跃: profile 变化 → 整体 replace
+```
+
 路由集与每条路由的 retry policy 是**注册级事实**，任一变化就整体 `registration.replace(routes)`：候选集先整体校验，撞车时保留旧路由继续服务，`registeredFacts` 只在注册表真正吃下新集合后才前移（`src/index.ts:253-275`）。provider key 的顺序变化不算变化——`registrationFacts()` 按 provider 排序（`:94-105`）。
 
 ## 配置项
@@ -49,6 +61,35 @@
 - **catalog 路由 + `models`**：这份列表**整份替换**该路由的目录，每一项的未设字段再从同 id 的已装模型继承。
 - **`modelOverrides`**：只改指定几个已装模型，其余照旧服务——只在「catalog 路由且没写 `models`」时有意义，写错了会被拒绝而不是静默跳过。
 - **手写路由**：pi-ai 没出的 key，必须自带 `api`、`baseURL` 和非空 `models`。
+
+四种形态由 key 是否命中 catalog、以及写了哪些字段共同决定：
+
+```mermaid
+flowchart TD
+    A["<b>profile 声明</b><br/>providers 字典里的一条"]
+    B["<b>key 命中已装 provider</b><br/>catalog 路由"]
+    C["<b>key 未命中</b><br/>手写路由"]
+    D["<b>不写 models/overrides</b><br/>端点/协议/模型目录全继承"]
+    E["<b>写了 models</b><br/>整份替换该路由目录"]
+    F["<b>写了 modelOverrides</b><br/>只改指定模型,其余照旧"]
+    G["<b>必须自带的字段</b><br/>api / baseURL / 非空 models"]
+
+    A --> B
+    A --> C
+    B -- "纯继承" --> D
+    B -- "整份替换" --> E
+    B -- "局部覆盖" --> F
+    C --> G
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class A entry
+    class B,C main
+    class D,E,F data
+    class G danger
+```
 
 ## 模型看得见什么
 

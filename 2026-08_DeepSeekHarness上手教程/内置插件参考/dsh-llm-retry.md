@@ -24,6 +24,19 @@
 
 不注册服务、工具、prompt 段或命令。同包另发布的 `./invariant` companion 另有监听（`src/invariant.ts:159-160`：`session/created` 与 `internal/dispatch`），那是校验用的，不参与恢复决策。
 
+`llm/retry` 和 `llm/retry-started` 这两条落盘时机差一整段退避等待，取消发生在中间时只留下前一条：
+
+```mermaid
+stateDiagram-v2
+    [*] --> 请求失败
+    请求失败 --> 已记录调度: 写 llm/retry(等待前)
+    已记录调度 --> 退避中: cancellableDelay 开始
+    退避中 --> 已开始重试: 等待完整落地,写 llm/retry-started
+    退避中 --> 已取消: 被取消,不写 retry-started
+    已开始重试 --> [*]
+    已取消 --> [*]
+```
+
 ## 配置项
 
 **无配置项**，而且是刻意的（`README.md:29`）：
@@ -46,7 +59,40 @@
 
 `always` 模式没有次数上限（次数检查只在 normal 分支，`src/index.ts:190`），先问下游要不要接手，再无限重试**任何**模型请求失败，直到成功、取消或插件被 dispose（`src/index.ts:161-176`）。
 
-退避的两条硬规则（`README.md:9`、`src/index.ts:194-205`）：合法且 ≤ `maxDelayMs` 的 `providerRetryAfterMs` **直接替代**本地退避且不加抖动；超过上限时 normal 模式**交给下游**（`return next()`），always 模式改用自己的本地退避——这样 provider 的一条指令没法让 always 模式终止。
+退避的两条硬规则（`README.md:9`、`src/index.ts:194-205`）：合法且 ≤ `maxDelayMs` 的 `providerRetryAfterMs` **直接替代**本地退避且不加抖动；超过上限时 normal 模式**交给下游**（`return next()`），always 模式改用自己的本地退避——这样 provider 的一条指令没法让 always 模式终止。整条决策路径连起来是这样：
+
+```mermaid
+flowchart TD
+    A["<b>agent/request-error</b><br/>waterfall 事件触发"]
+    B["<b>always 模式</b><br/>无视次数直接接手"]
+    C["<b>normal 模式</b><br/>核对次数与可重试码"]
+    D["<b>不满足条件</b><br/>next() 交给下游策略"]
+    E["<b>满足条件</b><br/>写 llm/retry,进入退避"]
+    F["<b>providerRetryAfterMs 合法</b><br/>直接替代本地退避,不加抖动"]
+    G["<b>超过上限或无该值</b><br/>normal 让位,always 走本地退避"]
+    H["<b>退避等完</b><br/>写 llm/retry-started,回 retry"]
+
+    A --> B
+    A --> C
+    B --> E
+    C -- "码在白名单且次数未耗尽" --> E
+    C -- "否则" --> D
+    E --> F
+    E --> G
+    F --> H
+    G --> H
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A entry
+    class B,C main
+    class D danger
+    class E,H data
+    class F,G note
+```
 
 ## 模型看得见什么
 

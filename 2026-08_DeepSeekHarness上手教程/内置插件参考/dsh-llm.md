@@ -11,7 +11,28 @@
       name: '@deepseek-ai/dsh-llm'
 ```
 
-`packages/bundle/base/cordis.patch.yml:24-25`。没有 `inject`、没有 `config`——它是**被别人 inject** 的那一个：[llm-deepseek](./dsh-llm-deepseek.md)（`packages/llm/llm-deepseek/src/index.ts:42`）和 [llm-pi-ai](./dsh-llm-pi-ai.md)（`packages/llm/llm-pi-ai/src/index.ts:85`）的 `inject` 都写着 `llm`。[llm-retry](./dsh-llm-retry.md) **不** inject 它（它 inject 的是 `agents`），但执行的正是本服务在注册那一刻冻结下来的那份 retry policy。插件本体就是这个 Service 类本身（`packages/llm/llm/src/index.ts:947` 的 `export default LlmRuntime`）。
+`packages/bundle/base/cordis.patch.yml:24-25`。没有 `inject`、没有 `config`——它是**被别人 inject** 的那一个：[llm-deepseek](./dsh-llm-deepseek.md)（`packages/llm/llm-deepseek/src/index.ts:42`）和 [llm-pi-ai](./dsh-llm-pi-ai.md)（`packages/llm/llm-pi-ai/src/index.ts:85`）的 `inject` 都写着 `llm`。[llm-retry](./dsh-llm-retry.md) **不** inject 它（它 inject 的是 `agents`），但执行的正是本服务在注册那一刻冻结下来的那份 retry policy。插件本体就是这个 Service 类本身（`packages/llm/llm/src/index.ts:947` 的 `export default LlmRuntime`）。这层"谁 inject 了它、谁只是消费它冻结下来的事实"容易搞混：
+
+```mermaid
+flowchart TD
+    A["<b>llm-deepseek</b><br/>inject ctx.llm 注册 adapter"]
+    B["<b>llm-pi-ai</b><br/>inject ctx.llm 注册 adapter"]
+    C["<b>ctx.llm 路由表</b><br/>注册时抓取并冻结 retryPolicy"]
+    D["<b>llm-retry</b><br/>inject ctx.agents,不 inject llm"]
+    E["<b>agent/request-error waterfall</b><br/>执行 C 冻结下来的那份策略"]
+
+    A --> C
+    B --> C
+    C -- "冻结 ResolvedRetryPolicy" --> E
+    D -- "挂载监听" --> E
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class A,B,D entry
+    class C main
+    class E data
+```
 
 ## 它注册了什么
 
@@ -19,6 +40,29 @@
 |---|---|---|
 | service | `ctx.llm`（`LlmRuntime`） | 类在 `packages/llm/llm/src/index.ts:284`；`super(ctx, 'llm')` 在 `:293` |
 | 事件（声明并派发） | `llm/stream`（**waterfall**） | 声明在 `src/index.ts:64`，派发在 `:921-926`。adapter 查找是 waterfall 的**终点续延**：监听者调 `next()` 才走到 adapter，也可以自己 yield chunk 把这次模型调用整个短路掉（`:54-55`） |
+
+```mermaid
+flowchart TD
+    A["<b>调用方 stream()</b><br/>发起一次模型请求"]
+    B["<b>llm/stream waterfall</b><br/>逐个中间件"]
+    C["<b>中间件自己 yield chunk</b><br/>短路,不再往下"]
+    D["<b>中间件调用 next()</b><br/>继续传递"]
+    E["<b>终点:选中的 adapter</b><br/>真正发起 provider 请求"]
+
+    A --> B
+    B -- "缓存/录制命中" --> C
+    B -- "放行" --> D
+    D --> E
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class A entry
+    class B,D main
+    class E data
+    class C danger
+```
 | 事件（声明并派发） | `llm/adapters-updated`（**emit**，无 payload） | 声明在 `src/types.ts:23`，派发在 `src/index.ts:302`，走 `events.dispatch('emit', …)` 逐个调用监听者。一个坏监听者不否决注册表变更，只有 `INVARIANT` 码的失败会在 fan-out 之后重抛（`README.md:33`） |
 
 主插件**不监听**任何事件，也不注册工具、prompt 段或命令。同包另发布的 `./invariant` companion 才挂监听：`llm/stream` 前置校验流协议、`llm/adapters-updated` 后置校验注册表可读（`src/invariant.ts:88-89`）。

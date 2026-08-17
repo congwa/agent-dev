@@ -4,6 +4,29 @@
 
 **一句话**：把两个各自独立的执行旋钮——[sandbox-policy](./dsh-sandbox-policy.md) 的 `sandbox/mode` 与 [user-approval](./dsh-user-approval.md) 的 `approval/policy`——打包成用户能一次选好的命名档位，自己**不做任何强制**，只记录意图再通过两个旋钮各自的写路径落下去。
 
+```mermaid
+flowchart TD
+    A["<b>/permission 命令或新 session</b><br/>选定一个档位"]
+    B["<b>permission-presets</b><br/>只记决定,不做强制"]
+    C["<b>setSandboxMode()</b><br/>写 sandbox/mode 旋钮"]
+    D["<b>setApprovalPolicy()</b><br/>写 approval/policy 旋钮"]
+    E["<b>sandbox-policy 插件</b><br/>真正执行沙箱约束"]
+    F["<b>user-approval 插件</b><br/>真正执行审批提示"]
+
+    A --> B
+    B --> C
+    B --> D
+    C --> E
+    D --> F
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class A entry
+    class B main
+    class C,D,E,F data
+```
+
 ## 它在树上长什么样
 
 `packages/bundle/base/cordis.patch.yml:193-205`：
@@ -43,6 +66,16 @@ bundle 把 schema 自带的两档表（`workspace-write` / `danger-full-access`�
 `set(session, name)` 的顺序是固定的（`apply()`，`src/index.ts:380-392`）：先在**档位确实变了**时 append 一条 `permission/preset`，再对两个旋钮**逐个比较有效值**，只有变了才调各自的 setter（`setSandboxMode` / `setApprovalPolicy`）。重选当前档位一个事件都不写。
 
 `current(events)`（`304-306`，逻辑在 `derive()`，`309-321`）的判定顺序：上次记录的选择若仍然匹配当前旋钮值 → 用它（这就是记录 `permission/preset` 的理由：两档共享同一组旋钮值时保住用户意图）；否则取表中第一条匹配；都不匹配 → `custom`。`custom` 是**只读派生态**：可以显示为当前值，但不能被选中，也不会成为事件载荷（`src/index.ts:66-70`）。
+
+```mermaid
+stateDiagram-v2
+    [*] --> 具名档位
+    具名档位: read-only / workspace-write / danger-full-access
+    自定义: 只读派生,不能被选中或持久化
+    具名档位 --> 具名档位: 用户 set(name) 切换
+    具名档位 --> 自定义: 旋钮被单独改到不匹配任何档
+    自定义 --> 具名档位: 旋钮值重新匹配某档
+```
 
 新 session 的钉入逻辑（`pinInitialPermission()`，`400-430`）：干净的新 session 用当前用户默认档，一次写三条事件；带种子或已部分初始化的 session 保留既有有效值，只补缺的那几条——`session/end-seed` 标记的空种子也按「已表态」处理。因为创建时就钉死了，**之后改设置不会影响已存在的 session**。
 

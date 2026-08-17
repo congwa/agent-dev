@@ -47,7 +47,36 @@ schema 在 `src/index.ts:91-101`，字段注释在 `:62-81`：
 
 **连接事实不在装载时冻结**：`resolveAdapterOptions` 是唯一的解析步骤，adapter 通过 thunk **每次操作重读一遍**（`src/index.ts:200-223`）。settings 文档里的 `llm-deepseek:` section 覆盖 bundle 那一行，改完下一次请求生效，不用重启；正在流的那次请求保留它开始时的事实。一份通过 schema 但违反 schema 之外边界的快照（重复 catalog id、坏的 thinking/effort 组合）会**保留上一份好配置**并打日志（`src/index.ts:212-221`），而 bundle 自己的 entry config 出错则直接装载失败（`README.md:54`）。
 
-唯一在注册时被捕获的事实是 retry policy，所以它变了要原地 `registration.replace([PROVIDER])`——同一个 adapter 实例、一个同步段，避免中间出现空路由集被观察者看到（`src/index.ts:258-268`）。
+唯一在注册时被捕获的事实是 retry policy，所以它变了要原地 `registration.replace([PROVIDER])`——同一个 adapter 实例、一个同步段，避免中间出现空路由集被观察者看到（`src/index.ts:258-268`）。这两条时间线（每次调用现读 vs 注册那一刻冻结）拆开看更清楚：
+
+```mermaid
+flowchart TD
+    D["<b>settings.yaml 里的 llm-deepseek 段</b><br/>随时可改"]
+    A["<b>每次操作现读</b><br/>resolveAdapterOptions 是唯一解析步骤"]
+    B["<b>apiKeyEnv / baseURL</b><br/>每次现解,下一次请求即生效"]
+    C["<b>thinking / reasoningEffort</b><br/>同样按调用重新取值"]
+    E["<b>插件装载 / 路由注册</b><br/>只发生这一次"]
+    F["<b>config.retryPolicy</b><br/>被 ctx.llm 抓取并冻结"]
+    G["<b>路由变化时</b><br/>registration.replace 整体换实例"]
+    H["<b>在飞的请求</b><br/>沿用它发起时那份策略"]
+
+    D --> A
+    A --> B
+    A --> C
+    E --> F
+    F --> G
+    G --> H
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class D,E entry
+    class A,G main
+    class B,C,F data
+    class H note
+```
 
 ## 模型看得见什么
 
@@ -82,7 +111,36 @@ KV cache：未变的前缀可复用，adapter 在 usage 里回报（`cacheReadTo
 - **用裸 `fetch` 而不是 `@cordisjs/plugin-http`**：没有共享的代理/拦截配置（`TODO(http)`）。
 - **序列化把 user 与 tool-result 内容压平成文本块**：插件新增的块类型被跳过，空的工具输出以字面量 `(no output)` 过线。
 
-读源码补充：HTTP 错误码映射是**稳定可路由**的，不要去 parse 文案（`src/adapter.ts:138-149`）——`AUTH`(401/403) 先判，然后由错误体内容判 `QUOTA`（不限状态码，且排在 429 之前），再是 `RATE_LIMIT`(其余 429)、`CONTEXT_WINDOW_EXCEEDED`(可判定的 400)、`INVALID_REQUEST`(其余 400)、`SERVER`(5xx)，否则 `HTTP_<status>`。传输层失败是 `TRANSPORT`（链上 `cause` 保留原始 DNS/TLS/ECONNREFUSED，`src/adapter.ts:258`），协议违规是 `STREAM_CLOSED`（`src/sse.ts:39`）/ `MALFORMED_RESPONSE`（`src/translate.ts:124`），`stop` 却一个内容块都没开的退化完成是 `EMPTY_RESPONSE`（`src/translate.ts:113`，默认策略会重试）。key 解析不到是 `MISSING_CREDENTIAL` 且路由仍然注册、目录仍可浏览（`src/index.ts:241-245`）——首次上手就是「先浏览模型、再存 key、再提问」，中间不用重启（`README.md:55`）。
+读源码补充：HTTP 错误码映射是**稳定可路由**的，不要去 parse 文案（`src/adapter.ts:138-149`）——判定顺序是一条链，命中就停：
+
+```mermaid
+flowchart TD
+    S["<b>HTTP 响应到达</b><br/>adapter 收到结果"]
+    A["<b>401 / 403</b><br/>→ AUTH"]
+    B["<b>错误体判定为配额</b><br/>→ QUOTA(不限状态码)"]
+    C["<b>其余 429</b><br/>→ RATE_LIMIT"]
+    D["<b>可判定的 400</b><br/>→ CONTEXT_WINDOW_EXCEEDED"]
+    E["<b>其余 400</b><br/>→ INVALID_REQUEST"]
+    F["<b>5xx</b><br/>→ SERVER"]
+    G["<b>都不匹配</b><br/>→ HTTP_status 原样携带"]
+
+    S --> A
+    A -- "否则" --> B
+    B -- "否则" --> C
+    C -- "否则" --> D
+    D -- "否则" --> E
+    E -- "否则" --> F
+    F -- "否则" --> G
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class S entry
+    class A,B,C,D,E,F main
+    class G note
+```
+
+`AUTH` 排最先，`QUOTA` 不看状态码、比 429 分支还靠前判——这两条容易被直觉的"先看状态码"顺序带偏。传输层失败是 `TRANSPORT`（链上 `cause` 保留原始 DNS/TLS/ECONNREFUSED，`src/adapter.ts:258`），协议违规是 `STREAM_CLOSED`（`src/sse.ts:39`）/ `MALFORMED_RESPONSE`（`src/translate.ts:124`），`stop` 却一个内容块都没开的退化完成是 `EMPTY_RESPONSE`（`src/translate.ts:113`，默认策略会重试）。key 解析不到是 `MISSING_CREDENTIAL` 且路由仍然注册、目录仍可浏览（`src/index.ts:241-245`）——首次上手就是「先浏览模型、再存 key、再提问」，中间不用重启（`README.md:55`）。
 
 ## 未确认
 

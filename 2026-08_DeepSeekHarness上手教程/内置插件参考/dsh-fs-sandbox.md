@@ -30,7 +30,39 @@
 
 没有事件监听，没有工具，没有 prompt 段。它与 [fs-observation-policy](./dsh-fs-observation-policy.md) 正交：一个管"能不能写到这个位置"，一个管"读过没读过"，两者叠加生效。
 
-围栏本体在 `checkedTarget`（`src/index.ts:126-148`）：
+围栏本体在 `checkedTarget`（`src/index.ts:126-148`）。一次写调用从模式来源到最终放行/拒绝的路径画出来是这样：
+
+```mermaid
+flowchart TD
+    A["<b>sandboxPolicy.defaultMode</b><br/>构造时读取,暴露为 sandboxMode"]
+    B["<b>writeText / editText</b><br/>模型发起的写入调用"]
+    C["<b>checkedTarget(mode)</b><br/>按当前会话模式判定"]
+    D["<b>danger-full-access</b><br/>原样返回 target,不设防"]
+    E["<b>read-only</b><br/>抛 FS_SANDBOX_DENIED"]
+    F["<b>workspace-write</b><br/>重新 canonicalize 路径"]
+    G["<b>writableRoots(policy)</b><br/>与 Seatbelt profile 共用"]
+    H["<b>不在可写根之下</b><br/>抛 FS_SANDBOX_DENIED"]
+    I["<b>放行新 target</b><br/>交给下游原子写"]
+
+    A --> C
+    B --> C
+    C -- "danger-full-access" --> D
+    C -- "read-only" --> E
+    C -- "workspace-write" --> F
+    F --> G
+    G -- "命中可写根" --> I
+    G -- "未命中" --> H
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A,B entry
+    class C,F main
+    class D,G,I data
+    class E,H danger
+```
 
 | 模式 | 行为 |
 |---|---|
