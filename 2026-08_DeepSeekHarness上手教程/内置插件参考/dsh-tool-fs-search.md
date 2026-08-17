@@ -31,6 +31,29 @@ web profile 关掉这一行（`packages/bundle/web-app/cordis.patch.yml:315-316`
 
 没有 service，也不派发 `fs/*`——它和 [fs-observation-policy](./dsh-fs-observation-policy.md) 的观察记录完全无关：`grep` 出来的路径**不算读过**，想编辑仍要先用 [tool-fs](./dsh-tool-fs.md) 的 `read`。那两个 `tools/post-execute` 监听器只对本工具、非嵌套、已 accept 且非错误的调用生效（`src/direct-call.ts:23-26`）。
 
+超额结果怎么处理，靠的正是这个 `tools/post-execute` 环节：
+
+```mermaid
+flowchart TD
+    G["<b>glob / grep 调用</b><br/>ripgrep 子进程返回结果"]
+    W["<b>tools/post-execute waterfall</b><br/>先 await next()"]
+    CAP["<b>是否超过展示上限</b><br/>globMaxResults / grepMaxMatches"]
+    SPILL["<b>存入 spill 后端</b><br/>改写结果内容，附取回提示"]
+    RET["<b>原样返回</b><br/>内联展示完整结果"]
+
+    G --> W
+    W --> CAP
+    CAP -- "超额" --> SPILL
+    CAP -- "未超额" --> RET
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    class G entry
+    class W,CAP main
+    class SPILL,RET data
+```
+
 两个工具都声明了 `timeoutMs`（`src/glob.ts:326`、`src/grep.ts:292`），由 `@deepseek-ai/dsh-tool-call-timeout-policy` 经 `exec.signal` 协作式执行；subprocess seam 的 terminate 升级才是硬杀。这与 tool-fs 的"文件 IO 不设超时"形成对照——进程型工作才有可强制中断的截止时间。
 
 ## 配置项
@@ -46,6 +69,23 @@ web profile 关掉这一行（`packages/bundle/web-app/cordis.patch.yml:315-316`
 | `graceMs` | number | `3000` | 交给 subprocess seam 的 terminate 宽限，受 `MAX_TIMER_DELAY_MS` 约束（`src/search-core.ts:52`，校验在 `src/index.ts:137-139`） |
 | `stderrMaxBytes` | number | `65536` | `rg` stderr 诊断尾巴预算（`src/search-core.ts:49`） |
 | `timeoutMs` | number | `30000` | 两个工具的协作式调用预算（`src/search-core.ts:42`） |
+
+两种取值下超额页的排序契约完全不同，模型看到的尾句提示也跟着换：
+
+```mermaid
+flowchart LR
+    subgraph SF["sampleOverCapGlobResults: false"]
+        F1["<b>保留 mtime 头部</b><br/>base 的选择，聚焦最近改动"]
+    end
+    subgraph ST["sampleOverCapGlobResults: true"]
+        T1["<b>跨目录抽样</b><br/>按顶层条目分组，覆盖整棵树而非只盯一个子树"]
+    end
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class F1 data
+    class T1 main
+```
 
 除必填项外全部在 `apply` 里断言正整数（`src/index.ts:131-141`）。
 

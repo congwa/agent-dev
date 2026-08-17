@@ -35,6 +35,37 @@
 2. `using d = deadline(exec.signal, timeoutMs, TOOL_TIMEOUT)`，把派生信号换到 `exec.signal` 上，`finally` 里恢复调用方原信号，好让 `tools/post-execute` 看到的不是这个可能已 abort 的信号。
 3. dispatch 回来后用 `timeoutOf(d.signal, TOOL_TIMEOUT)` 判断**是不是自己这只表**响的；是就整个替换结果。判定基于信号而非结果形状，因为下游 provider 抛出的上游取消错误早已被注册表规整成普通 error 结果了。
 
+三步落成图，关键分岔在第 3 步——它要分清是自己的表响了，还是外层另一个取消先到：
+
+```mermaid
+flowchart TD
+    S["<b>tools/execute 派发</b><br/>某次工具调用进入 waterfall"]
+    Q["<b>该工具是否声明 timeoutMs</b><br/>ctx.tools.get(name).timeoutMs"]
+    N["<b>直接 next()</b><br/>完全不碰，零 token 成本"]
+    D["<b>派生 deadline 信号</b><br/>替换 exec.signal"]
+    X["<b>dispatch 执行</b><br/>工具自己响应 signal 并收敛"]
+    C["<b>是否是自己这只表响的</b><br/>timeoutOf(d.signal, TOOL_TIMEOUT)"]
+    T["<b>整体替换结果</b><br/>Error: tool call timed out"]
+    O["<b>返回原结果</b><br/>正常完成，或读作上游取消"]
+
+    S --> Q
+    Q -- "未声明" --> N
+    Q -- "已声明" --> D
+    D --> X
+    X --> C
+    C -- "是" --> T
+    C -- "否" --> O
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class S entry
+    class Q,D,X,C main
+    class N,O data
+    class T danger
+```
+
 ## 配置项
 
 **无配置项。** 预算不来自这个插件，而来自被调工具自己的 `ToolDefinition.timeoutMs`——README 原话 `so this plugin is **zero-config**`，且「不可能写错工具名」。注册表只在 `packages/core/tools/src/index.ts:1046-1049` 校验它是正有限数，然后不管执行。

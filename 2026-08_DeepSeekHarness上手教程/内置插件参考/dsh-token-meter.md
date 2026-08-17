@@ -17,6 +17,34 @@
 
 它是 base 里两行的硬依赖，也是全仓库仅有的两个 `tokenMeter` 注入方：`compaction-basic`（`static inject = ['llm', 'tokenMeter', 'sessions']`，`packages/compaction/compaction-basic/src/index.ts:104`，bundle 行在 `:284`）和 `tool-result-pruner`（`static inject = ['tokenMeter']`，`packages/compaction/compaction-tool-result-pruner/src/index.ts:47`，bundle 行在 `:360`）。
 
+这条 inject 链一旦断掉会连带两行一起失活，画出来比对照三处代码行号更直接：
+
+```mermaid
+flowchart TD
+    S["<b>token-meter 是否 disabled</b><br/>base bundle 默认启用"]
+    A["<b>ctx.tokenMeter 就绪</b><br/>measure() / estimateMessage()"]
+    B["<b>compaction-basic 激活</b><br/>inject 含 tokenMeter"]
+    C["<b>tool-result-pruner 激活</b><br/>inject 含 tokenMeter"]
+    D["<b>ctx.tokenMeter 缺失</b><br/>disabled: true 是唯一换法"]
+    E["<b>两行一起 pending</b><br/>自动压缩与工具结果剪枝一起失效"]
+
+    S -- "启用（默认）" --> A
+    S -- "disabled: true" --> D
+    A --> B
+    A --> C
+    D --> E
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class S entry
+    class A data
+    class B,C main
+    class D,E danger
+```
+
 ## 它注册了什么
 
 | 类型 | 名字 | 说明 |

@@ -23,6 +23,38 @@ web 档把它整行关掉，改由每个 session 自己挂 preset：
 
 `packages/bundle/web-app/cordis.patch.yml:293-294`；同文件 283-285 行说明为什么是 `disabled` 而不是删除——base 是共享层，删掉的行会在某天有人重排组合时悄悄复活。
 
+四个 inject 全部就绪前插件保持 pending，另有两个可选依赖不参与这道门槛、只在调用时才去要：
+
+```mermaid
+flowchart TD
+    T["<b>tools</b><br/>服务就绪"]
+    SH["<b>shell</b><br/>ctx.shell 已挂载"]
+    SP["<b>systemPrompt</b><br/>服务就绪"]
+    SE["<b>shellEnv</b><br/>服务就绪"]
+    R["<b>tool-bash 激活</b><br/>四个 inject 全部就绪才注册 bash 工具"]
+    J["<b>ctx.get(jobs)</b><br/>调用时才取，不在 inject 里"]
+    AP["<b>ctx.get(approval)</b><br/>调用时才取，不在 inject 里"]
+    ER["<b>报错</b><br/>background jobs unavailable，load dsh-jobs and dsh-tool-jobs"]
+
+    T --> R
+    SH --> R
+    SP --> R
+    SE --> R
+    R -- "run_in_background 调用" --> J
+    R -- "sandbox 升权调用" --> AP
+    J -- "缺失" --> ER
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class T,SH,SP,SE entry
+    class R main
+    class J,AP note
+    class ER danger
+```
+
 ## 它注册了什么
 
 | 类型 | 名字 | 说明 |
@@ -32,6 +64,29 @@ web 档把它整行关掉，改由每个 session 自己挂 preset：
 | 事件监听 | 无 | 全包没有一处 `ctx.on` / `ctx.waterfall`，`docs/event-producer-consumer.md` 里也没有它的行。逐调用的 allow/deny/ask 由 `tools/pre-execute`（waterfall，生产者是 `tools`，消费者是 hooks 家族与 `tool-jobs`）负责，不在本包（`docs/event-producer-consumer.md:58`） |
 
 工具参数（`src/index.ts:245-270`）：`command`、`description` 必填；`timeoutMs`、`workdir` 可选；`run_in_background` 只在 `enableRunInBackground` 为真时出现；`sandbox_permissions` + `justification` 只在挂载的执行器报告 `ctx.shell.sandboxMode` 时出现，枚举取自 `ESCALATION_TARGETS`（`src/index.ts:193, 259-269`），其值是 `['workspace-write', 'danger-full-access']`（`packages/sandbox/sandbox/src/escalation.ts:41`）。
+
+模型看到的 schema 不是固定的，两个字段各自挂在不同的条件上：
+
+```mermaid
+flowchart TD
+    ALW["<b>command / description</b><br/>必填，始终存在"]
+    OPT["<b>timeoutMs / workdir</b><br/>可选，始终存在于 schema"]
+    BG["<b>run_in_background</b><br/>仅当 enableRunInBackground=true"]
+    SB["<b>sandbox_permissions + justification</b><br/>仅当执行器报告 ctx.shell.sandboxMode"]
+    SCHEMA["<b>bash 工具 schema</b><br/>模型每次请求看到的参数集合"]
+
+    ALW --> SCHEMA
+    OPT --> SCHEMA
+    BG -- "config.enableRunInBackground" --> SCHEMA
+    SB -- "sandboxMode 非空" --> SCHEMA
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class ALW,OPT entry
+    class BG,SB note
+    class SCHEMA main
+```
 
 两个运行时可选依赖不在 `inject` 里，而是调用时 `ctx.get`：`jobs`（缺失时报 `background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs`，`src/index.ts:354-357`）和 `approval`（`src/index.ts:226`）。另有一条加载期硬校验：执行器会限制但 `ctx.sandboxPolicy` 缺席，直接抛 `tool-bash: the mounted bash executor confines but ctx.sandboxPolicy is missing`（`src/index.ts:195-197`）。
 

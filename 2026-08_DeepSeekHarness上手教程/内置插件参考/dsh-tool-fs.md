@@ -34,6 +34,39 @@ web profile 把它关掉（`packages/bundle/web-app/cordis.patch.yml:312-313` �
 
 它**不注册任何 service**，也不 inject 策略服务：三个事件由 `@deepseek-ai/dsh-fs` 在服务定义里声明（`packages/fs/fs/src/index.ts:58`、`:66`、`:76`；生成目录见 `docs/event-producer-consumer.md:34-36`），派发方是它，监听方是策略插件，两边不互相 import。
 
+两个 intent waterfall 是策略插件唯一能插手的决策点，`fs/observed` 则分 present/absent 两条路径，画出来比对着三处代码行号拼快：
+
+```mermaid
+flowchart TD
+    RD["<b>read 成功</b><br/>返回内容"]
+    WR["<b>write 调用</b><br/>fs/write-intent waterfall"]
+    ED["<b>edit 调用</b><br/>fs/edit-intent waterfall"]
+    DEC["<b>策略插件是否否决</b><br/>默认 thunk 返回 undefined=放行"]
+    OK["<b>执行 IO</b><br/>真正写盘"]
+    OBS["<b>fs/observed(present)</b><br/>emit，记录 version"]
+    NF["<b>stat 落空</b><br/>目标路径不存在"]
+    ABS["<b>fs/observed(absent)</b><br/>先记录再抛错"]
+    ERR["<b>抛出 FS_NOT_FOUND</b><br/>read 与 read_image 共用此路径"]
+
+    RD --> OBS
+    RD -- "stat 落空" --> NF
+    WR --> DEC
+    ED --> DEC
+    DEC -- "放行" --> OK
+    OK --> OBS
+    NF --> ABS
+    ABS --> ERR
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    class RD,WR,ED entry
+    class DEC main
+    class OK,OBS data
+    class NF,ABS,ERR danger
+```
+
 路径解析走 `ctx.fs.resolve`，cwd 取调用 agent 的 `exec.agent.session.header.cwd`（`src/session-cwd.ts:23-27`），与 `dsh-tool-bash` 的 workdir 规则对齐。
 
 ## 配置项

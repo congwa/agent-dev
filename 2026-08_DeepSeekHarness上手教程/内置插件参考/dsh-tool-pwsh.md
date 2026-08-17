@@ -23,6 +23,34 @@ web 档同样整行关掉：
 
 `packages/bundle/web-app/cordis.patch.yml:296-297`。
 
+两者的 `disabled` 条件严格互补，同一台机器上只会活一个，但共用同一套 `ctx.shell` 接缝与渲染逻辑：
+
+```mermaid
+flowchart TD
+    PLAT["<b>process.platform</b><br/>启动时判定一次"]
+    WIN["<b>win32</b>"]
+    OTHER["<b>非 win32</b>"]
+    PW["<b>tool-pwsh 激活</b><br/>注册 pwsh 工具"]
+    BS["<b>tool-bash 激活</b><br/>注册 bash 工具"]
+    SH["<b>共享 ctx.shell 接缝</b><br/>参数与渲染逻辑镜像"]
+
+    PLAT -- "= win32" --> WIN
+    PLAT -- "≠ win32" --> OTHER
+    WIN --> PW
+    OTHER --> BS
+    PW --> SH
+    BS --> SH
+
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class PLAT entry
+    class WIN,OTHER note
+    class PW,BS main
+    class SH data
+```
+
 ## 它注册了什么
 
 | 类型 | 名字 | 说明 |
