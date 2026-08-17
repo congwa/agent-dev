@@ -23,6 +23,37 @@
 
 ---
 
+全文九节层层加码，每一节都是给上一节挖的坑打补丁，先看整体骨架：
+
+```mermaid
+flowchart TD
+    P0["<b>开场惨案</b><br/>双主都写成功，数据分叉"]
+    P1["<b>地基：多数派</b><br/>任意两个多数派必有交集"]
+    P2["<b>宪法：term</b><br/>过期的主和消息自动失效"]
+    P3["<b>选主机制</b><br/>随机超时打破对称僵局"]
+    P4["<b>日志复制</b><br/>多数派确认才算数"]
+    P5["<b>Figure 8</b><br/>复制到多数派≠已提交"]
+    P6["<b>网络分区验证</b><br/>脑裂在机制上不可能"]
+
+    P0 --> P1
+    P1 --> P2
+    P2 --> P3
+    P3 --> P4
+    P4 --> P5
+    P5 --> P6
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class P0 entry
+    class P1,P2,P3,P4 main
+    class P5 note
+    class P6 data
+```
+
+---
+
 ## 0. 开场惨案：一次网络抖动，两个"主"，数据永久分叉
 
 ### 0.1 事故现场
@@ -75,6 +106,31 @@
 ```
 
 说白了，"检测主死没死"这条路在原理上就是死胡同。Raft 换了一条路：**不再试图判断旧主死没死，而是规定新主上岗必须拿到超过半数机器的签字**。把问题从"检测"改成"授权"——检测可以出错，授权可以用数学保证不出错。
+
+两条路的分岔画出来是这样：
+
+```mermaid
+flowchart TD
+    Q["<b>怎么防双主</b><br/>旧主认怂该由谁判断"]
+    D1["<b>检测路线</b><br/>拼命判断对方死没死"]
+    D2["<b>授权路线</b><br/>新主上岗必须拿多数派签字"]
+    R1["<b>死胡同</b><br/>宕机与断网观测完全相同"]
+    R2["<b>数学保证</b><br/>多数派交集杜绝双主提交"]
+
+    Q --> D1
+    Q --> D2
+    D1 --> R1
+    D2 --> R2
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class Q entry
+    class D1,R1 danger
+    class D2 main
+    class R2 data
+```
 
 ### 0.3 这是本系列欠了很久的一篇
 
@@ -146,6 +202,27 @@
 - 交集性质要求两个"决定集合"加起来超过 N → 每个集合至少 N/2+1；
 - 集合再大，容错就变差；集合再小，交集就没了。
 
+两种方案摆在一起对比更直观：
+
+```mermaid
+flowchart LR
+    subgraph optA["<b>方案一：全体同意</b>"]
+        A1["<b>N 台全需确认</b><br/>安全性拉满"]
+        A2["<b>致命缺陷</b><br/>任意 1 台挂就全体卡死"]
+        A1 --> A2
+    end
+    subgraph optB["<b>方案二：多数派</b>"]
+        B1["<b>超半数确认</b><br/>N/2+1 台同意即可"]
+        B2["<b>平衡点</b><br/>挂少数台不影响、双主防住"]
+        B1 --> B2
+    end
+
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class A1,A2 danger
+    class B1,B2 data
+```
+
 这和[第 12 篇](./12-小而美的五个算法.md)贯穿全文的那笔交易是同一个思路：主动放弃"人人确认"，换来"挂一台不影响"。放弃的那部分（少数派可能暂时没有最新数据），后面会看到 Raft 怎么把它兜住。
 
 ---
@@ -201,6 +278,19 @@ term 的规则只有三条，但它是全篇的"宪法"——后面所有流程�
           │                                        │
           └────────────────────────────────────────┘
                        见到更高 term（宪法第二条）
+```
+
+三种角色的转移条件收进一张标准状态机：
+
+```mermaid
+stateDiagram-v2
+    [*] --> Follower
+    Follower --> Candidate: 选举超时,未收到心跳
+    Candidate --> Candidate: 平票,随机超时后重试
+    Candidate --> Leader: 拿到多数派选票
+    Candidate --> Follower: 见到更高term或新leader心跳
+    Leader --> Follower: 见到更高term
+    Follower --> Follower: 收到心跳,倒计时清零
 ```
 
 平时集群里只有一个 leader，其他全是 follower，candidate 只在换届的一瞬间存在。下面用连续状态帧把一次完整换届走一遍。设定：3 台机器 A、B、C，当前 term = 2，A 是 leader。
@@ -679,6 +769,33 @@ Raft 的修法不是改投票（投票规则动一发牵全身），而是收紧
 
 对比帧 d 和帧 e：**分岔点是"t4 的新日志有没有上多数派"**。上了，t2 就永久安全（任何未来的多数派都包含至少一台有 t4 日志的机器，日志更旧的候选人全被拒之门外）；没上，t2 就可能被抹。而提交规则干的事，是让 leader 的"提交宣言"**只在安全的那条时间线上发出**——它没法阻止帧 d 发生，但它保证帧 d 发生时没人做过任何承诺。
 
+帧 d（灾难）和帧 e（正确）从同一个分岔点长出两条命运：
+
+```mermaid
+flowchart TD
+    F["<b>分岔点</b><br/>term4新日志idx3上多数派了吗"]
+    D1["<b>帧d：没上</b><br/>S5靠更高term合法当选"]
+    D2["<b>idx2被覆盖</b><br/>多数派上的日志被合法抹掉"]
+    D3["<b>但没人受骗</b><br/>提交规则不许leader宣布已提交"]
+    E1["<b>帧e：上了</b><br/>idx3复制到S1S2S3多数派"]
+    E2["<b>idx2被焊死</b><br/>顺带提交,新主再也绕不开它"]
+
+    F -- "未上多数派" --> D1
+    D1 --> D2
+    D2 --> D3
+    F -- "已上多数派" --> E1
+    E1 --> E2
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class F entry
+    class D1,D2 danger
+    class D3 note
+    class E1,E2 data
+```
+
 💡 这一节的全部内容压缩成一句：**"复制"是物理事实，"提交"是逻辑承诺。**一条日志在多少台机器上，只是物理分布；系统有没有承诺过它，取决于当前任期的 leader 是否以本任期的名义确认过它。Figure 8 的教训就是这两者不能画等号——物理事实可以被后来的合法选举推翻，逻辑承诺不可以。
 
 ### 5.8 no-op 日志：工程上的最后一块拼图
@@ -732,6 +849,36 @@ A 还自认是 leader，也还在收写请求——但它**一笔都提交不了
 ```
 
 ⚠️ 停一下，这里有个必须掰开的认知：**Raft 防的不是"两个自称 leader 同时存在"——这防不住，也不用防。它防的是"两个 leader 同时提交"。**前者无害（A 的存在对外部没有任何可观测的效果），后者才是脑裂。而"同时提交"需要两个不相交的多数派，1.1 节的数学已经把这堵死了：任何多数派之间必有交集，交集节点要么还在 term 2（会被 C 的选举拉到 term 3），要么已在 term 3（拒绝 A 的一切请求）。A 连凑齐一次提交的可能性都没有。
+
+判定脑裂的关键不是"有几个 leader"，而是下面这棵决策树：
+
+```mermaid
+flowchart TD
+    S["<b>网络分区发生</b><br/>集群裂成两片"]
+    T1["<b>小分区旧leader</b><br/>还自认合法,还在收写请求"]
+    T2["<b>大分区新leader</b><br/>合法当选新term"]
+    Q["<b>两边能同时提交吗</b><br/>这才是脑裂的定义"]
+    N["<b>不可能</b><br/>多数派必有交集,旧主凑不齐确认"]
+    X["<b>旧主只能道歉</b><br/>收请求但提交不了,超时而非假成功"]
+
+    S --> T1
+    S --> T2
+    T1 --> Q
+    T2 --> Q
+    Q --> N
+    N --> X
+
+    classDef entry fill:#f3f4f6,stroke:#d1d5db,color:#374151
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef danger fill:#fee2e2,stroke:#fca5a5,color:#7f1d1d
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    class S entry
+    class T1 danger
+    class T2 main
+    class Q note
+    class N,X data
+```
 
 对照开场惨案，差别就在这：0.1 节的双主里**两边都能"成功"**，所以数据分叉；Raft 下旧主只能收请求、不能兑现请求，**"成功"的章只有一个多数派能盖**。
 
@@ -810,6 +957,25 @@ Redis Sentinel 的故障转移里也有投票：sentinel 们对"主观下线"凑
 | 读走日志 | 把读也当成一条日志跑一遍共识 | 最严格，每次读一轮多数派往返 + 落盘 |
 | ReadIndex | leader 先和多数派换一轮心跳确认身份，再用当前 commitIndex 服务读 | 省掉写日志和落盘，仍要一轮网络往返 |
 | Lease read | 上次心跳成功后的一小段"租约"内，直接读，不再确认 | 最快，但正确性押在"各机时钟漂移有界"上 |
+
+三档摆在一条轴上，越往右越快也越依赖时钟：
+
+```mermaid
+flowchart LR
+    A["<b>读走日志</b><br/>当成一条日志跑共识"]
+    B["<b>ReadIndex</b><br/>换一轮心跳确认身份"]
+    C["<b>Lease read</b><br/>信任时钟,租约内直接读"]
+
+    A -- "更慢更严格" --> B
+    B -- "更快更依赖时钟" --> C
+
+    classDef data fill:#dcfce7,stroke:#86efac,color:#14532d
+    classDef main fill:#ede9fe,stroke:#a78bfa,color:#1f2937
+    classDef note fill:#fef9c3,stroke:#fde047,color:#713f12
+    class A data
+    class B main
+    class C note
+```
 
 一笔带过，记住名词和梯度即可。最后那个 lease read 值得多看一眼：它信任时钟，和[第 12 篇](./12-小而美的五个算法.md)雪花算法信任时钟是同一笔交易——拿一个"物理世界大概率成立"的假设，换掉一轮昂贵的网络确认。时钟真漂过界，两者一样翻车。工程没有魔法，只有标好价格的交易。
 
