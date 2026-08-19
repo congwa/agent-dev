@@ -647,12 +647,3 @@ README 这块有个可以蹭的现成结构。仓库对**自己的** workspace �
 下一章讲 [headless 与 SDK](./23-headless与SDK.md)，那是本章 surface bundle 那一节的完整展开。
 
 ---
-
-## 本章未确认
-
-- ⚠️ 本章所有命令、目录结构、报错文案都是从源码与官方文档逐行读出的，**没有实际执行过**（仓库未安装依赖）。`dsh plugin add` 之后 profile `package.json` 的确切样子（包括 `link:` 这个依赖写法）引自 `docs/user/develop/basic/publish.md:85-101`，未在本机复现。
-- ⚠️ npm / pnpm 侧的行为——`files` 决定 publish 打进哪些文件、pnpm ≥10 拦住 git 依赖的 `prepare` 直到 `allowBuilds` 放行——是包管理器语义与官方文档的说法（`docs/user/develop/basic/publish.md:161-171`）；本仓库代码里能核到的只有 dsh 那句提示文案（`apps/cli/src/plugin.ts:149-155`）。
-- ⚠️ `turtle-ui`（`docs/user/develop/basic/publish.md:163`、`apps/cli/reference/README.md:46`）被官方举为"自足 `prepare` 脚本"的范例，它是仓库外的 GitHub 项目，本章未克隆核对其内容。
-- ⚠️ 关于"bundle README 该写哪些内容"的建议，除仓库内部模板（`docs/cookbook/adding-a-package.md:73-107`）外的部分是从 patch 覆盖规则推导的实践建议，**不是官方规定**。
-- ⚠️ `pnpm publish` / `pnpm pack` 的具体产物内容取决于你自己的 `files` 与构建脚本；仓库只给了这两条命令名（`docs/user/develop/basic/publish.md:177-178`），没有给出面向外部插件作者的完整发布脚本模板。
-- ⚠️ npm 上的 `0.1.0-rc.6` 与本章依据的 `0.1.0-rc.5`（commit `47f9438`）之间若有 profile/bundle 契约变更，本章未覆盖。

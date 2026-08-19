@@ -157,8 +157,3 @@ README 的 Known Limitations and Deferred Work（`packages/sandbox/sandbox-local
 
 - `workspace` 等于或包含平台临时根时，windows-acl 在任何 ACL 改动之前就抛（`assertTempRootOutsideWorkspace`，`packages/sandbox/sandbox-local/src/index.ts:393`）。
 - provider dispose 时的清理失败只 warn 不抛，不中断 cordis teardown（`473-476`）。
-
-## 未确认
-
-- ⚠️ 各 runner 的探测/拒绝行为均来自读代码与 README，本机未实际运行过任一平台链。
-- ⚠️ `src/invariant.ts` 是个空实现（`packages/sandbox/sandbox-local/src/invariant.ts:21`）；三个 bundle（`base` / `web-app` / `headless`）的 YAML 里都没有加载 `*/invariant` 子路径的条目，仓库里只有各包测试显式 import（例如 `packages/core/tools/tests/invariant.spec.ts:7`），生产组合里由谁装配未在 bundle 中确认。

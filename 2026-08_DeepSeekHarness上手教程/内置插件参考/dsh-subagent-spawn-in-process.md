@@ -124,7 +124,3 @@ flowchart TD
 启动失败不会留下已发布的子；反过来，fulfillment 之后卸载 provider 也不会撤销已经交给持有者的 run（README「Behavior」）。
 
 最后一条是省时间的：深度检查、persona 与 tool-filter 安装、结构化输出、必需 signal 的取消、一次性执行、结果读取和静默销毁**都不在本包**，全部由共享的 in-process driver 负责。读源码时别在这里找。
-
-## 未确认
-
-- ⚠️ `startInProcessRun` 的具体行为来自 `@deepseek-ai/dsh-subagent-in-process-driver`（本组之外），本篇只据 README 与调用点转述，未逐行核对该包。

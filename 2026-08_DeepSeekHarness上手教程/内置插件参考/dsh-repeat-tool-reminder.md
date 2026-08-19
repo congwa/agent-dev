@@ -188,11 +188,3 @@ README 的 Known Limitations 逐条：
 源码补充：它的 invariant 伴生插件是空实现（`src/invariant.ts:21`），理由写在 `:18-19`：
 
 > `No runtime invariant: the repeat chain is private to one post-execute listener and exposes no package-owned event or snapshot that an independent companion can observe.`
-
-## 未确认
-
-⚠️ 它和 base 里其它 `tools/post-execute` 消费者的嵌套次序没确认。
-
-全仓库的消费者清单见 `docs/event-producer-consumer.md:57`，其中 `hooks-claude-code` / `hooks-codex` 不在任何 bundle 行里。真正落到 base 树上的只有两个：`spill-policy`（`packages/bundle/base/cordis.patch.yml:349`，`inject = ['tools']`）和 `tool-fs-search` 的 glob/grep（`packages/fs/tool-fs-search/src/glob.ts:361`、`grep.ts:341`）。
-
-cordis waterfall 是先注册者在外（`vendor/cordis/src/events.ts:227-228`、`:255`），但 base 头部声明行序不含加载语义（`:12-13`），本插件又无 inject，实际注册先后未在源码中确认。

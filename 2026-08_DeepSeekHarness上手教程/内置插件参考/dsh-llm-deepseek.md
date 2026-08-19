@@ -216,7 +216,3 @@ HTTP 之外还有几类错误，各有自己的出处：
 最后一个特殊情况：key 解析不到时报 `MISSING_CREDENTIAL`，但**路由仍然注册、目录仍可浏览**（`src/index.ts:241-245`）。
 
 这是故意的——首次上手就是「先浏览模型、再存 key、再提问」，中间不用重启（`README.md:55`）。
-
-## 未确认
-
-- ⚠️ 默认 catalog 里的 `deepseek-v4-flash` / `deepseek-v4-pro` 和 1,000,000 上下文是本 commit 写死的出厂值（`src/index.ts:49-52`）；线上 API 实际是否提供这两个 id、容量是否一致，我没有联网核对。

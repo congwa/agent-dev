@@ -197,8 +197,3 @@ finally:
 **防递归靠的是提示，不是代码闸门。** 每轮 prompt 里明写 `Do not call the ralph tool: this round already is its worker.`（`src/index.ts:156`）——就这一句话，没有别的拦截。
 
 **空 objective（trim 后长度 0）当场拒**（`src/index.ts:443`）。
-
-## 未确认
-
-- ⚠️ README:47 引用的 guidance 末句是 `plain subagents or workflowEngine for bounded delegation and fan-out`，而 `src/index.ts:410` 的实际文案是 `plain subagents or workflows for bounded delegation and fan-out`。模型真正看到的应以源码为准，但两处文档不一致，没找到哪边是待更新的。
-- ⚠️ 伴生插件 `tool-ralph-invariant` 在默认 bundle 的 patch.yml 里没有对应行，默认树是否挂载未确认。

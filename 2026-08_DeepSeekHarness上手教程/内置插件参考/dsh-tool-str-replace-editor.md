@@ -172,7 +172,3 @@ list(dir, depth):
 ```
 
 没有条目数上限，只有输出字符上限；工具定义未声明 `timeoutMs`，取消只靠传下去的 `exec.signal`。目录多的时候这条串行链是唯一的等待来源。
-
-## 未确认
-
-- ⚠️ `create` 分支先 `stat` 判存在再走 `fs/write-intent`（`src/index.ts:249`），与 tool-fs 的"零 stat"路径不同；这多出的一次 stat 与后续 `createIfAbsent` 之间的窗口如何表现，未实机验证，只能从代码推断由 provider 的 no-replace 发布兜底。

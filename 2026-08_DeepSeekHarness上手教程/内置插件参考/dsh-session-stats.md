@@ -170,7 +170,3 @@ README《Known Limitations》四条（`README.md:36-39`）：
 `turn/end` 会清掉没等到结果的挂起调用，避免持久化状态无限增长（`src/projection.ts:163-167`）。
 
 它与 [session-title](./dsh-session-title.md) 注册的 `title` 单元同住一个 `sessionProjections` 注册表，两者互不相干。差别在挂载方式：title 那颗是 base 层、且用 `ctx.inject` 做可选挂载；本颗是硬 `inject`，没有注册表就整个不启动。
-
-## 未确认
-
-- ⚠️ "崩溃恢复补合成 `step/end`" 引自 README 提到的 dsh-session `interruptedTurnClosers`（`README.md:36`），本次未进 dsh-session 源码核对该函数。

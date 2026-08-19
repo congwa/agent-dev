@@ -587,10 +587,3 @@ flowchart LR
 停止判据也跟着分岔：goal 由驱动器在同一条会话里判，Ralph 由每一轮 child 自己在报告里声明 `continue` / `complete` / `blocked`，脚本只负责照做。
 
 [28 章](./28-自己写一个续跑插件.md)自己写续跑插件时，这两个选择就是你要先想清楚的那两个。想知道 Pi / Codex / LangChain 在同一道题上怎么选，见[五个 agent 系统源码解剖](../2026-08_五个agent系统源码解剖/00-总览与阅读指南.md)。
-
-## 本章未确认
-
-- ⚠️ "Ralph loop"这个名字的**社区出处**：仓库里（`docs/`、`website/`、包 README、`.agents/notes/`）没有任何溯源说明，只有 `docs/glossary.md:43` 给出的 dsh 自身定义。本章因此只描述 dsh 的实现，不声称它与外部某个具体来源的关系。
-- ⚠️ 本章所有行为均来自**逐行读源码 + 读测试断言**，没有实际运行过（仓库未装依赖）。`disposeGraceMs` 默认 5000ms、引擎 `maxTotalAgents` 默认 1000 等数值来自 schema 默认值声明（`packages/workflow/workflow-worker-thread/src/index.ts:118,121`）与 README 表格（`packages/workflow/workflow-worker-thread/README.md:81,84`），未在运行中观测。那个 tracer 插件同理：形状照集成测试与真实 fixture 抄，但没跑过。
-- ⚠️ headless / ACP 快照里的报告内容来自**回放（replay）适配器**（`examples/headless-agent/ralph.cordis.snapshot.yml:7-12` 把 `llm-deepseek` 关掉、插入 `llm-replay`），所以那两轮的"完成"是脚本化的，只能证明装配与数据流，不能证明真实模型的行为。
-- ⚠️ `maxRounds` 默认 256 是包默认值；出厂组合（base bundle 与装了它的 `standard` / `code` / `cordis` 三个 agent preset）都把它压到 64。你实际拿到的天花板取决于自己的配置层叠结果，建议用 `--dump-config`（[03 章](./03-配置的四层结构.md)；实现见 `apps/cli/src/args.ts:53`、`apps/cli/src/bin.ts:45`）确认。

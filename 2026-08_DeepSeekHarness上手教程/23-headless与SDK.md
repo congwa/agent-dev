@@ -632,13 +632,3 @@ done < tasks.tsv
 ## 一句话带走
 
 **四条无 UI 的路共享同一套语义：结果永远是"一段自有区间的最后一条 assistant 文本"，而不是"对你这条 prompt 的回答"；headless 因为不挂 Host 和 Web runtime，审批必然 fail closed，所以权限要在配置里一次给足。**
-
-## 本章未确认
-
-- ⚠️ 本章**没有运行过任何命令**（仓库未安装依赖）。所有行为均来自源码与文档逐行阅读。
-- ⚠️ JSON-RPC 那节客户端发出的两行帧是按 `client.py:125-131`/`:146`/`:248`/`:303` 的构造逻辑拼出来的，**未与真实运行时对拍**；服务端返回的两行则逐字取自仓库快照文件。
-- ⚠️ JSON-RPC 那节从源码起运行时的命令，是把 `runner.ts:26` 的 argv 约定与仓库其它 bin 的 `node --import tsx` 启动方式拼起来的推断，仓库里没有逐字出现过。
-- ⚠️ `npx @deepseek-ai/dsh` 在仓库里只跟过 `web` 一个子命令（`README.md:20`）；`dsh --profile headless "run the tests"` 虽逐字出现在 `apps/cli/README.md:25` 与 `apps/cli/reference/README.md:30`，但从未与 `npx` 拼在一起，两者拼接的写法未经验证。
-- ⚠️ 本章没有给 ACP 的原始 wire 帧：`examples/acp-agent/tests/snapshots/*/input.json` 用的是测试 harness 自己的步骤 DSL（`{"op":"initialize"}` 之类），不是协议帧，无法据此还原逐字 JSON。要看真帧请读 ACP 官方规范与 `packages/acp/acp/src/`。
-- ⚠️ `deepseek-harness-sdk` / `deepseek-harness-runtime-bin` 在 PyPI、`@deepseek-ai/dsh-sdk-jsonrpc-demo` 在 npm 是否已实际发布，以及各平台 wheel 是否齐全，均未核实——仓库里只有 `publishConfig.access: public`（`packages/examples/jsonrpc-demo/package.json:5-7`）和文档描述，未在代码中确认发布状态。
-- ⚠️ `deepseek-harness-runtime-bin` 的运行时二进制在 git 里是被忽略的构建产物（`python/sdk-runtime/README.md:9`），因此本章无法验证内置运行时的实际行为，只能验证客户端侧的解析与注入逻辑。

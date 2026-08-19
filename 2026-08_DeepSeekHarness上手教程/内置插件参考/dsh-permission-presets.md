@@ -179,7 +179,3 @@ README 的 Known Limitations and Deferred Work（`packages/interaction/permissio
 | 事件 | `permissionPresets/preset`（README `7`、`9`、`17`） | `permission/preset`（`src/index.ts:50`） | 自动生成的 `docs/persistence-catalog.md:501`、`docs/capability-seams.md:454`、`docs/subsystems/permission-presets.md:66` |
 | 命令 | `/permissionPresets`（README `13`） | `/permission`（`src/index.ts:259`） | web 客户端提交的命令行 `packages/client/ui-permission-presets/src/client/index.ts:164` |
 | settings 命名空间 | `permissionPresets`（README `9`、`28`） | `permission`（`src/index.ts:73`） | 命名空间必须匹配小写 kebab-case（`packages/settings/settings/src/index.ts:19`、`26-31`），`permissionPresets` 根本过不了校验 |
-
-## 未确认
-
-- ⚠️ `permissions` projection 与 `/permission` 命令的实际渲染只读了代码（含 web 客户端源码），未跑起来对拍。

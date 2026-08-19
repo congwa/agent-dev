@@ -126,7 +126,3 @@ KV cache 上，子在同 provider、同 model 下可以复用那段逐字节相�
 - **种子是一次性快照**——子只看到 fork 那一刻父的已完成 turn，之后父记了什么它都不知道，没有实时上下文共享。
 - **没有任何出厂组合会创建可续的 fork 子**——`prepareContinuable` 实现着、缝也接受，但每份出厂 `cordis.yml` 都给 fork 委派工具设了 `backgroundMode: one-shot`，所以这条可续路径没有生产调用方。要重开，需要子的 system prompt 和工具 schema 与父逐字节一致，而 [`report` 返回通道](./dsh-tool-subagent-report.md) 目前恰恰破坏了这一点（源码 TODO 与 issue #2124，`src/index.ts:77-82`）。
 - 父一轮都没跑完时，fork 静默退化成 spawn——不是错误，但会让「子应该看到上下文」的预期落空。
-
-## 未确认
-
-- ⚠️ 「同 provider 同 model 下前缀可复用」是 README 的 KV Cache 声明，本篇未做实测。

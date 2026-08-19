@@ -132,7 +132,3 @@ provider 交回来的结果不是照单全收，服务端还要过一遍校验�
 实现在 `src/index.ts:585-632`。
 
 最后一条是隐私向的：标题事件会随会话日志一起被 [session-telemetry-otel](./dsh-session-telemetry-otel.md) 在 `FULL`/`FEEDBACK_ONLY` 下原样上报，也会被 [session-log-export](./dsh-session-log-export.md) 打进导出的 ZIP。标题文本来自用户的第一句话，注意这一点。
-
-## 未确认
-
-- ⚠️ `llm/stream` 那条 waterfall 监听虽然 `prepend`，但只读不改；"绝不影响主请求延迟"是读代码得出的（`src/index.ts:331-334` 立刻 `next()`），未实跑验证。

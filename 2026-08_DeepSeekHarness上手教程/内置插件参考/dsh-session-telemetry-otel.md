@@ -192,8 +192,3 @@ seam 侧还有三条：投递是 best-effort（游标记的是"已交接"不是"
 `processor.maxExportBatchSize` 给成 0 或负数会让 SDK 在关停时**永远挂住**，所以本包在加载期就拒（`src/index.ts:184-191`）。
 
 跟 [session-log-export](./dsh-session-log-export.md) 是同一份数据的两个出口：一个流向 collector，一个流向用户自己的磁盘。会话标题与标题请求记录（见 [session-title](./dsh-session-title.md)、[session-title-first-prompt-llm](./dsh-session-title-first-prompt-llm.md)）也在其中。
-
-## 未确认
-
-- ⚠️ "~1s 排空"是 bundle 注释的说法与参数推算，未实跑不可达 collector 验证。
-- ⚠️ `FULL` 下 chunk 只发每个 `(turn, step)` 的第一条，`seq` 出现空洞属正常（`packages/session/session-telemetry/README.md:31`）；未实际抓包确认。

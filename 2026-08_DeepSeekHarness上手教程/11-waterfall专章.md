@@ -554,10 +554,3 @@ pnpm dsh web --patch ./scratch-plugin/cordis.yml
 挑好之后，[13 章](./13-工具执行管线.md)讲工具那四个拦截点在管线里的确切位置，[15 章](./15-系统提示词与上下文装配.md)讲 `system-prompt/assemble` 能改到什么程度，[14 章](./14-hook兼容层.md)则是本章多次引用的 `hooks-claude-code` 那个桥接插件的完整拆解。
 
 ---
-
-## 本章未确认
-
-- ⚠️ 本章所有结论均来自逐行读源码，**没有实际运行过**（仓库未装依赖）。动手那节的插件示例是按 `docs/user/develop/basic/index.md:50-62` 的挂载步骤和真实监听器形状拼装的，未跑通验证；`Error: <reason>` 这个可见输出来自 `packages/core/tools/src/index.ts:1494` 的代码路径，UI 上的最终呈现样式未确认。
-- ⚠️ "13 个 waterfall 拦截点"是 2026-08-14 对 `packages/*/*/src` 内 `@mode waterfall` 的统计结果（已与全仓 `ctx.waterfall(` 派发点交叉核对）。npm 上已有 `0.1.0-rc.6`，本表未覆盖其差异。
-- ⚠️ "第二次 `next()` 让 `inner` 跑第二遍"是从 `events.ts:237-240` 的 `cbs.shift() ?? inner` 推导出来的：`vendor/cordis` 下没有 `tests/` 目录，`packages/**` 的 spec 里也没搜到重复调用 `next()` 的用例，未经运行验证。
-- ⚠️ `AGENTS.md:106`（MUST 调 `next()`）与 `docs/cordis-primer.md:34`（single-decision 事件短路即设计）措辞不一致，本章按"看事件自身的声明文档"来调和；官方未就此给出统一裁定。

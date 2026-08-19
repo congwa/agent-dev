@@ -154,7 +154,3 @@ README 的《Known Limitations》摆了两条：第一句话可能早已代表�
 | 非 `stop` 的 finish reason | 按失败处理 |
 
 见 `packages/session/session-title-llm/src/index.ts:201-218`、`279-288`。
-
-## 未确认
-
-- ⚠️ `timeoutMs: 60000` 与 tool-web 的 `searchTimeoutMs: 60000`（`packages/bundle/base/cordis.patch.yml:418`）一致，但 bundle 注释未说明标题请求为何要 60s；未在源码中找到解释。

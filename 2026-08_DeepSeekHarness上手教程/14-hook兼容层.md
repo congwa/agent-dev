@@ -564,7 +564,7 @@ flowchart LR
     class NAT2 entry
 ```
 
-**事件覆盖只有一小半。** CC 那 30 个 hook 事件里桥支持 7 个，另外 23 个 `hooks-claude-code/README.md:89` 逐个列了；Codex 10 个里支持 5 个（`hooks-codex/README.md:93`）。两个基线数字都是 README 引外部文档说的，见篇末未确认。
+**事件覆盖只有一小半。** CC 那 30 个 hook 事件里桥支持 7 个，另外 23 个 `hooks-claude-code/README.md:89` 逐个列了；Codex 10 个里支持 5 个（`hooks-codex/README.md:93`）。两个基线数字都是 README 引外部文档说的，没有在 CC / Codex 侧核对过。
 
 **预批准和改写输出都做不到。** 原生插件能返回 `{ kind: 'allow' }`，桥不返回，`allow` 只是不拦；原生插件有 `PostToolDecision.accept` 带 `content`/`value`（`tools/src/index.ts:598`），桥不支持 `updatedToolOutput`，而且 `tool_response` 传给 hook 时已经被压平成纯文本。
 
@@ -643,11 +643,3 @@ Codex 侧结构对称：换成 `@deepseek-ai/dsh-hooks-codex`，另起一个 `co
 **桥能让你的 `hooks.json` 一个字不改就跑起来，但它只是那个被映射子集的兼容通道——超出子集的部分（预批准、改写输出、continue:false、循环护栏）不是配错了，是根本没接。**
 
 ---
-
-## 本章未确认
-
-- ⚠️ **我没有运行过任何东西。** 本章所有「会看到什么」来自源码逐行阅读，加上仓库里**已提交的**快照期望输出（`examples/acp-agent/tests/snapshots/**/session.jsonl`），不是当场跑出来的。
-- ⚠️ `packages/hooks/hooks-claude-code/README.md:77`（Codex 侧同一句在 `hooks-codex/README.md:81`）声称提示词被拦时的兜底文案精确为 `blocked by UserPromptSubmit hook`，但 `PreStepDecision` 的 reject 分支**不带 reason 字段**（`packages/core/agent/src/runtime-types.ts:53`），两个桥返回的都是裸 `{ kind: 'reject' }`（`hooks-claude-code/src/index.ts:224`、`hooks-codex/src/index.ts:211`）。这串文案在全仓 `.ts` 里搜不到，只出现在两个桥 README 的中英四份文件里 —— 我无法在代码中确认它。
-- ⚠️ 「Claude Code 当前共 30 个 hook 事件」「Codex 当前共 10 个」这两个基线数字来自两份 README（`hooks-claude-code/README.md:89`、`hooks-codex/README.md:93`）引用的官方文档链接；我没有访问外部网页核对，也无法确认它们在 2026-08-14 是否仍然成立。
-- ⚠️ `hooks-claude-code/README.md:91` 说 Claude Code 原生给 `UserPromptSubmit` 的专用超时是 30 秒（桥统一用 600 秒）；这个 30 秒是 README 转述的外部产品行为，dsh 代码里没有对应实现可核对。
-- ⚠️ `dsh plugin --profile web add ...` 装一个非 bundle 包时「保留为普通依赖并打一次性 warning」的行为，代码路径是清楚的（`apps/cli/src/plugin.ts:44` 的判据 + `:71` 的 `process.stderr.write`），文字描述在 `apps/cli/reference/README.md:43`，但我没有实际执行验证；peer 依赖靠 hoisted 回落解析这条同样只读了 `packages/boot/app-boot/src/profile.ts:133` 的注释，没跑过 `pnpm`。

@@ -191,8 +191,3 @@ on 新 append: assert e.mode in SANDBOX_MODES
 ```
 
 对应 `src/invariant.ts:18-19`、`24-33`。
-
-## 未确认
-
-- ⚠️ 三段模型可见文本是从源码常量逐字抄的，未实际跑起来对拍渲染结果。
-- ⚠️ `./invariant` 伴生插件在三个 bundle 的 YAML 里都没有对应条目，仓库中只见测试显式 import，生产组合里是否装配未确认。

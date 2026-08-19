@@ -578,11 +578,3 @@ expect(ctx.fiber.getEffects().map(effect => effect.label)).toContain('store.orde
 > 想知道这一点上 Pi / Codex / LangChain 怎么做，见 [五个 agent 系统源码解剖](../2026-08_五个agent系统源码解剖/00-总览与阅读指南.md)。
 
 ---
-
-## 本章未确认
-
-- ⚠️ 本章没有运行过任何代码（仓库未安装依赖，只做只读源码核对）。第 6 节的 `heartbeat.ts` 是按 `docs/cordis-tutorial/02-lifecycle-and-effects.md:13`–`42` 的形状改写的，所用 API（`ctx.effect` / `ctx.on('internal/status')` / `ctx.logger.info`）逐个对过源码，但**整份文件未实机跑通**。
-- ⚠️ "默认 web / headless profile 下改插件源码不会热更"是由 bundle patch 的 `disabled: true` 加 CLI 兜底只挂 `root: []` 两处代码推出的结论，**未实机验证**；rc.6 及以后是否重开 hmr 行不在本教程覆盖范围。
-- ⚠️ "framework 自身文件改动被静默忽略"依据的是 `loader.exit()` 空实现 + 全仓无覆写这一 grep 结果；若某个下游发行版自带覆写了 `exit()` 的 host，行为会不同。未实机验证。
-- ⚠️ `node-addon-require-builtin` 这条免 `--expose-internals` 的路径只从源码与 `package.json` 依赖读出，**没有在真机上验证过原生插件是否装得上、装不上时的降级表现**。
-- ⚠️ "多个异步 disposer 并发、不保证逐个完成"来自 `_unload` 的 `Promise.all` 写法与官方文档的一致表述，但其可观察后果（例如两个 disposer 互相依赖时的具体失败形态）未实测。

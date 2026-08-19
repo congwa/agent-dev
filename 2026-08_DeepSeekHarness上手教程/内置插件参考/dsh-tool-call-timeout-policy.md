@@ -141,7 +141,3 @@ README 原话：`"timeout covers the whole retry operation" (timeout registered 
 - 它替换的是最终模型可见结果，之后还要过 `tools/post-execute`（`packages/core/tools/src/index.ts:1569-1599` → `:1743`）。所以 [dsh-repeat-tool-reminder](./dsh-repeat-tool-reminder.md) 照样会看见这次调用并计数：模型反复调用同一个必超时的工具，会先吃 `TOOL_TIMEOUT`，再吃重复调用提醒。
 - `TOOL_TIMEOUT` 不额外产生 session 事件，README 的理由是它就是最终的 `tool/result`，loop 已经记了。
 - 它的 invariant 伴生插件是空实现（`src/invariant.ts:21`），理由写在 `:18-19`：`No runtime invariant: this stateless policy plugin owns no package-local event history or mutable data relation beyond the seam it intercepts.`
-
-## 未确认
-
-- ⚠️ 它和 `session-checkpoint-policy` 在 `tools/execute` 上谁在外层。cordis 的 waterfall 是先注册者在外（`vendor/cordis/src/events.ts:227-228`、`:255`），但 base 头部声明行序不含加载语义（`packages/bundle/base/cordis.patch.yml:12-13`），两者又都 `inject` 了 `tools` 而延迟激活，最终次序未在源码中确认。

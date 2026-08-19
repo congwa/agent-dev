@@ -172,7 +172,3 @@ README 的 Known Limitations and Deferred Work（`packages/interaction/user-appr
 - **只有一次性授权**——词汇表里有 `allowed-once`，但没有 `allow-always`、记忆规则、撤销或授权存储；会话策略也只有 `ask` / `never`。
 - **请求不带工具参数**——answerer 只看到工具名、原因和可选的 call id；ACP 机器渠道要求必须有 call id，没有的请求它直接 `next()` 转交。
 - **没有内置 answerer**——headless 或组合不完整的部署解析为 `unavailable` 并失败关闭，服务本身永远不会去问人。
-
-## 未确认
-
-- ⚠️ 两段策略文本与切换通知是从源码常量抄的，未实际跑起来对拍渲染结果。

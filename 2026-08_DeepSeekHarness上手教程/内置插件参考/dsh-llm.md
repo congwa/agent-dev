@@ -203,7 +203,3 @@ KV Cache effect（`README.md:90-92`）：
 分界线是：前四处是模型请求的结果，所以收敛进流协议唯一的终态；后四处是插件/消费者自己的故障，不该伪装成模型返回了什么。
 
 还有一点：部分 delta 之后失败会留下未闭合的内容块，消费者要丢弃这段残缺输出。请求指向一条没人注册的 provider 路由时抛 `LlmError('NO_ADAPTER')`（`src/index.ts:818`）。
-
-## 未确认
-
-- ⚠️ `llm/stream` 的消费者清单（`docs/event-producer-consumer.md:39` 列了 `agent-loop`、`llm` 自己、`llm-replay`、`session-checkpoint-policy`、`session-title`）来自仓库自动生成的目录，我只核对了 `llm` 自己那条（`src/invariant.ts:88`），其余没有逐个进包确认。

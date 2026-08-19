@@ -569,10 +569,3 @@ flowchart TD
 接下来 [06 章](./06-你的第一个插件.md)开始动手写插件，[07 章](./07-Service能力从哪来.md)讲怎么提供服务，[08 章](./08-effect与生命周期.md)把 effect 讲透。
 
 ---
-
-## 本章未确认
-
-- ⚠️ **本章全部结论来自逐行读 `vendor/cordis/src/` 等源码文件，一行代码都没运行过**（仓库未安装依赖）；行为描述是静态阅读的结果，不是运行时观测。另，版本号对不上：`vendor/README.md:17` 的清单把 cordis 记作 `4.0.0-rc.7`，`vendor/cordis/package.json:4` 写的却是 `4.0.1`，而 `vendor/README.md:5` 又声称"upstream version numbers are deliberately unchanged"。没有去上游核对哪个是真实快照；本章一切以 `vendor/cordis/src/` 的实际代码为准。
-- ⚠️ "Row order carries no load semantics" 是 `packages/bundle/base/cordis.patch.yml:12-13` 的注释声称。fiber 激活确由 inject/epoch 驱动这点在源码里成立，但"配置行序完全不影响任何可观测行为"这个更强的说法未验证：同一事件的监听器按注册先后派发（保序在 `events.ts:172-174`，`:255` 决定 push 还是 unshift），而注册先后取决于各 fiber 的激活先后——依赖都已满足时行序会不会就此体现为派发顺序，本章没有逐行验证。
-- ⚠️ isolate 那节末尾的 preset 子树：挂载动作本身在代码里读到了（`packages/preset/agent-presets/src/mount.ts:350`），但"同一个 preset 每进程只挂一次、各会话靠 scope 父链共享这棵子树"这层更细的语义只来自 `packages/preset/agent-presets/README.md:5` 与 `:31` 的官方描述，其单飞与生命周期实现本章没有逐行核对。
-- ⚠️ 论文 _A Programming Paradigm for Spatiotemporal Composability_ 只引了 `README.md:7` 里的标题与链接，没读原文；文中对"时空可组合性"的解释是笔者依据源码的转述。DI 容器对照表中"传统 DI 容器"与"洋葱中间件"两列同属通用背景知识，未在本仓库中取证。

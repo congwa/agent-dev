@@ -184,7 +184,3 @@ llm-pi-ai:
 - **路由的 catalog 永不自刷新**、**一条路由只能一种 wire 协议**。
 - **模态声明不被验证，且过度声明会拖累整个会话**：图片消息已经落到 session log 里了，只能换模型 / fork / 新会话。
 - **`GenerateOptions.stop` 直接被拒**（`UNSUPPORTED_OPTION`），**provider HTTP status 拿不到**（pi-ai 错误事件不给跨 provider 稳定的状态码）。
-
-## 未确认
-
-- ⚠️ 「已安装 catalog 里有哪些 provider」由 `catalogProviderIds()` 从 `@earendil-works/pi-ai` 读出（`src/index.ts:123`）。我没有装依赖，无法列出具体清单。

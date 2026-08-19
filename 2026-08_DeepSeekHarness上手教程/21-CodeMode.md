@@ -677,13 +677,3 @@ pnpm run demo:code-mode
 代价是一次 worker 冷启动、一层多出来的错误包装，以及一个"containment, not a security boundary"级别的隔离。
 
 ---
-
-## 本章未确认
-
-- ⚠️ **本章没有运行过任何东西**（仓库未装依赖，也不允许装），全部结论来自逐行读源码、包 README 与 `docs/`。命令与配置片段的形状可信，实际输出请自行验证。
-- ⚠️ **Python 后端不在这个仓库里**：`packages/code-runtime/` 下只有 `code-runtime` 与 `code-runtime-worker-thread` 两个包。`packages/core/tools/README.md:16` 说 `dsh-code-runtime-python` 是 "delivered separately"，我无法确认它是否已发布、发布在哪。
-- ⚠️ **程序在 worker 里具体能拿到哪些 Node 全局**（`process`、动态 `import()`、`require` 等）我没有逐个验证。README 与 Agent Note 只笼统写了 "model code can reach Node APIs"、权限与 bash 相当（`.agents/notes/implemented/feature/2026-06-15-code-mode.md:84`），本章按这个口径描述，没有列具体清单。
-- ⚠️ **`DSH_TOOLS_MODE` 是临时方案**：bundle patch 里的注释自称 TEMPORARY，等 Web UI 支持按会话选模式后会移除（`packages/bundle/web-app/cordis.patch.yml:37`）。rc.6 及以后是否还在，本章未覆盖。
-- ⚠️ **同一个 id 被 `insert` 两次会怎样**：patch 引擎在 `@deepseek-ai/cordis-plugin-include` 里，该包不在本仓库源码树内，我只能确认 `insert` 的语义是"新增行"（`docs/architecture.md:27`），没能验证 id 冲突时的具体行为。
-- ⚠️ **Web UI 里 `run_code` 子调用的具体卡片形态**只读到 `packages/client/ui-tool/README.md:47` 一句（生产事件只产生一层 dispatch），未逐行确认前端组件。
-- ⚠️ **`maxParallelSubCalls` 与外层 agent loop 并发池是否共享额度**：README 说子调用"沿用 native 调度契约"（`packages/core/tools/README.md:123`），但两者是否同一个池，我没有从 `agent-loop` 侧交叉验证。

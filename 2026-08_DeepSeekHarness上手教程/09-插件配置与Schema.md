@@ -646,13 +646,3 @@ flowchart TD
 **改一次配置 = 卸掉旧实例 + 用新配置装一个新的**，而在装之前，配置要依次穿过 `internal/config` 插值和 schema 校验两道门；两道门都放行、插件却没按你想的跑，那八成是你的字段名从没被任何人读过。
 
 配置的四层叠加规则见 [03 章](./03-配置的四层结构.md)，waterfall 的完整机制见 [11 章](./11-waterfall专章.md)，effect 为什么能让卸载不留残渣见 [08 章](./08-effect与生命周期.md)。
-
-## 本章未确认
-
-- ⚠️ 报错那节的多层信息是**从源码逐段拼装**的（`vendor/schemastery/src/index.ts:225` → `vendor/cordis/src/fiber.ts:28` → `vendor/loader/src/config/entry.ts:26` → `packages/boot/app-boot/src/index.ts:800` 或 `:723`），仓库未装依赖、无法实跑。
-  - 其中第二层与官方教程贴出的输出逐字一致（`docs/cordis-tutorial/05-config.md:63-66`），第三、四层的**拼接结果**未实测。
-  - 同一次校验失败究竟由 `boot()` 的 `plugin tree failed to load` 包装报出，还是由启动审计 `did not activate` 报出，取决于该 fiber 失败时是否已过 `_start` 的 `await`（`vendor/loader/src/config/entry.ts:296-297` vs `packages/boot/app-boot/src/index.ts:701-707`），两条路径我都未实跑区分。
-  - 同理，模块名拼错既可能走 `failed to import loader entry ...`（`vendor/loader/src/config/entry.ts:280-283`）被 `boot()` 包装，也可能走 `assertEntriesLoaded` 的 `plugin(s) failed to load`（`packages/boot/app-boot/src/index.ts:658-663`），我只读到两处代码，没有实跑证明哪条先命中。
-- ⚠️ 心跳插件是本章按上述文档形状**新写**的，逐个构件都能追溯到仓库（插件形状、`ctx.effect` 清理、Config 声明、`!!js` 写法、`--patch` 挂载），但这个组合本身不在仓库里，未运行验证；四种破坏性实验的预期输出属于按机制推导。
-- ⚠️ `!!js` 表达式里裸写服务名（如 `dshHomePath(...)`）依赖 Context 代理的 `has` trap（`vendor/cordis/src/reflect.ts:199-205`）与 `with (ctx)` 的作用域规则，我是读代码推出来的，未实跑；`packages/bundle/base/cordis.patch.yml:101` 的既有用法是它成立的旁证。稳妥起见，自己写的时候优先用 `ctx.<service>` 显式形式（`packages/boot/cmdline/README.md:45-46` 的官方写法）。
-- ⚠️ Web UI 是否提供图形化编辑插件 config，本章未考证。写回路径（`vendor/loader/src/index.ts:103-109`）拿到的是**已求值**的 config，且 loader 内部重载走的是 `noSave=true`（`vendor/loader/src/config/entry.ts:118-120`）因而不写回——按这两点推断，只有外部主动调 `fiber.update(newConfig)` 才会落盘，届时 `!!js` 是否被换成字面量我未验证。若你用 UI 改过配置，改完请用 `--dump-config` 复核一次表达式还在不在。

@@ -615,10 +615,3 @@ flowchart TD
 **服务靠名字解析，靠 `inject` 声明才拿得到，靠 realm 决定"同一个名字"到底指哪一份实例**——而 realm 的边界画在 group 上，把 provider 圈进去而把 consumer 落在外面，是这一章唯一会安静出错的写法。
 
 ---
-
-## 本章未确认
-
-- ⚠️ 本章没有实机运行过任何命令（仓库未装依赖）。开头两节的 `ctx.fs` 片段按 `packages/fs/fs/src/index.ts:116,176` 的抽象签名与 `packages/fs/tool-str-replace-editor/src/index.ts:97,234` 的真实调用写成，但没跑过；示例那节的代码逐段来自 `docs/cordis-tutorial/03-services.md:11-66` 与 `docs/user/develop/basic/index.md:48-61`，"启动日志里出现 `Hello, world!`"这个结果是照两处文档的同类流程推出来的，未实机验证。
-- ⚠️ PENDING 那节的报错文本是按 `packages/boot/app-boot/src/index.ts:713,723` 的模板加 `apps/cli/src/profile-boot.ts:41` 的 binName 拼出来的示意，不是抄自真实终端输出；实际 entry 名取决于你怎么写配置。
-- ⚠️ "`waiting for services: unknown` 可能由 `[Service.check]` 返回 false 造成"是我从 `packages/boot/app-boot/src/index.ts:711` 与 `vendor/cordis/src/fiber.ts:597-608` 两处代码推的，未实机复现。谓词本身有真实实现（`vendor/loader/src/index.ts:166-170`），但 `packages/` 下一处都没有（2026-08-14 `grep -rn "\[Service.check\]" packages/`），所以这条路径在插件侧是否真会触发，我没有现成用例可指。
-- ⚠️ GlobalRealm 的回收时机（`vendor/loader/src/config/isolate.ts:155-172` 的 `loader/partial-dispose` 处理）只读了代码，未验证多 preset 共享标签时的实际行为。

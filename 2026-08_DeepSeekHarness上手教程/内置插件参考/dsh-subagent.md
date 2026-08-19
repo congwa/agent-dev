@@ -178,7 +178,3 @@ start(...):
     先做能力检查                                          // 在子创建之前做
     缺任何一个           →  throw UNSUPPORTED_CAPABILITY  // src/index.ts:481-496
 ```
-
-## 未确认
-
-- ⚠️ 结算通知在「父正忙」时走 steering、在「父所在谱系正在拆除」时走 injection，这套分支只读到代码（`src/continuation.ts:1425-1440` 附近）与 README 描述，未实际运行验证。

@@ -199,7 +199,3 @@ README 的 Model Experience（`README.md:31-45`）先给了一句总结：
 另外重复一遍那个容易漏的点：退避途中被取消**不会**写 `llm/retry-started`。
 
 出处：回查逻辑 `src/index.ts:182-188`；`policyKey` 构造与排序 `src/index.ts:65-76`；取消不写 started `src/index.ts:151`。
-
-## 未确认
-
-- ⚠️ README 说 `llm/retry` 的 payload 可以从浏览器安全的 `@deepseek-ai/dsh-llm-retry/types` 子路径消费，UI 对 always 模式渲染 `∞`（`README.md:11`）。我核对了子路径确实在 `package.json:25-28` 的 exports 里，但没有进渲染端确认这个 `∞` 的实现。

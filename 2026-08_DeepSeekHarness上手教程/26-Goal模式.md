@@ -707,11 +707,3 @@ export function apply(ctx: Context): void {
 > 想知道这一点上 Pi / Codex / LangChain 怎么做，见 [五个 agent 系统源码解剖](../2026-08_五个agent系统源码解剖/00-总览与阅读指南.md)。
 
 ---
-
-## 本章未确认
-
-- ⚠️ `packages/goal/tool-goal/README.md:17` 说自主轮次成功报 `complete` / `blocked` 时用 `concludeTurn()` 硬停 turn；但源码 `packages/goal/tool-goal/src/index.ts:313-325` 走的是 `exec.deferContext()` 注入 `<goal_complete>` / `<goal_blocked>` 收尾提示（实现在 `packages/goal/tool-goal/src/wrapup.ts:17-40`），而 `wrapup.ts:10-12` 的函数注释明写这是 "replacing the former hard turn stop"。全仓 grep `concludeTurn`，该包 `src/` 下零命中，只有 `README.md:17` 与 `README.zh.md:17` 命中。**README 疑似过期，本章按源码写**。
-- ⚠️ `.agents/notes/implemented/feature/2026-07-19-same-session-goal-round-driver.md:39-48` 有一张结算表，列了 `usage-limited`、`turn-error`、`max-tokens` 等 blocker code；当前源码里产生的 code 只有 `round-limit` / `queue-failed` / `prompt-rejected`（外加工具侧 `model-reported`）。全仓 grep `usage-limited` 只命中两篇 Agent Note 的中英各一版共 4 个文件（该 Note `:43` 与 `2026-07-16-harness-level-loop.md:65`），**源码零命中**。且 `packages/goal/goal-round-driver/README.md:32` 明说驱动器"不通过关联 `turn/end` 来分类前一次活动"。**该表疑似描述已被替换的旧实现。**
-- ⚠️ `packages/goal/tool-goal/src/authority.ts:66-68` 与 `packages/goal/tool-goal/README.md:23` 都说"省略 `Agent.followup()` / `steer()` 的 source 会解析成 `user`"；但当前 `UserMessage.source` 是必填字段（`packages/llm/llm/src/message.ts:136-137`），`followup` / `steer` 的签名也只收造好的 `UserMessage`（`packages/core/agent/src/runtime-types.ts:124`、`:133`）。这句描述指的是更上层的哪个入口（还是旧 API 的遗留），**未确认**。不影响本章结论：`{ kind: 'user' }` 无论如何都是宿主标记而非身份证明。
-- ⚠️ 本章没有运行过任何命令（仓库未装依赖）。上面展示的 `/goal` 输出是从 `packages/goal/command-goal/src/index.ts:81-93` 的拼接逻辑推出来的形状，不是实测终端输出。
-- ⚠️ Web GoalBar 的描述来自 `packages/client/ui-goal/README.md:5` 的**文档声称**，只额外核了包名（`packages/client/ui-goal/package.json:2`）、挂载位置（`packages/bundle/web-app/cordis.patch.yml:241-242`）与文件存在（`packages/client/ui-goal/src/client/GoalBar.tsx`），未逐行读 UI 代码。

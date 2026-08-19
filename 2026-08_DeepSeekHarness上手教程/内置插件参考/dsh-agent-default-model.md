@@ -137,7 +137,3 @@ KV Cache effect（`README.md:18-20`）：改默认值只影响**之后**从它�
 读源码补充一条：`currentSelection()` 返回的是投影后的**脱钩**值（`selection()`，`src/index.ts:49-57`），`reasoningEffort` 在这一步被包成 `ReasoningEffortId` brand。
 
 那是 [llm](./dsh-llm.md) 定义的不透明 adapter 私有标识，构造器不做任何校验（类型在 `packages/llm/llm/src/brand.ts:55`，构造器在 `:62`）。dsh 核心不枚举它的取值——能不能用，由那条路由的 adapter 说了算。
-
-## 未确认
-
-- ⚠️ 出厂默认 `deepseek-v4-flash` 在你的部署里能不能真的跑通，取决于 llm-deepseek 的 catalog 与你的账号；本服务不做任何校验。

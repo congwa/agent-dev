@@ -166,7 +166,3 @@ README 正文另外两条同样是边界：
 
 - `restrict()` 不是权限边界。Public API 一节原文 `This is live visibility composition, not an authority boundary`（README:22）。
 - 取消是协作式的。`ABORTED_BEFORE_DISPATCH` / `ABORTED` 会被更具体的 deny、wrapper 失败、工具失败、post 策略失败或 `TOOL_TIMEOUT` 盖掉（README:35）。
-
-## 未确认
-
-- ⚠️ 多个 `tools/execute` / `tools/post-execute` 监听器的实际嵌套顺序。cordis 的 `waterfall` 注释写着 `Listeners run outermost-first`，`register` 默认 `push`（`vendor/cordis/src/events.ts:227-228`、`:255`），即先注册者在外；但 base 头部又声明行序不含加载语义，而这些插件都靠 `inject: ['tools']` 延迟激活，最终注册次序未在源码中确认。

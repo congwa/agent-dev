@@ -213,8 +213,3 @@ README:94-98 的 Known Limitations 逐条：
 - 计划正文必须以 `# ` 开头，正则 `/^#\s+\S/` 卡在 `src/index.ts:327`；只有 `##` 不行。
 - `pendingIntents` 是 `WeakMap<Session, …>`（`src/index.ts:195`），进程内状态，不落盘——这正是上面「进程退出就丢」那条限制的来源。
 - 批准退出时写的是 `{ active: false, narrate: false }`（`src/index.ts:379`），所以退出不产生旁白：工具结果自己已经说了。
-
-## 未确认
-
-- ⚠️ `docs/subsystems/plan.md:17` 说这是 `a prepended agent/pre-step listener`，但 `src/index.ts:205` 的 `ctx.on` 没传任何 prepend 参数。它靠「先 `await next()` 再动手」达到同样效果，注册顺序上是否真的前置没在源码里确认。
-- ⚠️ `docs/event-producer-consumer.md:41` 把 plan-mode 列为 `session/created` 的消费方，源码里这个监听只出现在 `src/invariant.ts:34`（伴生插件），主插件没有。默认树是否挂了那个伴生插件，没在 bundle 的 patch.yml 里找到对应行。

@@ -720,12 +720,3 @@ flowchart TD
 判断标准可以简化成一句：中间结果你希望父看见吗？希望，就一次委派一个；不希望、而且路数固定，就写 workflow。
 
 ---
-
-## 本章未确认
-
-- ⚠️ 仓库未安装依赖（`node_modules` 不存在），本章**没有运行过任何 dsh 命令或测试**。所有结论来自逐行读源码、包 README、子系统文档与 shipped 配置；最小 workflow 那段示例是照 e2e 测试改编的形状，未实际执行。
-- ⚠️ fork 的 `backgroundMode` 冲突：我核对了 6 个配置文件的实际值与 Agent Note 的原文，但没有跑起来验证 web 默认会话里 `subagent_fork` 最终落到哪个模式，也没有验证 Note 里描述的"prefix 复用损失"实际发生。
-- ⚠️ "两个产品 provider 未随发行版安装"依据的是配置文件缺行 + `packages/bundle/base/tests/base.spec.ts:38`–`41` 的断言，未实际执行 `pnpm install` 或跑 CLI 确认。其余（凭据剥离、Windows `.cmd` 转写、无人值守审批映射、进程树终止阶梯）全部依据两份 README 与 `docs/tool-catalog.md`，均未在运行中确认，本机也没有安装这两个可执行文件。
-- ⚠️ `list_agents` 的 `running / idle / ready` 状态细化、冷恢复的三级投影缓存阶梯，只读了 `packages/subagent/subagent/README.md:105` 与 `docs/tool-catalog.md` 的描述，未跟进 `continuation.ts` 逐行确认。
-- ⚠️ "settlement notice 在忙父身上并进最近 step 边界"的措辞出自 `packages/subagent/subagent/README.md:85`，属于官方文档描述，未在代码中逐行确认。
-- ⚠️ 把"vm/worker 不是安全边界"与"`isolation` 被拒"联系起来是我的推断；仓库明说的只有两件事——它是 deferred（未实现），以及必须响亮失败。

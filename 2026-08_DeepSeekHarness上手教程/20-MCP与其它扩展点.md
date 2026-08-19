@@ -679,11 +679,3 @@ v1 只收四种图片：`image/png` `image/jpeg` `image/webp` `image/gif`（`doc
 > 想知道这一点上 Pi / Codex / LangChain 怎么做，见 [五个 agent 系统源码解剖](../2026-08_五个agent系统源码解剖/00-总览与阅读指南.md)。
 
 ---
-
-## 本章未确认
-
-- ⚠️ **MCP 自动重连的两处文档打架**：`packages/mcp/mcp-client/README.md:69` 说有指数退避 supervisor、`:48` 说默认开，`examples/mcp-memory/README.md:82` 说 "the current generic client does not auto-reconnect"。源码里 `connection.ts:40`–`45`（`RECONNECT_DEFAULTS.enabled = true`）、`:192`（`scheduleReconnect()`）、`:248`（`onclose` 钩子）支持前者，但我没有运行验证，也没有逐行读完这份 351 行的文件。
-- ⚠️ **所有默认值都是从源码里的 schema 与常量读出来的，但仓库未安装依赖，我没跑过 `--dump-config` 复核**，也没验证 profile 层或用户层是否会在你的机器上覆盖它们。
-- ⚠️ **"dsh 不能当 MCP server"是静态检索结论**：我 grep 了整个仓库（含 `native/`、`python/`、`website/`、`apps/`）的 `@modelcontextprotocol/sdk`，server 侧导入只在 `packages/mcp/mcp-client/tests/` 出现。但检索按包名做，若有人手写 JSON-RPC 而不引 SDK 则测不到。
-- ⚠️ **`ctx.jobs` 的最小自定义 producer 我没有写出完整可运行文件**，只引用了 `tool-bash` 的真实调用块；一个不依附于工具的独立 job producer 在仓库里没有现成范例，形状请以 `docs/subsystems/jobs.md:34`–`83` 的契约为准。
-- ⚠️ **开篇表格里 `ctx.dynamicCordisRunner` 那一行只查到服务定义与消费者存在**（`packages/extensions/cordis-host-runner/README.md:5`、`packages/extensions/tool-cordis/src/index.ts:27`），我没有跟进它的工具签名与 `node:vm` 隔离边界。

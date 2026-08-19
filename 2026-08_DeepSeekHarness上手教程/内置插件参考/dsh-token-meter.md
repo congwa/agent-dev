@@ -148,8 +148,3 @@ else:
 另外 README 单独用一节强调（`README.md:40`–`:42`）：占用率字段是各自独立的 last-wins 记录，**不是**对同一次请求的原子观测。
 
 具体的表现是，切换模型时新容量会和上一条路由的样本配对，直到下一次请求报告 usage 为止。这被明确设计成"用户可见的参考数字，不是计费记录也不是门控输入"，harness 里没有任何决策读它，compaction 读的是 `measure()`。
-
-## 未确认
-
-- ⚠️ 上面所有关于运行时数值的描述都来自读源码与 README，没有实际跑过；`estimate.ts` 里"四字符一 token"的具体结构开销权重未逐项核对。
-- ⚠️ `logRevision` 与 session 事件 `seq` 的数值关系（是否恰好等于下一个未读事件的 seq）未在源码中确认——`src/index.ts:140` 只表明它等于 `state.consumedEvents`。

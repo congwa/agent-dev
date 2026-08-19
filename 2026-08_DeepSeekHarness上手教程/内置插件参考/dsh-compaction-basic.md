@@ -227,7 +227,3 @@ if pruner: 剪枝                 # 软引用，取不到就跳过
 ```
 
 阈值检查处见 `packages/compaction/compaction-basic/src/index.ts:308`。
-
-## 未确认
-
-- ⚠️ web profile 把这一行 `disabled: true` 之后，压缩后端在哪个 preset 平面重新挂载，我没有在 `packages/bundle/` 下找到对应的挂载行。
