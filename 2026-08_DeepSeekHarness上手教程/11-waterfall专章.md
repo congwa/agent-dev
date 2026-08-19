@@ -2,9 +2,11 @@
 
 > 基于 `deepseek-ai/deepseek-harness` v0.1.0-rc.5（commit `47f9438`），2026-08-14 核对。
 
-dsh 没有独立的"钩子系统"。
+从别的框架过来的人，第一反应通常是找钩子：一个 hooks 配置文件、一张"生命周期事件"清单、一套 pre/post 回调注册表。
 
-你想改的几乎一切——拦掉一条危险命令、给工具加超时、换个 provider 重试、把导出的遥测脱敏——最后都落到同一个机制上：某个服务在关键位置派发一个 waterfall 事件，你写个插件监听它。
+dsh 里没有这个东西。它没有独立的"钩子系统"。
+
+但你想改的几乎一切——拦掉一条危险命令、给工具加超时、换个 provider 重试、把导出的遥测脱敏——又确实都改得了，因为它们最后都落到同一个机制上：某个服务在关键位置派发一个 waterfall 事件，你写个插件监听它。
 
 所以这一章只讲一件事：`ctx.waterfall` 那十行代码，以及全仓建立在它之上的 13 个拦截点。读完你应该能回答一个很具体的问题——**我想改的那个东西，挂在哪一个事件上**。本章末尾那张 13 行的表就是查它的地方。
 
@@ -12,7 +14,7 @@ dsh 没有独立的"钩子系统"。
 
 ## 想拦住 `rm -rf /`，插件长什么样
 
-先看目标形状。拦工具调用的插件是这样的：
+先看目标形状，再拆机制。拦工具调用的插件是这样的：
 
 ```ts
 ctx.on('tools/pre-execute', async (exec, next) => {
@@ -25,11 +27,11 @@ ctx.on('tools/pre-execute', async (exec, next) => {
 
 这个形状不是我编的，抄自仓库里的真实桥接插件（`packages/hooks/hooks-claude-code/src/index.ts:238-244`）。
 
-工具这一层其实还有第二条拒绝通道，**不走 waterfall**：`ctx.tools.guard()` 注册的同步 guard，跑在 `tools/pre-execute` 之后，只能拒不能放行。它属于工具管线的业务语义，归 [13 章](./13-工具执行管线.md)，这里不展开（`packages/core/tools/src/index.ts:1101-1110`）。
+顺手澄清一个容易混的东西：工具这一层其实还有第二条拒绝通道，**不走 waterfall**——`ctx.tools.guard()` 注册的同步 guard，跑在 `tools/pre-execute` 之后，只能拒不能放行。它属于工具管线的业务语义，归 [13 章](./13-工具执行管线.md)，这里不展开（`packages/core/tools/src/index.ts:1101-1110`）。
 
-上面那八行里藏着两个必须先搞清的问题：**`return { kind: 'deny' }` 凭什么能顶掉整条链？`return next()` 又把控制权交给了谁？**
+回到上面那八行。它藏着两个必须先搞清的问题：**`return { kind: 'deny' }` 凭什么能顶掉整条链？`return next()` 又把控制权交给了谁？**
 
-答案全在 Cordis 的十行实现里，而且比你想的更朴素。先把形状记住：一个 `exec` 从派发方出发，按注册顺序一层层穿过监听器，`return next()` 就往下走一格，直接 `return` 就地终结，链尾兜着派发方写死的 `inner`。
+答案比你想的朴素得多。先把画面立起来：一个 `exec` 从派发方出发，按注册顺序一层层穿过监听器，`return next()` 就往下走一格，直接 `return` 就地终结，链尾兜着派发方写死的 `inner`——"没人拦时本来会发生的事"。
 
 ```mermaid
 flowchart TD
@@ -57,11 +59,15 @@ flowchart TD
     class DENY danger
 ```
 
+这张图立起了本章第一根柱子：**waterfall 没有裁判，返回值就是判决——谁不往下传，判决就归谁。**
+
 ---
 
 ## 全部实现就这十行
 
-一句话：**削头**拿到这次要跑的监听器名单 → **削尾**拿到派发方的兜底 → 造一个没有形参的 `next` **补回尾部** → 启动。
+看到"事件链""中间件"这类词，很容易以为背后有个调度器在管理状态、维护索引、捕获异常。
+
+不是的。全部实现是对一个数组的三下操作：**削头**拿到这次要跑的监听器名单 → **削尾**拿到派发方的兜底 → 造一个没有形参的 `next` **补回尾部** → 启动。
 
 ```ts
 // vendor/cordis/src/events.ts:234-243
@@ -131,9 +137,11 @@ flowchart LR
       )
 ```
 
+### 谁会被筛掉：没打标签的一律放行
+
 `carrier` 是 scope 载体（`scopeTarget()`，见 `packages/core/scope/src/index.ts:170-185`），它挂了一个 `Context.filter`，`dispatch` 在 `events.ts:171-173` 拿它筛监听器。
 
-筛法要看清楚，是反过来的——**没打 scope 标签的监听器一律放行**，被筛掉的只是"标了别的 agent 的"：
+筛法要看清楚，方向和直觉是反的——不是"标了这个 agent 的才进"，而是**没打 scope 标签的监听器一律放行**，被筛掉的只有"标了别的 agent 的"：
 
 ```
 for h in 所有已注册的监听器:
@@ -176,7 +184,7 @@ flowchart TD
 
 ## 洋葱：先注册的在外层
 
-同一个 `events.ts` 里还有另外四种派发模式，只有 waterfall 是嵌套的，别的都把监听器排成一排：
+同一个 `events.ts` 里还有另外四种派发模式。为什么单单 waterfall 值得一整章？因为只有它是嵌套的，别的都把监听器排成一排：
 
 ```mermaid
 flowchart LR
@@ -219,7 +227,7 @@ flowchart LR
         ctx.waterfall(...) 的返回值 = A 的返回值
 ```
 
-"洋葱中间件"这个词如果你没见过：它指每个监听器**包住**下游，而不是排在下游后面。`next()` 之前的代码在进入时跑，`next()` 之后的代码在返回时跑，所以一个监听器同时拥有前置和后置两个时机。
+这个"每个监听器**包住**下游、而不是排在下游后面"的形状，有个现成的名字，叫**洋葱中间件**。它给每个监听器发了两个时机：`next()` 之前的代码在进入时跑，`next()` 之后的代码在返回时跑——**一个监听器同时拥有前置和后置。**
 
 Koa 的 middleware 是同一个形状；Express 的 `next()` 不返回下游结果，只有进入方向，不是这个形状。
 
@@ -253,13 +261,13 @@ flowchart TD
 
 ## 三件反直觉的事
 
-这一节是本章的核心。前面都是"它怎么运行"，这里是"它为什么会咬你"。
+前面都是"它怎么运行"，这一节是"它为什么会咬你"。这三件事全是从那十行代码直接推出来的——每一件都和 Koa 用户的肌肉记忆相反。
 
 ### `next()` 不接参数，想改就地改对象
 
-`next` 的签名是 `() => …`，13 个事件声明全是这个形状（例：`packages/core/tools/src/index.ts:152`）。
+想给下游换个参数？直觉写法是 `next(newExec)`。
 
-原因在实现里已经摆着了：`next` 定义时就没有形参，你传什么它都不接；`cb(...args)` 每次展开的都是 waterfall 自己那**一个** `args` 数组，里面装的永远是派发方给的那几个原始引用。
+没用。`next` 的签名是 `() => …`，13 个事件声明全是这个形状（例：`packages/core/tools/src/index.ts:152`）。原因在实现里已经摆着了：`next` 定义时就没有形参，你传什么它都不接；`cb(...args)` 每次展开的都是 waterfall 自己那**一个** `args` 数组，里面装的永远是派发方给的那几个原始引用。
 
 所以传值给下游只有一条路：**就地修改 payload 对象**。官方口径写在 `docs/cordis-primer.md:32`："Cooperative listeners usually mutate a shared request or decision object and then delegate."
 
@@ -321,7 +329,7 @@ flowchart TD
     class IN2,BAD danger
 ```
 
-一句话记住：**`next()` 是"往下走一格"，不是"运行剩下的链"。一次通过，别回头。**
+一句话立柱子：**`next()` 是"往下走一格"，不是"运行剩下的链"。一次通过，别回头。**
 
 ### 附带的两条
 
@@ -335,11 +343,13 @@ flowchart TD
 
 ## 什么时候可以不调 `next()`
 
-仓库根 `AGENTS.md:106` 写的是硬规矩："Waterfall listeners MUST call `next()`" to delegate。但 `docs/cordis-primer.md:34` 补了另一半：
+仓库根 `AGENTS.md:106` 写的是硬规矩："Waterfall listeners MUST call `next()`" to delegate。看到这句你可能会想：那开头那个插件命中规则直接 `return`，岂不是违规了？
+
+不是。`docs/cordis-primer.md:34` 补了另一半：
 
 > For single-decision events, short-circuiting is the design. A policy listener can return without `next()` when it owns the decision, while a listener that only annotates or observes must delegate.
 
-两句合起来才是完整约定，翻成可执行的判据就三种情况。
+两句合起来才是完整约定：**短路是决策者的特权，委派是观察者的义务。** 翻成可执行的判据就三种情况。
 
 ```mermaid
 flowchart TD
@@ -430,7 +440,7 @@ flowchart TD
     class TE note
 ```
 
-选型时最该看的是最后那一列——**不调 `next()` 你就替系统做了什么决定**。
+选型时最该看的是最后那一列。挑事件的本质是回答：**不调 `next()` 时，你替系统做了什么决定**——这一列就是每个事件对这个问题的答案。
 
 | # | 事件 | 声明包 | 声明处 | 不调 `next()` = 你替系统做了什么决定 | 派发处 |
 |---|---|---|---|---|---|
@@ -496,7 +506,7 @@ export function apply(ctx: Context) {
 }
 ```
 
-有四处是刻意这么写的。
+有四处是刻意这么写的，每一处都能从前面的画面推出来。
 
 非 `bash` 工具立刻 `return next()`，因为只观察就必须委派。命中规则时直接 `return`、**不**调 `next()`，因为这次判决归我。`exec.arguments` 的静态类型是 `unknown`，所以要自己收窄（`packages/core/tools/src/index.ts:323`）。
 
@@ -547,9 +557,18 @@ pnpm dsh web --patch ./scratch-plugin/cordis.yml
 
 ---
 
-## 一句话带走
+## 把整条链再走一遍
 
-**waterfall 是一条只走一趟的洋葱链：`next()` 往下走一格，短路即决策，改输入靠就地改对象、改输出靠包返回值。** 剩下的工作就是在那 13 个拦截点里挑对位置。
+合上这一章之前，把结论从画面里重新推一遍，推得动就是真懂了：
+
+- 从那十行实现推：`next` 造出来就**没有形参**，`cb(...args)` 展开的永远是同一个 `args`——所以改输入只有"就地改 payload 对象"一条路，`next(newExec)` 注定无效；
+- 从 `cbs.shift()` 推：游标共享、取一个少一个——所以 `next()` 是"往下走一格"不是"运行剩下的链"，第二次调它只会命中 `inner`，在 `tools/execute` 上就是工具体跑两遍；
+- 从 `return next()` 推：返回值逐层往回穿，`ctx.waterfall(...)` 的返回值就是最外层的返回值——所以改输出靠包返回值，忘了 `return` 整条链就成了 `undefined`；
+- 从 `cbs.shift() ?? inner` 推：链尾兜着派发方写死的兜底——所以直接 `return` 就顶掉了它，**短路即决策**；反过来，观察者不委派就是悄悄毙掉全链；
+- 从筛法推：没打 scope 标签的一律放行——所以一个朴素的 `ctx.on(...)` 收的是**所有** agent 的事件；
+- 从"实现里没有 `await` 没有 `try`"推：同步抛错会直接窜出 `ctx.waterfall(...)` 那一行，异步性全靠监听器自己的返回值。
+
+一句话收束：**waterfall 是一条只走一趟的洋葱链：`next()` 往下走一格，短路即决策，改输入靠就地改对象、改输出靠包返回值。** 剩下的工作就是在那 13 个拦截点里挑对位置——挑法是看"不调 `next()` 你替系统做了什么决定"那一列。
 
 挑好之后，[13 章](./13-工具执行管线.md)讲工具那四个拦截点在管线里的确切位置，[15 章](./15-系统提示词与上下文装配.md)讲 `system-prompt/assemble` 能改到什么程度，[14 章](./14-hook兼容层.md)则是本章多次引用的 `hooks-claude-code` 那个桥接插件的完整拆解。
 

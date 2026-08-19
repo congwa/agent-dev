@@ -2,19 +2,21 @@
 
 > 基于 `deepseek-ai/deepseek-harness` v0.1.0-rc.5（commit `47f9438`），2026-08-14 核对。
 
-前面十几章围着工具和事件打转，但 dsh 能挂东西的地方远不止这两处。
+读完前面十几章，最容易形成的印象是：给 dsh 加能力，无非就是写个工具、挂个事件。
 
-想加一条斜杠命令、想让编译任务在后台跑完再回来叫模型、想把公司内网那台 MCP server 的工具接进来——每一件都有专属落点，挑错了不是白写，就是写完发现根本没人来调。
+不是的。想加一条斜杠命令、想让编译任务在后台跑完再回来叫模型、想把公司内网那台 MCP server 的工具接进来——这三件事没有一件是工具，也没有一件是事件。每一件都有专属落点，挑错了不是白写，就是写完发现根本没人来调。
 
-这一章把"工具"和"事件"之外剩下的注册面一次讲完：MCP、`ctx.commands`、`ctx.jobs`、skill、schedule、attachment。重头是 MCP——读完你应该能接一台 MCP server 上去，并且清楚它的边界，尤其是它**不能**做的那两件事。
+这些剩下的注册面一共六个：MCP、`ctx.commands`、`ctx.jobs`、skill、schedule、attachment。重头是 MCP——读完你应该能接一台 MCP server 上去，并且清楚它的边界，尤其是它**不能**做的那两件事。
 
 ---
 
-## 先想清楚"我要加的东西是给谁用的"
+## 选落点不看功能大小，只看"模型看得见吗"
 
-选落点最有效的一问不是"这算什么功能"，而是"模型看得见吗"。
+选落点最容易走的弯路，是按功能给自己的需求分类——"这算定时功能还是后台功能"。这么问没有答案，因为 dsh 的注册面不是按功能切的。
 
-看得见就该往 `ctx.tools` 走，看不见就大概率是命令、是服务、是后台。按这一问劈开，落点只有三条去向：模型能点的、人能敲的、给别的代码用的。
+真正有效的一问是：**我要加的东西，模型看得见吗。**
+
+看得见就该往 `ctx.tools` 走；看不见就大概率是命令、是服务、是后台。按这一问劈开，落点只有三条去向：模型能点的、人能敲的、给别的代码用的。
 
 ```mermaid
 flowchart TD
@@ -62,17 +64,19 @@ dsh 官方自己维护着两张对照表："Where new behavior goes" 和 "featur
 | 接一个新模型厂商 | `ctx.llm` 上 `registerAdapter`（[04 章](./04-接模型.md)） | 否 | `docs/cookbook/extension-cookbook.md:128` |
 | 让模型自己写并运行插件 | `ctx.dynamicCordisRunner` | 间接：模型面工具在 `dsh-tool-cordis` | `docs/subsystems/extensions.md:69`、`packages/extensions/cordis-host-runner/README.md:5` |
 
-那么什么时候该新造一个 `ctx.xxx`？官方口径很硬：一个 **seam** 必须凑齐三个角色——Service Definition（接口）、Service Provider（实现）、Consumer（通常是模型能调的工具），只有一个角色不算 seam（`docs/architecture.md:100`）。
+看完表你可能会想：那我干脆新造一个 `ctx.xxx` 吧。官方对此有一把很硬的尺子：一个 **seam** 必须凑齐三个角色——Service Definition（接口）、Service Provider（实现）、Consumer（通常是模型能调的工具），**只有一个角色不算 seam**（`docs/architecture.md:100`）。
 
 拿这条尺子量本章的东西：jobs、skill、attachment 都是标准三件套；schedule 故意**不**开放 service；commands 只有注册表，没有模型面。
 
 ---
 
-## MCP：一台 server 一个插件实例，工具是一等公民
+## MCP：进了门的外来工具，不是外人
 
-`@deepseek-ai/dsh-mcp-client` 连一台外部 MCP server，把它 `tools/list` 出来的工具逐个注册到 `ctx.tools`，模型看到的名字是 `mcp__<serverName>__<rawName>`（`packages/mcp/mcp-client/README.md:5`）。
+第一个直觉是：外部 server 的工具进来，总得走条特殊通道、受点特殊管制吧？
 
-注册完就到此为止了——之后它和 `bash`、`read` 走的是同一条工具执行管线，同一套 waterfall，同一套审批。所谓"一等公民"就是这个意思：模型不知道它是外来的。
+不是的。`@deepseek-ai/dsh-mcp-client` 连一台外部 MCP server，把它 `tools/list` 出来的工具逐个注册到 `ctx.tools`，模型看到的名字是 `mcp__<serverName>__<rawName>`（`packages/mcp/mcp-client/README.md:5`）。
+
+注册完就到此为止了——之后它和 `bash`、`read` 走的是同一条工具执行管线，同一套 waterfall，同一套审批。所谓"一等公民"就是这个意思：**模型不知道它是外来的。**
 
 从一条 YAML 到模型工具表，中间的环节是固定的，公开名要到倒数第二步才拼出来：
 
@@ -111,9 +115,9 @@ for 每一页 in tools/list（翻页取完）:
 若换的过程中撞名: 整代回滚                                 // 要么全在，要么维持上一代
 ```
 
-一句话：**工具名不会因为连接顺序或某次重新同步而变**——这条不变量是后面几个坑的根。
+从这个骨架里能读出一条不变量：**工具名不会因为连接顺序或某次重新同步而变**——它是 `(serverName, rawName)` 的纯函数。这条不变量是后面几个坑的根。
 
-### 配置字段以源码为准
+### 两段官方模板的缩进层级不一样，别抄混
 
 要接多台 server 就在 `cordis.yml` 里放多条，一条一个 `id`、一个 `serverName`（`README.md:9`）。
 
@@ -144,7 +148,7 @@ HTTP 模板（逐字来自 `packages/mcp/mcp-client/README.md:22`–`29`）：
       Authorization: !!js '`Bearer ${process.env.MCP_TOKEN}`'
 ```
 
-**这两段的缩进层级不一样，别照着抄混了。**
+对着看一眼就会发现两段长得不一样——这不是笔误：
 
 | | stdio 那段 | HTTP 那段 |
 |---|---|---|
@@ -202,7 +206,7 @@ stateDiagram-v2
 
 **第二，`serverName` 撞车不是静默覆盖，是后加载的那个实例直接加载失败**（`packages/mcp/mcp-client/README.md:58`）。
 
-这个设计是刻意的：工具名是 `(serverName, rawName)` 的纯函数（`README.md:55`），连接顺序、重新同步、别的 server 都不会让一个工具改名——所以撞车必须在加载期就炸掉，否则模型历史里的工具名会失去稳定性。反过来说，改 `serverName` 等于把这台 server 的所有工具改名一遍。
+回想前面那条不变量：工具名是 `(serverName, rawName)` 的纯函数（`README.md:55`），连接顺序、重新同步、别的 server 都不会让一个工具改名。要守住这条纯函数，撞车就必须在加载期就炸掉，否则模型历史里的工具名会失去稳定性。反过来说，改 `serverName` 等于把这台 server 的所有工具改名一遍。
 
 **第三，只桥接了 Tools。** MCP 的 Resources 和 Prompts 没有消费方，明确 deferred（`README.md:111`）。图片、音频、resource 类返回块在模型上下文里会退化成占位符，完整 JSON 只留在执行期的 canonical value 里（`README.md:114`）。
 
@@ -251,9 +255,11 @@ rc.5 里没有这个扩展点，别去翻配置项找了。要让外部程序驱
 
 ---
 
-## `ctx.commands`：给人敲的命令，一个 token 都不花
+## `ctx.commands`：人敲的命令，模型从头到尾不知道
 
-工具是给模型调的，命令是给人敲的。官方定义就一句话：`handler` "Execute against the receiving agent without sending the command to the model"（`docs/subsystems/commands.md:41`）。
+人在 UI 里敲 `/export`，这句话是不是也变成一条消息发给了模型？
+
+没有。官方定义就一句话：`handler` "Execute against the receiving agent without sending the command to the model"（`docs/subsystems/commands.md:41`）。工具是给模型调的，命令是给人敲的，两条路一条都不搭：
 
 | | 工具（`ctx.tools`） | 命令（`ctx.commands`） |
 |---|---|---|
@@ -263,7 +269,7 @@ rc.5 里没有这个扩展点，别去翻配置项找了。要让外部程序驱
 | 会开一轮 turn 吗 | 在 turn 里 | 不会；命令自己可以显式调 `Agent` 再去开（`README.md:15`） |
 | 留痕 | 工具调用与结果 | 日志里一对 `command/run` + `command/done`，不被任何 turn 包裹（`docs/subsystems/commands.md:143`–`146`） |
 
-把表里最后一行摊开：命令这条路从触发到留痕，全程都在 turn 外面。
+把表里最后一行摊开：命令这条路从触发到留痕，**全程都在 turn 外面**。
 
 ```mermaid
 flowchart TD
@@ -346,7 +352,7 @@ export function apply(ctx: Context): void {
 
 ---
 
-## `ctx.jobs`：后台任务的准入与生命周期
+## `ctx.jobs`：不排队、不抢占，闸没过就当场失败
 
 家族是三件套（`packages/jobs/README.md:9`–`11`）：
 
@@ -384,9 +390,9 @@ const id = jobs.start({
 | `done` | **不许 reject**，reject 会被运行时转成 `failed` |
 | `readOutput` | 有它表示这是流式任务、每次读走增量；没有则表示只有终态输出 |
 
-### 三道准入闸
+### 三道闸都开在 spawn 之前
 
-准入有三道，都在真正 spawn 之前 fail：
+`start()` 不是交了就跑。它先过三道闸，任何一道没过都是**当场失败**——注册表既不排队也不抢占，没有"等一会儿再跑"这回事：
 
 ```
 def start(job):
@@ -396,7 +402,7 @@ def start(job):
     真正 spawn
 ```
 
-注册表既不排队也不抢占——闸没过就是当场失败，不是"等一会儿再跑"。整条路串起来是这样，跑完之后按 owner 忙不忙决定怎么叫模型：
+整条路串起来是这样，跑完之后按 owner 忙不忙决定怎么叫模型：
 
 ```mermaid
 flowchart TD
@@ -443,7 +449,7 @@ tool-bash 自己还额外挡了一层，`ctx.get('jobs')` 为空时抛 `backgrou
 
 `examples/acp-agent/background-job-admission.cordis.yml:19`–`20` 演示了压到 1 的写法——注意那两行嵌在 `dsh-acp-demo` 的 `config.tasks` 下面，是那个 demo 插件转给注册表的，不是直接写在 jobs-local 那一行上。
 
-### 生命周期上的三条硬约束
+### 任务不属于启动它的工具
 
 新任务种类要做 declaration merging，照抄 `packages/terminal/tool-terminal/src/index.ts:18`–`22`：
 
@@ -455,6 +461,8 @@ declare module '@deepseek-ai/dsh-jobs' {
 }
 ```
 
+生命周期上有三条硬约束。
+
 第一条：任务属于 owner 和后端、**不属于**启动它的工具 fiber，所以插件热重载不会停掉在跑的任务（`packages/jobs/jobs-local/README.md:15`）。
 
 第二条：结算 first-wins，一条终态记录、一轮监听器通知（`:19`）。
@@ -465,11 +473,11 @@ declare module '@deepseek-ai/dsh-jobs' {
 
 ---
 
-## skill：模型的"按需说明书"
+## skill：常驻上下文的只有封面，正文要点名才进来
 
-skill 是**可选指令**，不是会话事件（`docs/subsystems/skills.md:5`）。
+skill 最容易被误当成"预置提示词"——一堆说明书全塞进上下文备用。
 
-它分两段：目录里只放 `name` + 描述常驻上下文，正文只在模型调 `skill({name})` 时才读进来（`docs/subsystems/skills.md:231`、`:235`）。这个两段式就是它存在的全部理由——不这么切，几十份说明书全塞进提示词，前缀立刻爆。
+不是的。skill 是**可选指令**，不是会话事件（`docs/subsystems/skills.md:5`），而且它分两段：目录里只放 `name` + 描述常驻上下文，正文只在模型调 `skill({name})` 时才读进来（`docs/subsystems/skills.md:231`、`:235`）。这个两段式就是它存在的全部理由——不这么切，几十份说明书全塞进提示词，前缀立刻爆。
 
 四件套是 `dsh-skill`（定义）/ `dsh-skill-filesystem`（本地 provider）/ `dsh-skill-badge`（打包 provider）/ `dsh-tool-skill`（模型面工具）（`docs/subsystems/skills.md:5`）。其中第一、二、四个在 base bundle 默认开（`packages/bundle/base/cordis.patch.yml:237`、`:240`、`:247`），`skill-badge` 那条带 `disabled: true`（`:243`–`245`）。
 
@@ -494,7 +502,7 @@ flowchart TD
     class DROP danger
 ```
 
-### 从哪几个目录发现
+### 重名谁赢：rank 数字小的
 
 本地 provider 按 rank 扫，**rank 数字小的赢重名**（`packages/skill/skill/src/index.ts:75`，排序在 `:808`）。
 
@@ -521,7 +529,7 @@ flowchart TD
 
 这里的 `projectRoot` 是最近的含 `.git` 的祖先目录，找不到就用当前 cwd（`docs/subsystems/skills.md:77`）。
 
-### 写一个
+### 写一个：description 是模型路由的唯一依据
 
 目录形态 `<name>/SKILL.md`，或扁平文件 `<name>.md`；**只认单层**，嵌套的 `**/SKILL.md` 递归发现是被刻意排除的（`docs/subsystems/skills.md:85`、`packages/skill/skill-filesystem/README.md:55`）。
 
@@ -540,7 +548,7 @@ description: Use before pushing, force-pushing, marking ready for review, or cla
 Use this skill to run relevant local evidence once before a `deepseek-harness` push. …
 ```
 
-写 `description` 时记住它是模型做路由决策的唯一依据——模型侧的会话目录里只有 `name` 和 `description`（`docs/subsystems/skills.md:231`）。所以写"什么时候该用我"，不要写"我是什么"。
+写 `description` 时回到两段式的画面：模型侧的会话目录里只有 `name` 和 `description`（`docs/subsystems/skills.md:231`），它是模型做路由决策的唯一依据。所以写"什么时候该用我"，不要写"我是什么"。
 
 **这里有个 fail closed 的坑。** 那两个 invocation 字段必须写 kebab-case；写成 camelCase 或给了非布尔值，**整条 skill 从发现里丢掉**并打 warning，而不是忽略该字段（`packages/skill/skill-filesystem/README.md:57`）。
 
@@ -556,7 +564,7 @@ Use this skill to run relevant local evidence once before a `deepseek-harness` p
 
 ---
 
-## schedule：会话内的定时提醒，默认不装
+## schedule：不是 cron，是会话里的一枚闹钟
 
 先说默认状态：base / headless / web-app 三个 bundle 的 `cordis.patch.yml` 里都没有 `dsh-schedule` 行，它只作为依赖躺在 `apps/cli/package.json:68`。
 
@@ -583,7 +591,7 @@ Use this skill to run relevant local evidence once before a `deepseek-harness` p
 
 出处：`README.md:5`、`docs/subsystems/schedule.md:94`。
 
-边界必须提前知道，否则很容易把它当成 cron 用错地方：
+标题里"不是 cron"不是修辞，是一串必须提前知道的硬边界：
 
 - **没有 cron。** 协议里没有日历表达式、没有 Cron、没有重复的时区、没有跨记录的准入闸（`docs/subsystems/schedule.md:94`）。
 - **`deliveryMode` 永远是 `session-local`**（类型定义见 `docs/subsystems/schedule.md:164`–`165`）：原会话必须是活的，没有冷会话调度器、没有任何外部通知通道（`:156`；`examples/web-schedule/README.md:19` 明确列出无浏览器/系统/邮件/短信通知）。
@@ -600,7 +608,7 @@ Use this skill to run relevant local evidence once before a `deepseek-harness` p
 
 ---
 
-## attachment：二进制不进日志
+## attachment：字节先落盘，事件里只有引用
 
 规则一句话：**先落盘，再写事件。**
 
@@ -670,11 +678,18 @@ v1 只收四种图片：`image/png` `image/jpeg` `image/webp` `image/gif`（`doc
 
 ---
 
-## 一句话带走
+## 把六个落点串回来
 
-**接一台 MCP server 只需要一条 YAML，它的工具进来就是一等公民；代价是只有 Tools 能过桥，而且这条桥是单向的——dsh 当不了 MCP server。**
+结论逐条从前面的画面重推一遍，推不出来的就回去补：
 
-至于其它扩展点，选型问题永远先问"模型看得见吗"：看得见走 `ctx.tools`（MCP、skill 的正文、job 的 `job_*`），看不见走 `ctx.commands` 或服务层。
+- 选落点之所以只问"模型看得见吗"，是因为注册面本来就是按**谁触发**切的，不是按功能切的——看得见走 `ctx.tools`（MCP、skill 的正文、job 的 `job_*`），看不见走 `ctx.commands` 或服务层；
+- **接一台 MCP server 只需要一条 YAML，它的工具进来就是一等公民**——同一条管线、同一套审批，模型不知道它是外来的；代价是只有 Tools 能过桥，而且这条桥是单向的——dsh 当不了 MCP server；
+- MCP 的 `serverName` 撞车之所以当场炸而不是覆盖，是因为工具名是 `(serverName, rawName)` 的纯函数，名字的稳定性比加载成功更重要；
+- 命令之所以零 token，是因为那条路从触发到留痕全程在 turn 外面——但没有 command adapter 的组合里，注册了也敲不到；
+- job 之所以"闸没过就当场失败"，是因为注册表不排队不抢占；它属于 owner 和后端，热重载停不掉，进程一死记录就没了；
+- skill 之所以省 token，是因为常驻的只有封面，正文要点名才进来——同一个 fail closed 的姿态也解释了为什么字段写错是整条消失；
+- schedule 之所以不是 cron，是因为它只是会话日志的一次投影，`session-local`、at-least-once、没有 service 可调；
+- attachment 之所以日志里干净，是因为字节先落盘、事件里只有内容寻址引用——代价是对象永久保留，体积得自己盯。
 
 > 想知道这一点上 Pi / Codex / LangChain 怎么做，见 [五个 agent 系统源码解剖](../2026-08_五个agent系统源码解剖/00-总览与阅读指南.md)。
 

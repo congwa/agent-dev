@@ -6,7 +6,7 @@
 
 这一章讲另一条路——模型不报工具名，它写一段程序，程序里 `await tools.glob(...)`、`await tools.read(...)`，跑完只把结论交回对话。dsh 管这条路叫 Code Mode，入口是一个叫 `run_code` 的保留工具。
 
-开它要付代价，本章最后有一张账。先看它想解决什么。
+你可能以为它的卖点是"少发几轮请求"。不是的——省下的大头根本不在来回次数上，在于那些中间结果从此不进模型上下文。开它也要付代价，本章最后有一张账。先看第一个画面。
 
 ---
 
@@ -46,7 +46,7 @@ Code Mode 的全部卖点就是这一句：把"多轮工具调用"折叠成"一�
 
 ## 三种模式，改的是模型手里那份工具清单
 
-下文会反复用到一个词——**wire**，指这一轮请求真正发给模型 API 的那份工具列表。模型只能调它看得见的东西，wire 上没有的名字它连提都提不出来。
+新问题来了：所谓"模式"，改的到底是什么东西？回答它要先立一个下文反复用到的词——**wire**，指这一轮请求真正发给模型 API 的那份工具列表。模型只能调它看得见的东西，wire 上没有的名字它连提都提不出来。
 
 模式是工具注册表 `ctx.tools` 的一个配置项，类型在 `packages/core/tools/src/index.ts:651`，schema 和默认值在同文件 `:791`：
 
@@ -115,7 +115,7 @@ else:
 return !nested && this.modeFor(scope) === 'code' && name !== RUN_CODE_NAME
 ```
 
-`!nested` 是关键。程序内部发出的子调用带着外层执行的 `parent` token，不算 model-direct，所以照样能调所有工具——收窄的只是模型直接说话的那一层。
+`!nested` 是关键。程序内部发出的子调用带着外层执行的 `parent` token，不算 model-direct，所以照样能调所有工具——**收窄的只是模型直接说话的那一层**。
 
 两条路进的是同一个判定，出的是两个结果：
 
@@ -386,7 +386,7 @@ spawn 那行的三个参数分别是空环境、不继承 loader flag、堆上�
 
 ### 隔离到底是什么级别
 
-这一节最好一个字都别跳过。官方自己写得很直白（`packages/code-runtime/code-runtime-worker-thread/README.md:5`）：
+看到 worker、空环境、堆上限这一串词，最自然的推断是"这是个安全沙箱"。不是的，这一节最好一个字都别跳过。官方自己写得很直白（`packages/code-runtime/code-runtime-worker-thread/README.md:5`）：
 
 > **Containment, not a security boundary**: trust posture is bash-equivalent by design
 
@@ -670,10 +670,16 @@ pnpm run demo:code-mode
 
 ---
 
-## 一句话带走
+## 把这几个画面串起来
 
-**Code Mode 换掉的不是工具，是模型说话的粒度**：wire 上只剩一个 `run_code`，模型交出去的是一段程序，而只有它 print / return 的东西会回到对话——中间几百个工具结果留在会话日志里给你查，不占模型一个 token。
+**Code Mode 换掉的不是工具，是模型说话的粒度。** 这句结论现在应该能从前面的画面一条条重新推出来——推不出来的，回去重读那一节：
 
-代价是一次 worker 冷启动、一层多出来的错误包装，以及一个"containment, not a security boundary"级别的隔离。
+- 它为什么省 token？不是因为少发几轮请求，是因为**只有程序 print / return 的东西会回到对话**——三百份文件内容留在会话日志里给你查，不占模型一个 token；
+- 模型为什么在 `code` 模式下连 `read` 都发不出去？因为 wire 上只剩 `run_code`，而且就算硬发，`createExecution` 在任何插件看见之前就把它判成 UNKNOWN_TOOL——收的是 wire 和执行面两层，不是一层；
+- 它为什么不是权限旁路？因为程序里每次 `tools.xxx()` 都带着 parent token 走完整工具管线，六道关卡、审批、沙箱一条不少；
+- `isolation: 'worker-thread'` 为什么不能当安全承诺读？因为它是 containment——模型代码够得到 Node API，信任姿态按 bash 等价设计，`terminate()` 也杀不掉程序 spawn 出去的 OS 进程；
+- 它为什么不保证普遍省 token？因为拿工具 schema 换的是 SDK 文本，真正省下的是中间**结果**——工作负载不是"读一堆→只要一个汇总"的形状，这笔账就算不平。
+
+代价始终是那三样：一次 worker 冷启动、一层多出来的错误包装，以及一个"containment, not a security boundary"级别的隔离。
 
 ---

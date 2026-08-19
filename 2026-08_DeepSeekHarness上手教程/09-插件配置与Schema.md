@@ -2,7 +2,11 @@
 
 > 基于 `deepseek-ai/deepseek-harness` v0.1.0-rc.5（commit `47f9438`），2026-08-14 核对。
 
-配置这件事只有两种痛苦。
+关于配置，最常见的误解是：改一次配置，就是把新值塞进正在跑的插件里。
+
+不是的。dsh 改配置的动作是**把旧实例整个卸掉、用新配置装一个新的**。这个心智模型先立在这，本章一半的现象都从它推出来。
+
+立住它之前，先看配置这件事的两种痛苦。
 
 一种是启动直接炸，吐出三四层嵌套的报错，看不出到底是 schema 不满意、插件自己抛的，还是依赖压根没就绪。
 
@@ -36,8 +40,6 @@ flowchart TD
     class Y entry
     class PEND note
 ```
-
-先立一个心智模型，后面一半现象都从它推出来：**改一次配置不是"把新值塞进正在跑的插件"，而是把旧实例整个卸掉、用新配置装一个新的。**
 
 ---
 
@@ -132,7 +134,7 @@ flowchart LR
 - **类形式的插件写 `static Config = Config`**，实例见 `packages/session/session-telemetry-otel/src/index.ts:149`。
 - **`export default` 会吃掉具名导出。** loader 取模块时是 `exports.default ?? exports`（`vendor/loader/src/index.ts:192-199`，调用点 `vendor/loader/src/config/entry.ts:280`）。你一旦写了默认导出，`Config`、`inject`、`name` 就必须挂在那个默认导出的对象上，散在外面的具名导出不再生效。
 
-### 常用的 schema 构造器
+### 构造器就这么十来个
 
 | 写法 | 作用 | 出处 |
 |---|---|---|
@@ -456,7 +458,9 @@ flowchart TD
 
 ## 最贵的坑：patch 换掉的是整块 `config`
 
-patch 的合并算法是**按顶层键整块覆盖**，不是深合并：
+直觉是：patch 里只写一个字段，就只改那个字段。
+
+合并算法不答应。它是**按顶层键整块覆盖**，不是深合并：
 
 ```ts
 // vendor/include/src/index.ts:121-124
@@ -526,7 +530,7 @@ flowchart TD
 
 `applyEntryPatches` 把诊断丢给 `warn` sink（`vendor/include/src/index.ts:110-113`），include 再把这个 sink 接到 loader logger 上（`vendor/include/src/index.ts:267-270`）；README 直接称之为 "a stderr warning"（`packages/boot/app-boot/README.md:43`）。所以 patch 的 id 打错了，你也只会在一堆启动日志里看到一行灰扑扑的提示。
 
-## 完整示例：一个带配置的心跳插件
+## 把全章装进一个心跳插件跑一遍
 
 改编自 `docs/user/develop/basic/index.md:33-85`（插件形状与 `ctx.effect` 清理）与 `docs/user/develop/basic/config.md:11-32`（Config 形状），额外约束仿 `packages/context/time-context/src/index.ts:128-137`。
 
@@ -641,8 +645,16 @@ flowchart TD
 
 如果不是这四种，而是插件干脆没起来，那就回到诊断出口那节按报错认——尤其是 `<name>: pending (waiting for services: ...)`，它意味着配置压根没被求值，问题不在配置本身。
 
-## 一句话带走
+## 把整条链路串起来
 
-**改一次配置 = 卸掉旧实例 + 用新配置装一个新的**，而在装之前，配置要依次穿过 `internal/config` 插值和 schema 校验两道门；两道门都放行、插件却没按你想的跑，那八成是你的字段名从没被任何人读过。
+现在回看整章的结论，每一条都能从链路上重新推出来，推得动才算真懂了：
+
+- `apply` 拿到的配置**永远是完整的、已校验的**——因为 schema 校验和默认值填充卡在 `apply` 之前那道门上；没导出 `Config` 的插件是唯一例外，原样放行；
+- 字段名拼错**零诊断**——因为非 strict 的 `Schema.object` 会把未声明的键原样 merge 进结果，没人读它，也没人替它报警；
+- patch"微调一个字段"会**抹掉兄弟字段连同它们的 `!!js`**——因为合并算法按顶层键整块覆盖，而 `config` 正是顶层键之一；
+- `!!js` 写错位置**恒为 truthy 数据**——因为插值只挂在 `config` 和 `disabled` 两个位置上，别处的表达式节点永远等不到求值那一步；
+- 改配置**不需要写 diff 逻辑**——因为改配置 = 卸旧装新，新实例和冷启动走同一条路，effect 保证卸载不留残渣。
+
+两道门都放行、插件却没按你想的跑，那八成是你的字段名从没被任何人读过。
 
 配置的四层叠加规则见 [03 章](./03-配置的四层结构.md)，waterfall 的完整机制见 [11 章](./11-waterfall专章.md)，effect 为什么能让卸载不留残渣见 [08 章](./08-effect与生命周期.md)。

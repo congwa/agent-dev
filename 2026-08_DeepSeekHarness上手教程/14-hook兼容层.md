@@ -2,19 +2,21 @@
 
 > 基于 `deepseek-ai/deepseek-harness` v0.1.0-rc.5（commit `47f9438`），2026-08-14 核对。
 
-你大概率是带着一份现成的 `hooks.json` 来的——Claude Code 或 Codex 用了很久，里面攒着几条拦 `bash` 的规则、几条编辑后跑格式化的规则，你不想重写。dsh 给了两个桥接插件让它直接跑起来。
+你大概率是带着一份现成的 `hooks.json` 来的——Claude Code 或 Codex 用了很久，里面攒着几条拦 `bash` 的规则、几条编辑后跑格式化的规则。最自然的期待是：dsh 提供兼容层，把文件指给它，一切照旧。
 
-好消息是真能跑，那份文件一个字都不用改。
+前半句成立，后半句不成立。
 
-坏消息是翻译过程中会掉东西：有些事件根本没接，`matcher` 的语义换个桥就变了，`{"continue": false}` 只记录不生效，`permissionDecision: "allow"` 也不能预先批准任何东西。
+文件真的一个字不用改就能跑起来——dsh 给了两个桥接插件专门干这个。但"照旧"是不存在的：有些事件根本没接，`matcher` 的语义换个桥就变了，`{"continue": false}` 只记录不生效，`permissionDecision: "allow"` 也不能预先批准任何东西。
 
-这一章把能跑的部分、走样的部分、以及"到这儿该放弃兼容层直接写插件"的分界线一次讲清楚。
+这一章要立起来的画面就一个：**桥是一台翻译机，它只翻译词汇表里有的词；词汇表外的部分不是配错了，是根本没接。** 沿着这台翻译机从入口走到出口，能跑的、走样的、以及"到这儿该放弃兼容层直接写插件"的分界线，会一路自己冒出来。
 
 ---
 
-## dsh 里根本没有「hook 系统」
+## 第一个误会：`packages/hooks/` 不是 hook 系统
 
-打开仓库看到 `packages/hooks/` 就以为找到了 hook 系统的人不在少数。不是。
+打开仓库看到 `packages/hooks/` 就以为找到了 hook 系统的人不在少数。
+
+不是的。dsh 里压根没有"hook 系统"这个东西：
 
 > The key reframe driving this design is that **"native hooks" are not a package** — a native hook is just an ordinary Cordis plugin subscribing to the canonical lifecycle events.
 > —— `.agents/notes/implemented/feature/2026-06-30-interception-extension-points.md:9`
@@ -23,9 +25,9 @@
 
 重复三遍，是怕你误会。
 
-所以在 dsh 里想往生命周期上插一脚，默认答案永远是前面两章那套：写个插件，监听 `tools/pre-execute` 之类的拦截点，返回一个 typed Decision（事件机制见 [10 章](./10-事件系统.md)，waterfall 拦截点见 [11 章](./11-waterfall专章.md)）。
+**在 dsh 里想往生命周期上插一脚，默认答案永远是写插件**——监听 `tools/pre-execute` 之类的拦截点，返回一个 typed Decision，就是前面两章那套（事件机制见 [10 章](./10-事件系统.md)，waterfall 拦截点见 [11 章](./11-waterfall专章.md)）。
 
-`packages/hooks/` 下那三个包是另一件事。`hook-protocol` 是共享的 shell hook 线协议库，它自己声明得很清楚——"NOT a cordis plugin — it registers nothing and injects nothing"（`packages/hooks/hook-protocol/README.md:5`）。剩下两个才是插件：`hooks-claude-code` 是 Claude Code 方言桥，`hooks-codex` 是 Codex 方言桥。
+那 `packages/hooks/` 下那三个包是什么？`hook-protocol` 是共享的 shell hook 线协议库，它自己声明得很清楚——"NOT a cordis plugin — it registers nothing and injects nothing"（`packages/hooks/hook-protocol/README.md:5`）。剩下两个才是插件：`hooks-claude-code` 是 Claude Code 方言桥，`hooks-codex` 是 Codex 方言桥。
 
 桥存在的理由只有一条：**你已经有一份 `hooks.json` 了，不想重写成插件。** CC 桥的 README 自己就把话说死了，原生插件能做这个桥做的一切，而且更强——有类型化返回、没有序列化边界；桥只是那个被映射子集的兼容通道（`packages/hooks/hooks-claude-code/README.md:7`）。
 
@@ -64,7 +66,7 @@ flowchart TD
 
 ## 先看它真的拦住一次 bash
 
-讲机制之前先看结果。
+讲机制之前先看结果——翻译机到底能不能把"拦截"这个词翻过去。
 
 仓库里有 15 份端到端快照测试跟 hook 有关（`examples/acp-agent/tests/snapshots/hook-cc-*` 与 `hook-codex-*`），每份都自带一个真实 `hooks.json` 工作区。最简单的那份是全文如下的六行（`examples/acp-agent/tests/snapshots/hook-cc-pretool-deny/workspace/hooks.json:1`）：
 
@@ -91,7 +93,7 @@ flowchart TD
 {"type":"tool/result","seq":61,"time":1785730466390,"data":{"turn":1,"step":1,"message":{"source":{"kind":"tool","callId":"call_00_…"},"content":[{"type":"tool-result","toolCallId":"call_00_…","content":[{"type":"text","text":"Error: bash is disabled by policy in this session"}],"isError":true}],"role":"user","id":"e8988570-…"}},"sourceEventSeqs":[58],"surfaceOp":"append"}
 ```
 
-整条链路都在这三行里：`exit 2` 让 stderr 变成 block reason，reason 变成 `PreToolDecision.deny`，工具层再把它包成 `Error: <你的 stderr>` 交给模型（拼这个前缀的代码在 `packages/core/tools/src/index.ts:1494`）。
+整条链路都在这三行里，压成一句话就是：**你的 hook 用 exit 2 说的那句 stderr，会原封不动变成模型读到的那句 `Error: …`。** stderr 变成 block reason，reason 变成 `PreToolDecision.deny`，工具层再把它包成 `Error: <你的 stderr>` 交给模型（拼这个前缀的代码在 `packages/core/tools/src/index.ts:1494`）。
 
 换个视角，是四方各干一件事，按时间排成一条线。
 
@@ -171,9 +173,9 @@ Codex 侧没有这两个，取而代之的是 `model`，一个静态字符串（
 
 `stderrSummaryMaxChars` 是 `hook/result` 里 stderr 摘要的字符上限，默认 500（`hook-protocol/src/events.ts:53`）。填个非正整数会在 `apply()` 一开头就抛错（`index.ts:99` 调用，`:92` 抛）——这是少数几个会让你立刻知道配错了的地方。
 
-### 三个必踩的坑
+### 三个必踩的坑，长在同一个动作上
 
-三个坑长在同一个位置：插件 `apply()` 那一次性的加载动作上。
+这三个坑全长在插件 `apply()` 那一次性的加载动作上：
 
 | 坑 | 后果 |
 |---|---|
@@ -218,9 +220,9 @@ flowchart TD
 
 ---
 
-## 两种方言各接了哪些事件
+## 每个事件点上，hook 有多大话语权
 
-看表之前先记住两个待会儿要反复出现的动作，它们都定义在 `packages/core/agent/src/runtime-types.ts`，差别决定了 hook 能不能改变 agent 的走向：
+看事件表之前先记住两个待会儿要反复出现的动作，它们都定义在 `packages/core/agent/src/runtime-types.ts`，差别决定了 hook 能不能改变 agent 的走向：
 
 | | `agent.inject(msg)` | `agent.steer(msg)` |
 |---|---|---|
@@ -229,7 +231,7 @@ flowchart TD
 | 净效果 | 只是加料 | 把停下来的循环推着再跑一步 |
 | 出处 | `runtime-types.ts:143` | `runtime-types.ts:133` |
 
-派发模式决定了 hook 有多大话语权：能不能被 await，返回值有没有人要。
+真正决定话语权的不是事件名，是拦截点的**派发模式**：能不能被 await，返回值有没有人要。
 
 ```mermaid
 flowchart LR
@@ -266,7 +268,7 @@ flowchart LR
 
 CC 支持 7 个点（`hooks-claude-code/src/config.ts:11` 的 `CLAUDE_EVENTS`），Codex 支持 5 个（`hooks-codex/src/config.ts:11` 的 `CODEX_EVENTS`）。
 
-不在名单里的事件在解析阶段就被丢掉，所以你配了也不会报错——它只是永远不响。这个失败模式最难查，因为一切看起来都正常。
+**不在名单里的事件在解析阶段就被丢掉，配了不报错，只是永远不响。** 这个失败模式最难查，因为一切看起来都正常。
 
 Codex 有一条 CC 没有的路：`SessionStart` 和 `UserPromptSubmit` 的 hook 如果干净退出、且吐的是非 JSON 的纯文本，那段文本直接被当成 `additionalContext`（`hooks-codex/src/index.ts:152`–`:156`）。CC 桥不认纯 stdout，README 明确把它列为未支持（`hooks-claude-code/README.md:90`、`:91`）。
 
@@ -305,7 +307,7 @@ Codex 有一条 CC 没有的路：`SessionStart` 和 `UserPromptSubmit` 的 hook
 
 matcher 拿什么去比，也要看事件。`PreToolUse` / `PostToolUse` 比的是工具名，`SessionStart` 比的是 session source，CC 的 `SubagentStart` / `SubagentStop` 比的是写死的 `general-purpose`（`hooks-claude-code/src/index.ts:304`）。`UserPromptSubmit` 和 `Stop` 没有可比的对象，配置里的 `matcher` 在解析时就被丢弃（CC `config.ts:109`、Codex `config.ts:75`）。
 
-写错正则的后果比想象的重：不是「这条不生效」，而是**整份配置作废**。解析器 `throw new SyntaxError`（`config.ts:113`），桥的 catch 接住之后一个 hook 都不注册。
+**写错正则的后果不是「这条不生效」，而是整份配置作废。** 解析器 `throw new SyntaxError`（`config.ts:113`），桥的 catch 接住之后一个 hook 都不注册。
 
 仓库里专门有这个场景的快照，`hook-cc-invalid-matcher/workspace/hooks.json:12` 那个孤零零的 `"["`，把同文件里第 3–9 行那条本该生效的 `UserPromptSubmit` 也一起带走了。
 
@@ -330,7 +332,9 @@ hook 进程本身走 `ctx.shell`（`inject = ['shell']`，`index.ts:42`），所
 
 ---
 
-## 从退出码到 typed Decision
+## decision 有两条通道，走错的那条静默失效
+
+hook 进程说完话，桥要把退出码和 stdout / stderr 翻译回 typed Decision。流水线长这样：
 
 ```
 hook 进程
@@ -359,7 +363,7 @@ hook 进程
 | 其它 | 非阻塞错误，只留在记录里 |
 | `undefined` | 进程被信号打死（`runner.ts:91`），或执行器基础设施故障——`runHook` **永不抛**，转成一条无 exitCode 的非阻塞错误（`runner.ts:96`） |
 
-结构化 stdout 里有两条互不相同的 decision 通道，这是整章最容易配错的地方。
+结构化 stdout 里有两条互不相同的 decision 通道，**这是整章最容易配错的地方**。
 
 顶层 `decision` 的合法值**只有** `approve` 和 `block`，你写 `{"decision":"deny"}` 会被当成无效值静默忽略（`codec.ts:38`）。精细权限得走 `hookSpecificOutput.permissionDecision`，合法值是 `allow` / `deny` / `ask`（`codec.ts:43`），而且它**覆盖**顶层 decision（`codec.ts:126`）。
 
@@ -416,9 +420,9 @@ flowchart TD
 | `ask` | — | CC：`{ kind:'ask' }`；Codex：无此路径 | — | — |
 | `allow` / `none` | `next()` | `next()` | `next()` | 不动 |
 
-`allow` 那一格要看仔细。桥**从不返回** `PreToolDecision` 的 `{ kind: 'allow' }`——该分支确实存在（`packages/core/tools/src/index.ts:589`），桥只是 `return next()` 继续往下走。
+`allow` 那一格要看仔细，这是本章的第一道验收题：**桥从不返回 `PreToolDecision` 的 `{ kind: 'allow' }`**——该分支确实存在（`packages/core/tools/src/index.ts:589`），桥只是 `return next()` 继续往下走。
 
-也就是说 CC hook 里写 `permissionDecision: "allow"` 不能预先批准任何东西，后面的 guard 和审批照旧拦（`hooks-claude-code/README.md:92`）。想预批准，只能写原生插件。
+也就是说 CC hook 里写 `permissionDecision: "allow"` 不能预先批准任何东西，后面的 guard 和审批照旧拦（`hooks-claude-code/README.md:92`）。"allow"在翻译机的词汇表里对应的不是"放行"，是"不拦"。想预批准，只能写原生插件。
 
 hook 没给 reason 时的兜底文案有三条，分别是 `blocked by PreToolUse hook`、`blocked by PostToolUse hook`、`continue: blocked by Stop hook`（`index.ts:241`、`:252`、`:274`）。
 
@@ -475,7 +479,7 @@ flowchart TD
     class R1,R0 entry
 ```
 
-reason 只收胜出档位这条有实际用处：有人 deny 时，ask 的理由不会混进去，免得模型收到互相矛盾的解释。
+一句话立住：**最严的档位胜出，且 reason 只收胜出档位的。** 这条有实际用处——有人 deny 时，ask 的理由不会混进去，免得模型收到互相矛盾的解释。
 
 `systemMessage` 虽然被累积下来了，但两个桥都只是打条 warn，压根不呈现给模型（CC `index.ts:178`、Codex `index.ts:161`）。
 
@@ -516,7 +520,7 @@ else:                      decision = 'pass'
 
 ## 什么时候该扔掉桥，直接写插件
 
-README 把损失列得很完整，这里挑最会咬人的说。边界画出来是这样，右边那几格不是配错了，是根本没接。
+README 把损失列得很完整，这里挑最会咬人的说。边界画出来是这样——**右边那几格不是配错了，是翻译机的词汇表里根本没有这些词**：
 
 | 能力 | 经桥 | 原生插件 |
 |---|---|---|
@@ -638,8 +642,17 @@ Codex 侧结构对称：换成 `@deepseek-ai/dsh-hooks-codex`，另起一个 `co
 
 ---
 
-## 一句话带走
+## 把整章串起来
 
-**桥能让你的 `hooks.json` 一个字不改就跑起来，但它只是那个被映射子集的兼容通道——超出子集的部分（预批准、改写输出、continue:false、循环护栏）不是配错了，是根本没接。**
+回头把翻译机从入口走到出口，每一站的结论都能重新推一遍，推得动才算真懂了：
+
+- 桥之所以能存在，是因为 **dsh 里原生 hook 本来就只是普通插件**——桥无非是把"外部进程说话"翻译成"插件返回 Decision"的一层，原生插件不需要这层翻译；
+- deny 之所以真能拦住工具，是因为对应的拦截点是 **waterfall 派发，返回值就是 typed Decision**；同理，emit 点 detached 没人 await，所以 `SessionStart` 拦不住任何东西；
+- `allow` 之所以不预批准，是因为**桥从不返回 `{ kind: 'allow' }`**，它把 allow 翻译成"不拦"，后面的 guard 和审批照旧；
+- `continue:false`、`systemMessage`、`updatedInput` 之所以没反应，不是配错，是**词汇表里没接这些词**——TODO 还挂在源码里；
+- 排查永远从日志开始，因为**所有加载期失败都是静默的**：路径错、JSON 坏、正则非法（整份作废）、事件不在名单，全都不报错、不提示，只在日志里留一行 warn 或什么都不留；
+- 日志里查不到 `hook/*` 也未必是没跑——**detached 点没有 turn 可挂，本来就不写这对事件**。
+
+最后一句带走：**桥能让你的 `hooks.json` 一个字不改就跑起来，但它只是那个被映射子集的兼容通道——超出子集的部分（预批准、改写输出、continue:false、循环护栏）不是配错了，是根本没接。**
 
 ---

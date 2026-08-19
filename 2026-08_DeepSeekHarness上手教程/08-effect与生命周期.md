@@ -2,17 +2,19 @@
 
 > 基于 `deepseek-ai/deepseek-harness` v0.1.0-rc.5（commit `47f9438`），2026-08-14 核对。
 
-Cordis 里最需要"想通"的机制只有一条：**注册即 effect，卸载即逆序回滚**。
+最常见的误解是：插件装上去就一直在，`apply` 只会跑一次，清理代码属于"好习惯，不写也无妨"。
+
+不是的。在 dsh 里，改一行配置、依赖的服务换了实现、HMR 保存文件、把一条 entry 标成禁用——任何一件都会让当前插件实例被卸载、再装一个新的。`apply` 会被反复执行，而每次执行留下的东西，必须有人负责撤销。
+
+负责撤销的机制只有一条规则，也是全章唯一要立的柱子：**注册即 effect，卸载即逆序回滚**。
 
 想通了，热重载、失败回滚、依赖换实现自动重启这几件事就都不是特性，而是同一条规则的推论。没想通，你写的插件会在第三次热重载之后开始行为诡异，而且查不出来。
 
-这一章要建立的直觉是一句话：**你在插件里做的每一次注册，框架都会在卸载时替你撤销**——前提是这次注册确实交到了框架手上。
-
-哪些交到了、哪些没有、怎么把没交的补上，就是全章内容。顺带回答两个具体问题：给 effect 起 `label` 到底值不值，以及 dsh 里 HMR 实际开到了哪一层。
+换成对你有直接约束的说法：**你在插件里做的每一次注册，框架都会在卸载时替你撤销——前提是这次注册确实交到了框架手上。** 哪些交到了、哪些没有、怎么把没交的补上，就是全章内容。顺带回答两个具体问题：给 effect 起 `label` 到底值不值，以及 dsh 里 HMR 实际开到了哪一层。
 
 ---
 
-## 一个每秒漏一个定时器的插件
+## 先看一个坏插件：每秒漏一个定时器
 
 假设你要写个心跳插件，每秒打一行日志：
 
@@ -22,11 +24,9 @@ export function apply(ctx: Context) {
 }
 ```
 
-这个插件在 dsh 里是**坏的**。
+这个插件在 dsh 里是**坏的**——不是"不够优雅"，是真的会出 bug。
 
-坏在哪，取决于你有没有意识到插件不是只装一次。改一行配置、依赖的服务被换掉、HMR 保存文件、把这条 entry 标成 `disabled: true`，任何一件都会让当前实例被卸载、再装一个新的。
-
-上面那个 `setInterval` 没人认领，卸载之后它照跑不误。装十次，十个定时器一起打日志。（`disabled: true` 的写法见 `docs/cordis-tutorial/06-composition-and-hmr.md:19`。）
+回想开头那句话：插件不是只装一次。改一行配置、依赖被换掉、HMR 保存文件、把这条 entry 标成 `disabled: true`，当前实例就被卸载重装了。可上面那个 `setInterval` 没人认领，卸载之后它照跑不误。装十次，十个定时器一起打日志。（`disabled: true` 的写法见 `docs/cordis-tutorial/06-composition-and-hmr.md:19`。）
 
 插一句 `ctx.logger` 的来历：它不用装插件就有，Cordis 建 root context 时就挂上了 `LoggerService`。但**日志能不能被你看见**是另一回事，取决于有没有 exporter——纯 Cordis 环境下要另配 `@deepseek-ai/cordis-plugin-logger-console`。出处：`vendor/cordis/src/context.ts:81`、`logger.ts:191`；exporter 见 `docs/cordis-tutorial/06-composition-and-hmr.md:42`。
 
@@ -49,7 +49,7 @@ export function apply(ctx: Context) {
 
 ## `ctx.effect()` 到底承诺了什么
 
-先说个容易误会的实现细节：`ctx.effect` 并不是 Context 自己实现的方法，它转发到当前 fiber 上。
+先拆一个容易误会的实现细节：`ctx.effect` 并不是 Context 自己实现的方法，它转发到当前 fiber 上。
 
 类型侧是 `Context extends Pick<Fiber, 'effect'>`，真正做转发的是一句 mixin：`this.mixin('fiber', ['runtime', 'effect'])`。对应 `vendor/cordis/src/fiber.ts:10`、`vendor/cordis/src/reflect.ts:220`，实现在 `vendor/cordis/src/fiber.ts:418`。
 
@@ -89,7 +89,7 @@ ctx.effect(function* (this: AgentRegistry) {
 
 **这里最容易踩的一脚**是想当然地以为"effect 里做的事都归这个 effect 管"。
 
-不是。在 effect body 里调 `ctx.on()` 之类的注册，那个监听器仍然挂在 **fiber** 上，并不会自动变成这个 effect 的子资源。只有被 `yield` 或 `return` 出来的 disposer 才会被 effect 接管。
+不是。在 effect body 里调 `ctx.on()` 之类的注册，那个监听器仍然挂在 **fiber** 上，并不会自动变成这个 effect 的子资源。柱子在这里要加一句限定：**只有被 `yield` 或 `return` 出来的 disposer 才会被 effect 接管，其余的原地留在 fiber 名下。**
 
 搬家动作叫 `collect`，做的事大致是：
 
@@ -137,7 +137,7 @@ flowchart TD
     class D2 note
 ```
 
-这条机制有两个真实用法。
+这条"搬家"机制不是冷知识，仓库里有两个真实用法。
 
 一是**改所有权以控制顺序**。`packages/schedule/schedule/src/index.ts:69`–`75` 的 disposer 里**手动**调了 `stopCreated()`——也就是第 45 行 `ctx.on('agent/created', …)` 的返回值——因为它要求先停止接新 agent、再逐个拆已建的 runtime，就必须自己攥住这个句柄。
 
@@ -147,7 +147,7 @@ flowchart TD
 
 ## 返回 disposer 的 API，本身就是 effect
 
-判据很简单：**一个 API 返回 disposer，它就已经是 effect**，你不用为它写清理代码。
+那是不是所有注册都得自己包 `ctx.effect()`？也不是。判据很简单：**一个 API 返回 disposer，它就已经是 effect**，你不用为它写清理代码。
 
 这张表值得记住，因为它决定了你什么时候可以偷懒：
 
@@ -197,7 +197,9 @@ dsh 自己在 boot 路径上就处理了这个竞态——显式判 `error.code 
 
 ---
 
-## fiber 的六个状态，和卸载的两种顺序
+## 谁来决定卸载：fiber 的六个状态，和一串 uid
+
+前面一直在说"卸载时"，现在回答：卸载是**谁**、在**什么时候**触发的。
 
 一个 fiber = 一个已加载的插件实例。状态枚举顺序是 `PENDING, LOADING, ACTIVE, FAILED, DISPOSED, UNLOADING`（`fiber.ts:147`–`154`）。
 
@@ -242,7 +244,7 @@ on provider 变化:                       # reflect.notify() 通知过来
 
 某个依赖消失 → epoch 变成 `INACTIVE` → `_unload()`；依赖回来 → epoch 变了 → `_reload()`（`fiber.ts:625`–`639`）。
 
-注意即使服务名一个字没变，**换了一个实现**也算变——新 provider 是新 fiber，新 uid，epoch 字符串跟着变，所有依赖它的插件全部卸载重装。触发者是 `reflect.notify()`（`reflect.ts:314`–`336`）。
+验收题来了：服务名一个字没变，只是**换了一个实现**，依赖它的插件动不动？动。新 provider 是新 fiber，新 uid，epoch 字符串跟着变，所有依赖它的插件全部卸载重装。触发者是 `reflect.notify()`（`reflect.ts:314`–`336`）。这就是开头说"依赖换实现自动重启是推论"的推导过程——框架根本没有"重启"这个特性，它只有"epoch 变了就拆了重装"这一条规则。
 
 ```mermaid
 flowchart TD
@@ -270,7 +272,9 @@ flowchart TD
     class S,PEND note
 ```
 
-卸载顺序有两条规则必须分清，混起来会写出很难复现的 bug：
+## 卸载的两种顺序：横着并发，竖着串行
+
+"逆序回滚"四个字里藏着一个容易写出诡异 bug 的细节：逆序有两层，**两层的并发性完全不同**。
 
 ```
 # 第一层：一个 fiber 的所有 effect 之间 —— 逆注册序，但并发
@@ -311,7 +315,7 @@ flowchart TD
     class T note
 ```
 
-结论就是：顺序敏感的清理必须收进**同一个 effect**。generator 里 `yield` 出的多个 disposer 可以，写成一个 disposer 在里面自己 `await` 也可以，两种都拿得到串行保证。
+从这张图能直接推出本节的不变量：**顺序敏感的清理必须收进同一个 effect**。generator 里 `yield` 出的多个 disposer 可以，写成一个 disposer 在里面自己 `await` 也可以，两种都拿得到串行保证。
 
 官方两处给的是更保守的后一种说法——"放进单个 `ctx.effect()` 返回的同一个 disposer 里，在那里串行 await"（`docs/user/develop/framework/index.md:63`、`docs/cordis-primer.md:44`）。
 
@@ -323,7 +327,7 @@ flowchart TD
 
 把上面的规则用一次。
 
-下面这个插件同时持有一个定时器和一个事件订阅，并且**卸载时要求先摘监听、再落盘**——所以这两件事写进同一个 disposer。定时器和它没有顺序关系，单独一个 effect 就行。
+下面这个插件同时持有一个定时器和一个事件订阅，并且**卸载时要求先摘监听、再落盘**——按刚才的不变量，这两件事必须写进同一个 disposer。定时器和它没有顺序关系，单独一个 effect 就行。
 
 ```ts
 // heartbeat.ts
@@ -413,7 +417,7 @@ flowchart TD
 
 **错误跑哪去了？** 进 logger，不会炸进程。想主动拿到它，`await fiber.await()`——它会把 `_error` 重新抛出来（`fiber.ts:704`–`710`）。
 
-那什么时候还需要你手写回滚？当那批 disposer 还攥在你自己手里、没交给 fiber 的时候。
+那什么时候还需要你手写回滚？当那批 disposer 还攥在你自己手里、没交给 fiber 的时候——又回到了柱子的那句前提："这次注册确实交到了框架手上"。
 
 `packages/api/remotes/src/client/index.ts:107`–`116` 是标准形状：async `apply` 里逐个 `$mount`，中途失败就 `for (const dispose of disposers.reverse()) await dispose()` 再 rethrow。
 
@@ -569,9 +573,19 @@ expect(ctx.fiber.getEffects().map(effect => effect.label)).toContain('store.orde
 
 ---
 
-## 一句话带走
+## 把柱子重新立一遍
 
-**在 Cordis 里，"注册"和"撤销注册"是同一次调用的两端**——`ctx.effect()` 让你把释放逻辑写在获取逻辑旁边，框架负责在卸载时逆序执行它。
+全章只有一根柱子：**注册即 effect，卸载即逆序回滚**。收尾把每个结论从它推一遍，推不出来的那条就回去重读对应的画面：
+
+- 泄漏定时器的画面 → 插件不是只装一次，所以 **Cordis 管不到的资源必须包进 `ctx.effect()`**，把获取和释放写在一起；
+- collect 的画面 → "交到框架手上"有精确定义：**只有被 `yield` / `return` 出来的 disposer 归 effect 管**，body 里顺手 `ctx.on()` 的仍挂在 fiber 名下；
+- 返回 disposer 的 API 表 → 框架已经替你包好的那批，不用再包一层——除非你要改所有权或改标签；
+- `apply` 走同一套分发 → 插件启动函数本身就是 effect body，直接 return disposer 也算"交到框架手上"；
+- epoch 的画面 → 卸载由一串 provider uid 驱动，**换实现也算变**，所以"依赖换实现自动重启"不是特性是推论；
+- 两层卸载顺序的画面 → 逆序回滚横着并发、竖着串行，所以**顺序敏感的清理必须收进同一个 effect**；
+- 抛错三条路 → 交给框架的部分要么整体成立要么什么都不留；**还攥在自己手里的 disposer，回滚也得自己写**；
+- HMR 的画面 → 卸载退得干净，"卸载 + 重新加载"就等于替换；但 dsh 里 web / headless 只盯 patch 层，改插件源码得重启，改框架自身被静默忽略；
+- `label` → 排障那一刻你看到的是一串 effect 名字，全叫 `anonymous` 的输出等于没有。
 
 凡是绕开这个约定拿到的资源（裸 `setInterval`、裸连接、自己攥着的句柄），都得你自己在卸载路径上补一遍，否则热重载十次就漏十份。
 

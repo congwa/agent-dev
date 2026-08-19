@@ -2,7 +2,9 @@
 
 > 基于 `deepseek-ai/deepseek-harness` v0.1.0-rc.5（commit `47f9438`），2026-08-14 核对。
 
-到目前为止你写的插件只有你自己能跑。原因很具体：挂载它的那行配置里写着一个绝对路径，换台机器就断了。
+到目前为止你写的插件只有你自己能跑。你可能觉得发布很简单：把那个 `.ts` 文件发给别人，再让对方照抄你那行挂载配置。
+
+不是的。那行配置里写着一个**你硬盘上的绝对路径**，换台机器就断了。对方就算拿到文件，还得知道该放进哪个目录、改成什么路径——这不叫发布，叫口口相传。
 
 这一章从头攒一个能发布的组合，把那个绝对路径消掉，让别人 `dsh plugin --profile <name> add` 一句话就装上。
 
@@ -12,7 +14,7 @@
 
 ## bundle 是你写的，profile 是用户启动的
 
-先把三个最容易混的词钉死，后面每一节都建立在它们的分工上。
+动手之前先把三个最容易混的词钉死，后面每一节都建立在它们的分工上。
 
 官方教程那句话说得很干脆：bundle 是你写的、profile 是用户启动的，**Nothing is both**。
 
@@ -49,6 +51,8 @@ flowchart LR
 | **profile** | 一份可启动的组合 | 目录位置 + 目录里有 `package.json`；`dsh.profile.bundles` 决定它组合哪些 bundle | `$DSH_HOME/profiles/<name>/` |
 
 出处：那句 Nothing is both 见 `docs/user/develop/basic/publish.md:13-16`；bundle 的识别条件见 `apps/cli/src/plugin.ts:44`。
+
+这张表里最值得盯住的一格是"识别方式"那列：**bundle 的身份只系在 `dsh.bundle.patch` 一个字段上**。整章的所有机制——加载、安装、同步、报错——最后都能追回这一个字段。
 
 profile 那一格的门槛比想象中低。`loadProfile` 只要求目录里有 `package.json`，`dsh` 段整个缺失也不报错，bundles 按空列表处理（`packages/boot/app-boot/src/profile.ts:386-387`）。手写一个 profile manifest 是完全可以的。
 
@@ -92,7 +96,7 @@ pnpm dsh web --patch ./scratch-plugin/cordis.yml
 
 ## 三个文件换掉那个路径
 
-一个 bundle 就是三个文件（`docs/user/develop/basic/publish.md:26-31`）：
+怎么消？答案已经埋在第一节那张表里：bundle 靠 `dsh.bundle.patch` 被识别。所以一个 bundle 就是三个文件（`docs/user/develop/basic/publish.md:26-31`）：
 
 ```
 hello-plugin/
@@ -132,7 +136,7 @@ export function apply() {
       name: dsh-hello-plugin
 ```
 
-绝对路径没了，位置上换成了**包名**，剩下的交给 Node 的模块解析。就这么点事。
+对照上一节：绝对路径没了，位置上换成了**包名**，剩下的交给 Node 的模块解析。就这么点事。
 
 ### `dsh.bundle.patch` 到底是怎么被读的
 
@@ -323,13 +327,15 @@ flowchart TD
 
 之所以要绕这一圈，是因为启动器完全不认识 `--resume` 这类 flag。它只解析自己的旗标，遇到第一个不认识的 token 之后全部原样交给被启动的 profile（`apps/cli/src/args.ts:8-11`、`apps/cli/reference/README.md:17`）。
 
-app 参数不是第四层 patch，它得靠服务传进来。
+**app 参数不是第四层 patch，它得靠服务传进来。**
 
 ---
 
 ## `dsh plugin` 其实是 pnpm 的转发器
 
-一条 `add` 命令的全程是这个形状：初始化、转发、按结果决定要不要回写那张表。
+你可能以为 `dsh plugin` 背后有一套自己的插件安装逻辑。没有——它连"安装"这件事都不做，装包的全程是 pnpm 的，dsh 只做初始化、转发、以及按结果决定要不要回写那张 bundles 表。
+
+一条 `add` 命令的全程是这个形状：
 
 ```mermaid
 flowchart TD
@@ -373,7 +379,7 @@ if code == 0: reconcile()                // 非 0 一律不回写 bundles
 
 因为是原样转发，`add` / `remove` / `why` / `update` 这些 pnpm 动词都能直接用（`apps/cli/src/args.ts:175`、`apps/cli/reference/README.md:43`）；pnpm 不在 PATH 上会直接退 127 并给提示（`apps/cli/src/plugin.ts:136-138`）。
 
-reconcile 的口径是关键：它按**安装后的实际状态**算，不按命令行参数 diff。
+reconcile 的口径是本节的柱子：**bundles 表按安装后的实际状态重算，不按命令行参数 diff。**
 
 ```
 for pkg in 安装后的 dependencies:
@@ -391,7 +397,7 @@ dsh: warning: <pkg> declares no dsh.bundle — installed as a plain dependency, 
 
 反过来，依赖被删了、或者新版本拿掉了 `dsh.bundle`，那一层自动退出。
 
-两个顺带的推论：`update` 到一个新增了 `dsh.bundle` 的版本会自动激活它；而模板自带的 in-box bundle 不是 dependency，永远不会被摘掉。
+从"看实际状态"这条口径能直接推出两个结论：`update` 到一个新增了 `dsh.bundle` 的版本会自动激活它（状态变了，重算就看见了）；而模板自带的 in-box bundle 不是 dependency，不在遍历范围里，永远不会被摘掉。
 
 出处：整段 reconcile 在 `apps/cli/src/plugin.ts:59-91`，告警文案 `:71-74`，退出逻辑 `:77-87`，自动激活 `apps/cli/src/plugin.ts:7-9`，in-box 不被摘 `:79-81`。
 
@@ -462,11 +468,11 @@ flowchart TD
 
 `cordis.yml` 值得单独说一句，因为它长得像"主配置文件"，很容易被当成该改的地方。
 
-它**每次启动都被覆盖**成空列表，文件头上就写着 "Edit cordis.patch.yml, not this file"。
+不是的。**它每次启动都被覆盖**成空列表，文件头上就写着 "Edit cordis.patch.yml, not this file"。在这个文件里写东西等于白写。
 
 之所以还要在磁盘上留这么个空文件，是 loader 需要一个真实的 include root 来把 `baseUrl` 锚在 profile 目录；之所以每次重写，是 Loader 的 tree write-back 有可能把已经组合出来的行倒灌回文件，下次启动就会把每条 bundle insert 复制一遍。
 
-在这个文件里写东西等于白写。出处：覆盖逻辑 `apps/cli/src/profile-boot.ts:98-103`，那句提示 `:60-64`，重写理由 `:88-93`。
+出处：覆盖逻辑 `apps/cli/src/profile-boot.ts:98-103`，那句提示 `:60-64`，重写理由 `:88-93`。
 
 `initProfile` 的三个文件都是 `if (!existsSync)` 才写，重复跑是幂等的（`packages/boot/app-boot/src/profile.ts:152-168`）。
 
@@ -479,6 +485,8 @@ dsh: profile "tui" does not exist; create it with 'dsh plugin --profile tui add 
 ---
 
 ## 名字是怎么被找到的
+
+profile 的 `bundles` 里既有你 pnpm 装进去的外部包，也有 `@deepseek-ai/dsh-base` 这种压根没装过的 in-box 包。同一张表里的名字，凭什么都能解析出来？答案分两层。
 
 ### bundle 名：先问安装目录，再问 profile 目录
 
@@ -642,7 +650,14 @@ README 这块有个可以蹭的现成结构。仓库对**自己的** workspace �
 
 **bundle 是"包名 + 一层 patch"，profile 是"一份 bundles 顺序表"，`dsh plugin` 只是个把 pnpm 装出来的实际状态反向同步进这张表的转发器。**
 
-你要做的全部工作，就是让 `package.json` 里有 `dsh.bundle.patch`、让 `files` 带上那个 patch 文件、让 patch 的顶层是个数组。
+这句话不用背，每一截都能从前面的画面重新推出来。自己试一遍，推不动就回去重读那一节：
+
+- 从"识别方式"那张表推：bundle 的身份只系在 `dsh.bundle.patch` 一个字段上，所以三个文件（`package.json` / patch / 入口模块）就是一个完整 bundle，`--patch` 时代的绝对路径被包名顶掉了；
+- 从加载链推：`patch` 是相对包根的普通文件路径、不走 `exports`，所以 `files` 必须带上它——漏了就是"本地能跑、发布装上就炸"；它又是必需 overlay，所以顶层必须是数组，什么都不想做就写 `[]`；
+- 从覆盖的判定树推：`config` 整体替换不深合并，所以改别人的行要整行重写；同一条规则反过来保障了用户能整行覆盖你，不用碰你的包；
+- 从转发器画面推：bundles 表按安装后的实际状态重算，所以 `update` 出来的新 bundle 自动激活、被删的层自动退出，而 in-box bundle 不是 dependency、永远不会被摘；
+- 从两级锚点推：in-box bundle 永远来自正在运行的这个 dsh，所以你可以放心假定 `@deepseek-ai/dsh-base` 在、且版本对得上；
+- 从"每次启动重写 `cordis.yml`"推：用户层想留下东西，只有 `cordis.patch.yml` 一个落点。
 
 下一章讲 [headless 与 SDK](./23-headless与SDK.md)，那是本章 surface bundle 那一节的完整展开。
 

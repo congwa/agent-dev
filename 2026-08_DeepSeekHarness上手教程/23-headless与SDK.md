@@ -4,11 +4,13 @@
 
 假设你要把 dsh 接进一条 CI 流水线。那里没有浏览器，没人守在屏幕前点"同意"，作业成没成只能靠退出码判断。
 
-这一章讲的就是不开 Web UI 的四条路——一次性 CLI、JSON-RPC 运行时、Python SDK、ACP——外加把整棵插件树 `boot()` 进自己的 Node 程序，以及 `BENCHMARK.md` 认可的批量评测跑法。
+最容易带进来的误解是：headless 就是"少开一个窗口的同一个 dsh"——权限照旧、输出照旧、审批弹窗只是没地方显示而已。
 
-有一件事最好现在就知道：headless 这条路上**没有人能回答审批请求**。这不是配置疏忽，是 bundle 的定义使然。下面第二节会说清楚它的来龙去脉。
+不是的。不挂 UI 改变的不只是画面。审批链条从定义上断了一半——headless 这条路上**没有人能回答审批请求**，这不是配置疏忽，是 bundle 的定义使然，下面会说清它的来龙去脉。输出也变了性质：你拿到的不是"对你这条 prompt 的回答"，而是另一种东西，这一点会在四条路里反复出现。
 
-## 四条路各自解决什么问题
+四条路是：一次性 CLI、JSON-RPC 运行时、Python SDK、ACP。外加把整棵插件树 `boot()` 进自己的 Node 程序，以及 `BENCHMARK.md` 认可的批量评测跑法。
+
+## 四条路，先分清 stdout 归谁
 
 | 路 | 入口 | 进程形态 | stdout 是什么 | 谁驱动回合 |
 |---|---|---|---|---|
@@ -52,7 +54,7 @@ JSON-RPC 在这里就是"一行一条 JSON 消息"的远程调用约定：请求
 
 Python SDK 的 stdout 归你的脚本管，但它 spawn 的正是 JSON-RPC 那条运行时，铁律照样压在头上。
 
-## 一次性跑完：`dsh --profile headless`
+## 一次性 CLI：整场运行折叠成一行文本、一个退出码
 
 最小命令就一行：
 
@@ -72,11 +74,11 @@ pnpm dsh --profile headless "fix the failing test in this workspace"
 
 `headless` profile 首次使用会从内置模板自动初始化，层是 base + headless（`apps/cli/reference/README.md:13`）；调用目录就是默认 workspace 根（`apps/cli/README.md:16`）。
 
-### runner 做的九件事
+### runner 有九步，值得停下的只有"记 seq"那一步
 
 一句话：等插件树 settle → 建会话 → **记下 seq 起点** → 把任务丢进去 → 等静默 → flush 再读 → 折叠出结论 → 打印 → 退出。
 
-九步里只有第三步值得停下来看，其余都是模板。那个 seq 圈起来的中间那段，就是本章反复要用的自有区间。
+记 seq 这个动作，相当于在监控录像带上掐一个时间码：从这一刻起新增的画面，全算"这一次的"。这个被时间码圈起来的段落，本章统一叫**自有区间**——后面每条路都会再遇到它。
 
 主流程是 `packages/bundle/headless/src/index.ts` 的 `run()`，第 96–134 行，读起来没什么弯弯绕。
 
@@ -111,7 +113,7 @@ flowchart TD
 
 接着通过 core registry 建一个全新的持久化会话，id 形如 `session-<uuid>`，cwd 取进程当前目录。
 
-真正的关键在第三步：先 `whenIdle()`，再记下 `agent.session.seq`。这个 seq 是本章后面反复要用的**自有区间**的起点。
+真正的关键在第三步：先 `whenIdle()`，再记下 `agent.session.seq`。时间码就是在这里掐下的。
 
 任务作为一条普通 user message 提交上去，然后等到整个 agent 静默，先 `sessions.flush()` 落盘再读，最后把从起点 seq 到此刻的全部新增事件折叠成一个结论。
 
@@ -146,7 +148,19 @@ for e in 区间内的事件:
 
 另外这层 patch 关掉了 HMR 行（`packages/bundle/headless/cordis.patch.yml:14-15`），并把 persona 换成 coding agent 模板（`:7-10`）。退出码和信号语义在 [02 章](./02-五分钟跑起来.md)已经展开过，这里不重复。
 
-### 它不挂什么，比它挂了什么更值得记
+### 验收题：stdout 打出的那行，一定是回答你的吗
+
+监控录像的比喻能直接推出答案：录像里出现的不止你。掐了时间码之后，凡是新增进画面的都算区间内——有 steering（回合进行中插进去的用户输入）、注入上下文或后台活儿的时候，"区间里最后一条非空 assistant 文本"完全可能是回应别的东西的那句。
+
+README 把这条列进了已知限制：runner 会等完 Agent 在这段区间里干的所有活儿，再打最后一条（`packages/bundle/headless/README.md:19`）。
+
+**结果永远是"区间的末条"，不是"对你这条 prompt 的回答"**——这是本章第一根柱子，后面 Python SDK 那边会换个壳再撞上它一次。
+
+第二个坑在启动方式上。`ctx.appExit` 是 launcher 提供的，**不通过 `dsh` 启动器去 boot headless profile，会在激活期直接抛**（`packages/bundle/headless/src/index.ts:144-147`、`packages/bundle/headless/README.md:20`）。它具体从哪来，最后一节讲 `boot()` 时会交代。
+
+顺带澄清一件容易认错的事：`examples/headless-agent/` **不是第二个产品入口**，它是 replay/real-model 的测试组合，其 JSONL 事件流是测试基建，不是受支持的 CLI 输出格式（`examples/headless-agent/README.md:5`、`:18`）。
+
+### 审批断的不是服务，是应答的人
 
 headless bundle 的 README 开门见山：
 
@@ -159,7 +173,7 @@ base bundle 确实挂了审批服务，policy 默认是 `ask`（`packages/bundle
 
 于是每一次需要审批的操作都会 fail closed 成 `unavailable`（`packages/interaction/user-approval/README.md:5`），模型收到的是 "no approval channel is available"。
 
-把这条断掉的链子摊开看，缺的不是服务，是应答的人：
+把这条断掉的链子摊开看：
 
 ```mermaid
 flowchart TD
@@ -191,19 +205,9 @@ flowchart TD
 
 在 CI 里的实际含义就一句：**别指望模型能靠审批拿到额外权限，需要什么就在配置里事先给足**。
 
-### 两个坑
+## JSON-RPC 运行时：回合的方向盘交到你手上
 
-第一个坑在 `summarize()` 的语义上。它取的是"这段区间里最后一条非空 assistant 文本"，**不是**"对你这条 prompt 的回答"。
-
-README 把这条列进了已知限制：runner 会等完 Agent 在这段区间里干的所有活儿，再打最后一条（`packages/bundle/headless/README.md:19`）。有 steering（回合进行中插进去的用户输入）、注入上下文或后台活儿的时候，打出来的可能不是你以为的那句。
-
-第二个坑在启动方式上。`ctx.appExit` 是 launcher 提供的，**不通过 `dsh` 启动器去 boot headless profile，会在激活期直接抛**（`packages/bundle/headless/src/index.ts:144-147`、`packages/bundle/headless/README.md:20`）。它具体从哪来，最后一节讲 `boot()` 时会交代。
-
-顺带澄清一件容易认错的事：`examples/headless-agent/` **不是第二个产品入口**，它是 replay/real-model 的测试组合，其 JSONL 事件流是测试基建，不是受支持的 CLI 输出格式（`examples/headless-agent/README.md:5`、`:18`）。
-
-## JSON-RPC 运行时长什么样
-
-### 起进程，以及怎么体面地停
+### 起进程只有两个通道，停进程却有四个门
 
 bin 叫 `dsh-jsonrpc-agent`（`packages/examples/jsonrpc-demo/package.json:16-18`）。配置发现只有两个通道，**env 赢**，而且**没有任何内建兜底**：
 
@@ -254,7 +258,7 @@ flowchart TD
     class D,X0,X130 main
 ```
 
-### 三个请求，四个通知
+### 协议全貌：三个请求，四个通知
 
 一帧 = 一行紧凑 JSON，`\n` 结尾；带 `id`+`method` 是请求，只有 `id` 是响应，只有 `method` 是通知；坏 JSON 行被忽略（`packages/sdk/protocol/README.md:9`）。
 
@@ -286,9 +290,13 @@ flowchart TD
 {"method":"session.status","params":{"sessionId":"{{sessionId}}","status":"running"}}
 ```
 
-### 三条语义决定了你的客户端怎么写
+### messageId 是挂号小票，不是诊断结果
 
-**`session/prompt` 只返回入队回执。** `messageId` 标识排进 inbox 的那条 `UserMessage`，**不**标识后面的某条 assistant 消息、某次 turn 结束或某个 prompt 结果（`packages/sdk/protocol/README.md:25`、`packages/sdk/server/README.md:25`、`:46`）。
+写客户端之前最想问的问题是：`session/prompt` 的响应回来了，是不是就拿到结果了？
+
+不是。**`session/prompt` 只返回入队回执。** `messageId` 标识排进 inbox 的那条 `UserMessage`，**不**标识后面的某条 assistant 消息、某次 turn 结束或某个 prompt 结果（`packages/sdk/protocol/README.md:25`、`packages/sdk/server/README.md:25`、`:46`）。
+
+它就是医院前台的挂号小票：只证明你排上了号，不证明医生看完了你。看没看完，得自己盯着叫号屏。这直接推出第二条语义——
 
 **"一次运行"的区间边界得你自己定义。** 官方 Python 客户端的做法写成循环是这样：
 
@@ -302,7 +310,7 @@ for n in 收到的通知:
         break                                 // 认这条为终点，收束本次运行
 ```
 
-起点判定见 `python/sdk/src/deepseek_harness/api.py:186-196`，终点那个循环见 `:154-174`。这跟 headless 的"自有区间"是同一个思路。这段来回摆开是这样：
+起点判定见 `python/sdk/src/deepseek_harness/api.py:186-196`，终点那个循环见 `:154-174`。这跟 headless 掐时间码是同一个思路，只是这次掐码的人是你。这段来回摆开是这样：
 
 ```mermaid
 sequenceDiagram
@@ -319,7 +327,7 @@ sequenceDiagram
     Note over C: 认这条为终点，收束本次运行
 ```
 
-**没有 cancel，也没有关单个 session 的方法。** 放弃一个回合 = 关掉运行时进程；SDK 创建的 agent 活到进程退出为止（`packages/sdk/protocol/README.md:38`、`packages/sdk/server/README.md:45`）。也没有协议版本协商（`packages/sdk/protocol/README.md:37`）。
+第三条语义：**没有 cancel，也没有关单个 session 的方法。** 放弃一个回合 = 关掉运行时进程；SDK 创建的 agent 活到进程退出为止（`packages/sdk/protocol/README.md:38`、`packages/sdk/server/README.md:45`）。也没有协议版本协商（`packages/sdk/protocol/README.md:37`）。
 
 服务端插件本身只 `inject: ['agents']`：按 `sessionId` 取或建 agent；已注册的适配器优先，未被认领的 `deepseek-official` 会自动挂 `dsh-llm-deepseek`，其它未认领的 provider 直接让 `initialize` 失败（`packages/sdk/server/README.md:9`、`:48`）。
 
@@ -327,7 +335,7 @@ TypeScript 侧还有个对称的客户端 `@deepseek-ai/dsh-sdk-client`：`DeepS
 
 它**不做打包运行时发现**，`launch: { command, args }` 必须显式给（`packages/sdk/client/README.md:7`、`:46`）。
 
-## Python SDK
+## Python SDK：脚本归你，协议归子进程
 
 ### 装上，跑通官方例子
 
@@ -427,9 +435,9 @@ flowchart LR
 
 `RunResult` 是 `session_id / final_response / finish_reason / events / notifications / session_root`（`api.py:39-45`）。
 
-关键语义写在 `python/sdk/README.md:45`：`final_response` 是**这段自有区间里最后一条已提交的 root session assistant 文本**，`finish_reason` 是区间里最后一个 `turn/end` 的 `kind`（README 举的例子是 `completed` / `max-tokens` / `error`），没有 turn 结束时为 `None`。
+这里就是前面预告过的"换壳陷阱"。关键语义写在 `python/sdk/README.md:45`：`final_response` 是**这段自有区间里最后一条已提交的 root session assistant 文本**，`finish_reason` 是区间里最后一个 `turn/end` 的 `kind`（README 举的例子是 `completed` / `max-tokens` / `error`），没有 turn 结束时为 `None`。
 
-两个字段描述的都是"区间"，不是"因果上属于这条 prompt 的输出"——跟 headless 那边是同一个陷阱，换了个壳。
+两个字段描述的都是"区间"，不是"因果上属于这条 prompt 的输出"——跟 headless 的监控录像是同一卷带子，只是换了个放映机。
 
 ### 零配置是怎么变出来的
 
@@ -602,11 +610,11 @@ JSON-RPC bin 的版本多了退出阶梯，同样可以照抄（`packages/exampl
 
 另外两件小事：`installFailLoud` 把 boot 期与之后的未处理 rejection 变成一行 stderr 加 `exit(1)`，可选的 `release` 钩子在两者之间被 await（供占用终端的界面还原终端），返回值是卸载函数（`packages/boot/app-boot/README.md:12`）；用户 patch 按 id 命中时**整体替换 `config`，不深合并**（`packages/boot/app-boot/README.md:60`）。做 bundle 和 profile 的完整故事在 [22 章](./22-做一个bundle和profile.md)。
 
-## 评测：一个任务一个 workspace
+## 评测：一个任务一个 workspace，不是洁癖是硬要求
 
 `BENCHMARK.md` 正文只有一段两句（`BENCHMARK.md:3`）：按 Python SDK 教程装 SDK、跑 `jsonrpc-agent` 的 minimal 变体，**独立的评测任务用独立的 workspace 和 session id**。
 
-第二句是硬要求而不是建议，理由很具体：复用同一个 harness 加同一个 session id 会保留**该 session 拥有的 bash 进程**，连同它的工作目录、导出变量和 shell 函数（`docs/user/guide/python-sdk.md:81`、`:100`）。任务 A 的 `cd` 和 `export` 会直接污染任务 B 的起点，评测结果就不再可比。
+第二句为什么是硬要求？因为 session 不只是一段记录，它**拥有活着的 bash 进程**：复用同一个 harness 加同一个 session id，会连同那个 bash 的工作目录、导出变量和 shell 函数一起保留（`docs/user/guide/python-sdk.md:81`、`:100`）。任务 A 的 `cd` 和 `export` 会直接污染任务 B 的起点，评测结果就不再可比。
 
 把 `minimal.py` 已有的 flag（`examples/jsonrpc-agent/minimal.py:19-25`）拼成批量循环：
 
@@ -629,6 +637,14 @@ done < tasks.tsv
 
 想拿逐事件数据的话注意分工：`RunResult.events` 只含 root session 的事件，`notifications` 才包含子 agent（`python/sdk/README.md:47`）。
 
-## 一句话带走
+## 串起来自检一遍
 
-**四条无 UI 的路共享同一套语义：结果永远是"一段自有区间的最后一条 assistant 文本"，而不是"对你这条 prompt 的回答"；headless 因为不挂 Host 和 Web runtime，审批必然 fail closed，所以权限要在配置里一次给足。**
+每条结论都能从前面的画面重新推出来，推不出来就回去重读那一节：
+
+- **CLI 打出的那行为什么可能不是回答你的？** 因为 runner 掐的是时间码：取"自有区间的末条非空 assistant 文本"，区间里混进 steering 或后台活儿，末条就未必是回你的那句。
+- **SDK 的 `final_response` 为什么是同一个陷阱？** 因为它描述的同样是区间不是因果——同一卷录像带，换了个放映机。
+- **headless 里模型要权限为什么只能事先给足？** 因为审批服务在、应答的人不在——host api-proxy 和 ACP 桥一个都没挂，每次审批 fail closed 成 `unavailable`；开 `danger-full-access` 反而把 policy 变成 `never`。
+- **客户端为什么会被一行日志弄碎？** 因为 stdout 就是协议本身，而服务端插件不检查也不否决兄弟 logger——碎不碎全看你组树时守不守铁律。
+- **`messageId` 为什么不能当终点？** 因为它是挂号小票，只证明排上了队；起点和终点都得你自己从通知流里认出来。
+- **想中途放弃为什么只能杀进程？** 因为协议里没有 cancel，也没有关单个 session 的方法。
+- **评测为什么必须一任务一 workspace？** 因为 session 拥有活着的 bash 进程，上一个任务的 `cd` 和 `export` 会原样留给下一个。

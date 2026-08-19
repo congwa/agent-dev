@@ -2,11 +2,11 @@
 
 > 基于 `deepseek-ai/deepseek-harness` v0.1.0-rc.5（commit `47f9438`），2026-08-14 核对。
 
-派活出去有两条路：委派一个子 agent，或者让模型写一段 JavaScript 脚本，一口气调度几十个子 agent。
+最常见的误解是：派活给子 agent，就是再开一个一样的自己——同样的上下文、同样的工具、同样的权限，像多开一个浏览器标签页。
 
-这一章把两条路都拆开，重点回答三个问题——子 agent 到底由什么拼出来（不是一个 markdown 文件），它跟父 agent 共享什么、不共享什么，以及你手上的需求该走哪条路。
+不是的。dsh 里的子 agent 是三层配置拼出来的产物，它跟父共享什么、不共享什么，每一样都有明确的答案，而且好几个答案跟直觉相反。更麻烦的是，有几处仓库自己都没对齐，我会点名：fork 的模式在文档和配置里说的不是一回事；两个"接外部产品"的 provider 在包 README 里说得像开箱可用，实际默认发行版连依赖都没装。
 
-有几处仓库自己都没对齐的地方，我会点名：fork 的模式在文档和配置里说的不是一回事；两个"接外部产品"的 provider 在包 README 里说得像开箱可用，实际默认发行版连依赖都没装。
+先从一个具体场景进门。
 
 ---
 
@@ -16,7 +16,7 @@
 
 它可以自己一个个读，代价是十五份文件内容全部堆进同一个会话的上下文，读到后面就要触发压缩（阈值由部署配置决定，见 [17 章](./17-压缩与长会话.md)）。
 
-dsh 给了两条别的路：
+dsh 给了两条别的路：委派一个子 agent，或者让模型写一段 JavaScript 脚本，一口气调度几十个子 agent。
 
 ```
 父 agent 的一条 assistant message
@@ -360,7 +360,7 @@ Activation（一个 continuable 子在本进程里的一段常驻期，不是请
 
 ---
 
-## 列出、发消息、中止
+## 三个控制工具，各自够得着的范围不一样
 
 三个控制类工具由 `@deepseek-ai/dsh-tool-subagent-control` 注册一次，而不是每个委派工具各注册一份。根插件只注册 `send_message` 和 `interrupt_agent`，`list_agents` 在它单独可加载的 `./list-agents` 子插件里（`packages/subagent/tool-subagent-control/README.md:5`）。
 
@@ -465,7 +465,7 @@ flowchart TD
 
 ---
 
-## workflow：worker thread 里的一段脚本
+## workflow 不是更强的子 agent，是把调度逻辑整段交出去
 
 `ctx.workflowEngine` 的形状和 `ctx.subagents` 不一样：它**一个 context 只允许一个引擎**，没有按名字的注册表，换引擎是换配置而不是并存（`docs/subsystems/workflow.md:5`）。
 
@@ -715,7 +715,16 @@ flowchart TD
 
 ## 一句话带走
 
-**子 agent 是 provider、delegation tool 实例、父的 standing composition 三层拼出来的，模型和 persona 在委派那一刻就钉死；workflow 则是另一件事——它把调度逻辑一次性交给一段脚本，中间结果对父不可见。**
+把全章结论从头再推一遍，每一条都能从前面的某个画面推出来，推得动就是真懂了：
+
+- 选路的分界线是**中间结果要不要进父上下文**：一次委派的结果笔笔进父会话，workflow 的中间结果留在脚本变量里、父只见 return 的 JSON——所以一两个委派用 subagent，明确要大规模编排才用 workflow；
+- 子 agent 之所以没有"一个定义文件"，是因为它是**三层拼出来的**：provider 定跑在哪，tool 实例定叫什么、带什么策略，preset 定模型看得见哪些——而 preset 绑的是父正跑着的 standing composition，父在 minimal 下，子连委派工具都没有；
+- fork 之所以不是"复制父"，是因为它和 spawn **只差一粒种子**：种子切在最后一个 `turn/end`，只搬对话历史，不搬工具限制也不搬权限，父没跑完一个 turn 时它干脆退化成 spawn；
+- 子会话之所以能被枚举、能被钉权限，是因为它**就是一个普通 Session**：靠 header 认亲，靠 `source: 'delegation'` 事件在委派那一刻钉死策略，深度穿得过持久化；
+- 父的账单之所以难算，是因为**回报有三条互不相干的通道**：tool result、report、settlement notice 各付一笔，既 report 又结算的子要付两笔；
+- codex / claude-code 之所以删了 `disabled` 还是不出现，是因为**工具只在它的 provider 存在时注册**，而那两个 provider 行连 npm 依赖都不是；
+- workflow 脚本之所以敢跑模型写的代码，靠的是**收容而不是隔离**：vm 是塑形 API 的手段，`worker.terminate()` 才是真的终点；
+- 写错选项之所以当场打死脚本，是因为 fatal 和 `null` 必须分得开——**`null` 只留给子运行失败和普通脚本错误**，"接受然后忽略"在这个仓库是禁令。
 
 判断标准可以简化成一句：中间结果你希望父看见吗？希望，就一次委派一个；不希望、而且路数固定，就写 workflow。
 

@@ -2,9 +2,9 @@
 
 > 基于 `deepseek-ai/deepseek-harness` v0.1.0-rc.5（commit `47f9438`），2026-08-14 核对。
 
-你写插件时会不停地用到 `ctx.tools`、`ctx.llm`、`ctx.fs` 这一类东西。这一章回答三个问题：它们是谁挂上去的、你怎么才拿得到、拿不到的时候那行报错该怎么读。
+写插件时最自然的想象是：`ctx.tools`、`ctx.llm`、`ctx.fs` 这些是框架自带的，像 Node 的 `fs` 一样，拿来就用。
 
-事件系统（`ctx.on`、waterfall）不在这里，在第 10、11 章。
+不是的。`ctx` 出厂时几乎是空的，上面每一个能力都是某个插件在某一行挂上去的——你不跟框架说一声"我要用它"，读一下属性都会当场炸。这一章就顺着"它们是谁挂的、你怎么才拿得到、拿不到时那行报错怎么读"把这套机制拆开。事件系统（`ctx.on`、waterfall）不在这里，在第 10、11 章。
 
 读完你应该能指着任意一个 `ctx.<名字>` 说出它是哪个包哪一行注册的，能自己提供一个服务并让 TypeScript 认识它，也能在看到 `pending (waiting for service: x)` 时知道往哪查。最后一节那个 realm 的坑值得单独留意——它是本章唯一一个"按直觉写就会写错"的地方。
 
@@ -25,7 +25,7 @@ export async function apply(ctx: Context) {
 
 出处：抽象签名 `packages/fs/fs/src/index.ts:116,176`；真实调用方照抄 `packages/fs/tool-str-replace-editor/src/index.ts:97,234`；async apply 的例子 `packages/mcp/mcp-client/src/index.ts:140`。
 
-它炸的位置比你想的靠前——不是 `.resolve` 炸，是读 `ctx.fs` 这个属性就炸：
+按普通 JavaScript 的直觉，没有的属性顶多是 undefined，炸也该炸在 `.resolve` 那一步。但真实炸点比这靠前——读 `ctx.fs` 这个属性本身就抛：
 
 ```
 Error: cannot get property "fs" without inject
@@ -35,9 +35,9 @@ Error: cannot get property "fs" without inject
 
 启动时终端里看到的也不是这行光秃秃的报错。dsh 会把它收进启动诊断，连整段 stack 一起打印，stack 首行还被重写成 `Error: <message>`。收集在 `packages/boot/app-boot/src/index.ts:701-707`，格式化在 `:676-678`，首行重写在 `vendor/cordis/src/reflect.ts:73-78`。后面讲 PENDING 那节还会回到这套诊断。
 
-那么，**服务（Service）就是一个插件挂到 `ctx` 上、供别的插件按名字取用的能力**（`docs/cordis-tutorial/03-services.md:5`）。
+被陷阱拦下的这个东西有个名字：**服务（Service），就是一个插件挂到 `ctx` 上、供别的插件按名字取用的能力**（`docs/cordis-tutorial/03-services.md:5`）。
 
-消费方写的是名字 `'fs'`，不是 `import` 某个实现类——这就是依赖注入：谁来实现由配置决定，消费者代码一个字不动。
+注意消费方写的是名字 `'fs'`，不是 `import` 某个实现类——这就是依赖注入：谁来实现由配置决定，消费者代码一个字不动。
 
 dsh 管这套叫 seam，拆成三份（`docs/glossary.md:9`）：
 
@@ -47,7 +47,7 @@ dsh 管这套叫 seam，拆成三份（`docs/glossary.md:9`）：
 | Provider | 若干个，真正提供实例的那些 |
 | Consumer | 若干个，按名字取用的那些 |
 
-harness 的主干能力都能追到一行 `super(ctx, '<名字>')`——`packages/` 下共 67 处（`grep -rn "super(ctx, '" packages/ --include=*.ts`，2026-08-14 数，已排除测试目录）；另有 21 处 `ctx.provide(...)` 直接挂裸值，下一节讲。
+"每个能力都是某一行挂上去的"不是修辞——harness 的主干能力都能追到一行 `super(ctx, '<名字>')`，`packages/` 下共 67 处（`grep -rn "super(ctx, '" packages/ --include=*.ts`，2026-08-14 数，已排除测试目录）；另有 21 处 `ctx.provide(...)` 直接挂裸值，下一节讲。
 
 你最常碰到的十个：
 
@@ -108,6 +108,8 @@ load an implementation such as @deepseek-ai/dsh-jobs-local instead
 
 出处 `packages/jobs/jobs/src/index.ts:67-69`。
 
+这一节立住一根柱子：**`ctx` 上的能力没有一个是天生的，全是插件按名字挂上去的，而名字要拿到手，得先声明。** 声明的方式就是下一节的 `inject`。
+
 > 想知道这一点上 Pi / Codex / LangChain 怎么做，见 [五个 agent 系统源码解剖](../2026-08_五个agent系统源码解剖/00-总览与阅读指南.md)。
 
 ---
@@ -125,7 +127,7 @@ export async function apply(ctx: Context) {
 }
 ```
 
-这一行同时买到三件事：
+容易把这一行当成给人看的依赖清单——类似 package.json 里的 dependencies，写不写全无所谓。不是的，它是运行时开关，同时买到三件事：
 
 | 买到什么 | 具体表现 |
 |---|---|
@@ -308,7 +310,7 @@ ctx.provide(storageBackendServiceKey('json'), backend)
 
 ## TypeScript 那一半得靠 declaration merging 自己补
 
-运行时注册和类型声明是两件独立的事，别指望其中一件带上另一件。
+写完 `super(ctx, 'tokenMeter')`，你可能以为 TypeScript 也就顺带认识 `ctx.tokenMeter` 了。不是的——运行时注册和类型声明是两件独立的事，别指望其中一件带上另一件。
 
 类型这一半靠 TypeScript 的 declaration merging——往 `Context` 接口上补一个字段：
 
@@ -324,7 +326,7 @@ declare module '@deepseek-ai/cordis' {
 
 **这段不生成任何代码**（`docs/cordis-tutorial/03-services.md:40`）。少写它，服务照样能用，只是所有消费者失去类型；写了它但插件没挂载，`ctx.tokenMeter` 类型检查一路绿灯、运行时照样抛。
 
-类型是编译期的承诺，`inject` 才是运行时的开关，两者谁也不保证谁。
+**类型是编译期的承诺，`inject` 才是运行时的开关，两者谁也不保证谁。**
 
 顺带一条命名约束：服务名在一个应用里是**全局扁平命名空间**，harness 已经把 `tools`、`llm` 这类朴素名字占了（`docs/cordis-tutorial/03-services.md:94`；上面表里的 `fs`、`shell`、`jobs` 同理）。自己的服务加前缀，否则撞名就是上面那条 fail loud。
 
@@ -393,7 +395,7 @@ pnpm dsh web --patch ./scratch-plugin/cordis.yml
 
 启动日志里应该出现 `Hello, world!`。
 
-跑通之后有三个改动值得自己动手试，比读十遍解释管用：
+跑通之后有三个改动值得自己动手试，每个都在验证前面的一根柱子，比读十遍解释管用：
 
 1. **交换 yml 里两行的顺序**，输出不变——顺序由依赖决定，不由文件行号决定（`docs/cordis-tutorial/03-services.md:59`）。
 2. **删掉 `greeter` 那一行**，consumer 进入 PENDING，下一节就讲它长什么样。
@@ -514,7 +516,7 @@ flowchart TD
 
 ## realm 加在 group 上，provider 和 consumer 得一起进去
 
-服务名并不是直接当 key 用的。每个 context 上挂着一张 `服务名 → symbol` 的映射表，reflect 的 store 用那个 symbol 当键：
+服务名并不是直接当 key 用的。每个 context 上挂着一张 `服务名 → symbol` 的映射表，reflect 的 store 用那个 symbol 当键。这张表像一本电话簿：你拨的是名字，接通的是电话簿里那个号码指向的机器。
 
 ```
 读 ctx.<name>:
@@ -525,6 +527,8 @@ ctx.isolate(name):                            // context.ts:121-125
     映射表[name] = 一个全新的 symbol
     // symbol 一换，下面的插件读同一个名字就落到另一份实例上，父作用域毫发无伤
 ```
+
+`isolate` 干的就是改电话簿：把某一个名字的号码换成新的。改的只是这个作用域和它下面的那本，外面的人手里的电话簿一个字没动——这一点马上会推出本节的坑。
 
 配置里的写法是 entry 的 `isolate` 字段（`vendor/loader/src/config/isolate.ts:8`），值有两种：
 
@@ -557,7 +561,7 @@ ctx.isolate(name):                            // context.ts:121-125
 
 直觉会告诉你：realm 是给 provider 开的，我把 `fs-local` 圈进 group，换实现的目的就达到了，消费者写在外面无所谓。
 
-不对。realm 是加在 group 上的边界，**provider 和 consumer 必须一起被包进这个 group 才算数**。上面 `str-replace-editor` 和 `fs-local` 并排写在同一个 `config` 列表里，不是排版习惯，是硬要求——落在 group 外面的消费者会去解析 host 那份实例，或者干脆没人提供、直接 PENDING。
+不对。回到电话簿：换号码只改了 group 里那本，外面的消费者手里还是旧号码——它照旧拨向 host 那份实例，而新实现登记在新号码上，压根没人拨。所以 realm 是加在 group 上的边界，**provider 和 consumer 必须一起被包进这个 group 才算数**。上面 `str-replace-editor` 和 `fs-local` 并排写在同一个 `config` 列表里，不是排版习惯，是硬要求——落在 group 外面的消费者会去解析 host 那份实例，或者干脆没人提供、直接 PENDING。
 
 麻烦的地方在于第一种失败不报错，它只是安静地读到了错的那份文件系统。
 
@@ -610,8 +614,16 @@ flowchart TD
 
 ---
 
-## 一句话带走
+## 把这一章串回去
 
-**服务靠名字解析，靠 `inject` 声明才拿得到，靠 realm 决定"同一个名字"到底指哪一份实例**——而 realm 的边界画在 group 上，把 provider 圈进去而把 consumer 落在外面，是这一章唯一会安静出错的写法。
+每条结论都能从前面的某个画面重新推出来，推不出来就回去重看那一节：
+
+- 从最初那次报错：`ctx` 是 Proxy，不是普通对象，所以**能力全是插件按名字挂上去的，读没声明的名字当场抛**，连 undefined 都轮不到；
+- 从那台判定机器：`inject` 是运行时开关，**等、保证、回滚三件事是同一次逐名判定的三个侧面**，配置顺序因此无关紧要；
+- 从三条解析路：声明过的按 symbol 查全局表，`ctx.get()` 软探测但只认 ACTIVE，没声明硬读只能捡祖先 store 里的——**兄弟插件之间，`inject` 是唯一通路**；
+- 从两种提供形状：注册是一次自带反向操作的 effect，**重名 fail loud，注册时机即可见时机**；
+- 从 declaration merging 那段不生成代码的声明：**类型是编译期的承诺，运行时谁也不替谁兜底**；
+- 从 `unknown` 那行诊断：`ctx.get()` 和 fiber 判定用的是两套口径，口径缝隙漏出来就是 unknown；而诊断的视野停在 `ctx.loader.entries()`，**配置文件之下的子 fiber 卡住不会有人告诉你**；
+- 从电话簿：realm 换的是名字背后的 symbol，只换 group 里那本，所以 **provider 和 consumer 必须一起圈进去**——把 consumer 落在外面，是本章唯一会安静出错的写法。
 
 ---

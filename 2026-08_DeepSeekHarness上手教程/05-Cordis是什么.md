@@ -2,9 +2,11 @@
 
 > 基于 `deepseek-ai/deepseek-harness` v0.1.0-rc.5（commit `47f9438`），2026-08-14 核对。本章只讲 Cordis 的心智模型——它是什么、几个核心概念怎么咬合、为什么 dsh 非要垫这一层；具体 API 怎么写留给 06–11 章。
 
-前四章你一直在跟 `ctx` 打交道：配置里写一行插件，它就活了；插件函数的第一个参数叫 `ctx`，你从它身上取 `ctx.tools`、`ctx.llm`。这一章解释这个 `ctx` 到底是什么东西。
+前四章你一直在跟 `ctx` 打交道：配置里写一行插件，它就活了；插件函数的第一个参数叫 `ctx`，你从它身上取 `ctx.tools`、`ctx.llm`。
 
-值得先花这个力气，因为它不是一个普通的对象。它是个 Proxy，而且**每个插件手里的那个都不是同一个**。
+最顺手的猜想是：`ctx` 就是那种传来传去的全局 `app` 对象，谁手里拿到的都是同一份引用。
+
+不是的。它是个 Proxy，而且**每个插件手里的那个都不是同一个**。
 
 这一点没建立起来，后面几章的行为在你眼里会全是玄学：为什么我 `ctx.tools` 读出来直接抛异常而不是 `undefined`；为什么我从没写过清理代码，插件卸载后注册的工具却真的消失了；为什么两个插件读同一个 `ctx.fs` 拿到的是两份不同实现。
 
@@ -64,7 +66,7 @@
 
 ---
 
-## 五个对象，一张图
+## 先把五个对象摆上桌
 
 官方 primer 用五句话概括 Cordis（`docs/cordis-primer.md:9-13`），挑的是 plugin / context / `inject` / typed events / reversible effects。
 
@@ -293,7 +295,7 @@ flowchart LR
 
 ---
 
-## fiber：插件加载一次，就是一个 fiber
+## 插件加载一次，就是一个 fiber
 
 一个插件被 `ctx.plugin()` 调几次就有几个 fiber，它们共享一条 `Runtime` 记录（`registry.ts:136-145`）；registry 用 `Map<callback, Runtime>` 索引（`registry.ts:197`），键是 `resolve()` 出来的可执行体（`registry.ts:222-228`）。
 
@@ -352,7 +354,7 @@ stateDiagram-v2
 
 ---
 
-## plugin tree：`cordis.yml` 的一行 = 树上一个节点
+## `cordis.yml` 的一行，就是树上的一个节点
 
 Cordis 本体不认识 YAML。是 loader 插件把配置翻译成 `ctx.plugin()` 调用。
 
@@ -434,7 +436,7 @@ provide('fs'):
 
 ---
 
-## isolate realm：同一个名字，两份实现
+## 同一个名字，怎么在一个进程里有两份实现
 
 场景是真实的。`minimal` 这个 agent preset 想让**只有这个 agent** 用裸的本地文件系统，进程里其它 agent 继续用宿主那份被沙箱包过的 `fs`（意图写在 `apps/cli/config/agent-presets/minimal/agent.cordis.yml:46-47` 的注释里）。配置就这么几行（同文件 `:48-57`）：
 
@@ -560,9 +562,17 @@ flowchart TD
 
 ---
 
-## 一句话带走
+## 把整章串起来带走
 
-**`ctx` 是一个由 Proxy 撑着的、每个插件一份的服务视图：它决定你能看见谁（isolate 决定名字解析到哪个 Symbol），也决定你注册的东西归谁（`this.ctx` 是调用方，effect 记在你的 fiber 上）。**
+开头的每个"玄学"现在都能自己推一遍，推得动才算真懂了：
+
+- 每个插件的 `ctx` 之所以不是同一个，是因为**整棵树上只有根那一个 Proxy**（`context.ts:74`），子 ctx 全是 `Object.create` 出来的普通对象（`:101`），彼此的差别只在自有的 `fiber` 属性；
+- 读不到的服务之所以抛而不是 `undefined`，是因为爬链循环的四个出口里三个是 throw（`reflect.ts:144-167`），"有就用"的语义被单独留给了旁路 `ctx.get()`（`:233`）;
+- 卸载之所以不留残渣，是因为 tracker Proxy 让服务方法里的 `this.ctx` 恒为调用方（`utils.ts:176`），effect 于是全记在调用方的 fiber 上，卸载时逆序回滚；
+- 加载顺序之所以不用人排，是因为激活由 `inject` 与 epoch 驱动（`fiber.ts:611-639`），配置行序只是给人看的分组；
+- 同一个名字之所以能有两份实现，是因为服务表的键是 isolate 映射发的 Symbol 而不是名字字符串，换一张表就换了一格——而爬链在 realm 边界会停，读也偷不出去。
+
+压成一句：**`ctx` 是一个由 Proxy 撑着的、每个插件一份的服务视图：它决定你能看见谁（isolate 决定名字解析到哪个 Symbol），也决定你注册的东西归谁（`this.ctx` 是调用方，effect 记在你的 fiber 上）。**
 
 前半句让"同名两份实现"成为一行配置，后半句让"卸载不留残渣"不需要任何清理代码。
 

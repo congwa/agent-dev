@@ -2,13 +2,13 @@
 
 > 基于 `deepseek-ai/deepseek-harness` v0.1.0-rc.5（commit `47f9438`），2026-08-14 核对。
 
-一个长任务干了几十轮之后，模型开始"记得"一些从没发生过的事：早期一次失败的尝试、一段被推翻的设计、一句自己安慰自己的"已修复"。
+长任务跑到几十轮开始劈叉的时候，第一反应往往是：模型记性不够，得想办法让它记住更多。
 
-原因不是模型笨，是**上下文在累积**。所有中间推理都还留在同一条对话里，错误进去之后会被一遍遍重新发给模型（直到压缩把它盖掉），每一轮还要把这段前缀再付一次钱。
+不是的。真实病灶常常正好相反——模型**记得太多了**。几十轮之后它开始"记得"一些从没发生过的事：早期一次失败的尝试、一段被推翻的设计、一句自己安慰自己的"已修复"。这些不是凭空幻觉，是上下文在累积：所有中间推理都还留在同一条对话里，错误进去之后会被一遍遍重新发给模型（直到压缩把它盖掉），每一轮还要把这段前缀再付一次钱。
 
-[26 章](./26-Goal模式.md)的 goal 选择留在这条对话里，靠驱动器不断塞下一条提示。Ralph 选了相反的那条路：**每一轮换一个全新的 child**。
+[26 章](./26-Goal模式.md)的 goal 选择留在这条对话里，靠驱动器不断塞下一条提示。Ralph 选了相反的那条路：**每一轮换一个全新的 child。**
 
-它没有父会话，没有上一轮 child 的会话，只有三样东西——不可变的目标、共享工作区（`cwd` 下的真实文件），以及上一轮留下的一份有大小上限的结构化交接报告。工作区是长期记忆，对话不是。
+换新 child 之后，跨轮还剩什么？只剩三样——不可变的目标、共享工作区（`cwd` 下的真实文件），以及上一轮留下的一份有大小上限的结构化交接报告。这就是本章第一根柱子：**工作区是长期记忆，对话不是。**
 
 一轮接一轮的形状是这样：目标每轮原样重发，工作区被反复读写并一直留着，而 child 本身用完即弃，只有一份有界报告能跨过轮次边界。
 
@@ -40,11 +40,13 @@ flowchart TD
     class OBJ entry
 ```
 
-这一章讲 dsh 自带的 `ralph` 工具怎么把这件事做出来。读的时候不妨一直带着一个问题：同样是"朝一个目标反复推进"，为什么两种做法在"什么时候继续、什么时候停、状态放哪"上会分岔得这么远。最后一节专门算这笔账。
+这个形状有个很贴的比喻：工作区是工地，child 是换班的施工队。工地一直在那儿，一班干完人就走，下一班带着同一张施工图（objective）进场，手里只有上一班留的一张字数有限的交接单。这个比喻能直接推出本章好几个结论：上一班说的胡话随下班消失（错误不传染）；新班组每次都得重新巡一遍场（每轮重付"读工作区"的钱）；交接单可能写错，但工地本身不会说谎（所以要拿工作区去核对报告）。后面每一条都会在源码里验到。
 
-## 官方术语表把三个词定死了
+这一章讲 dsh 自带的 `ralph` 工具怎么把这件事做出来。读的时候不妨一直带着一个问题：同样是"朝一个目标反复推进"，为什么 goal 和 Ralph 在"什么时候继续、什么时候停、状态放哪"上会分岔得这么远。最后一节专门算这笔账。
 
-`docs/glossary.md:43-45` 的定义值得原样抄一遍，因为后面所有讨论都以它为准：
+## 先把三个词钉死：loop、round、handoff
+
+上面那张图里出现了三种东西：整个循环、每一轮的 child、跨轮的那份报告。官方术语表给它们各起了名字，`docs/glossary.md:43-45` 的定义值得原样抄一遍，因为后面所有讨论都以它为准：
 
 | 术语 | 定义 |
 |---|---|
@@ -58,7 +60,7 @@ flowchart TD
 
 ## 它是一个普通插件，不是内核里的一个模式
 
-这是本章最值得记住的架构判断。`tool-ralph` 是 `packages/workflow/` 下一个独立包，注入四个服务就干活（`packages/workflow/tool-ralph/src/index.ts:19-20`）：
+读到"每轮换新 child"这种深改执行方式的机制，很容易默认它动了内核。恰恰没有——这是本章最值得记住的架构判断：**Ralph 是一条策略，不是一台机器。** `tool-ralph` 是 `packages/workflow/` 下一个独立包，注入四个服务就干活（`packages/workflow/tool-ralph/src/index.ts:19-20`）：
 
 ```
 ralph 工具（模型可见）
@@ -91,7 +93,7 @@ Agent Note 把四条被否掉的方案逐条写了：
 
 ## 模型只能填两个字段
 
-`ralph({ objective, maxRounds? })` 就是全部调用面：
+那模型发起一次 Ralph loop 时，能控制多少东西？答案少得惊人。`ralph({ objective, maxRounds? })` 就是全部调用面：
 
 | 参数 | 必填 | 含义 |
 |---|---|---|
@@ -147,9 +149,9 @@ flowchart TD
 
 第四道的三条错误信息各有各的话，单测逐条钉住：`is not registered` / `does not support structured output` / `inherits parent context`（`packages/workflow/tool-ralph/tests/tool-ralph.spec.ts:311-324`）。
 
-哪些 provider 过得了这一关不用猜。`spawn` 天生合格（`packages/subagent/subagent-spawn-in-process/src/index.ts:42,44`），`fork` 天生不合格（`packages/subagent/subagent-fork-in-process/src/index.ts:64`）——后者会把父会话已完成轮次 seed 给 child，正是 Ralph 要消灭的东西。
+第四道里藏着一个值得停一下的判断题：直觉上 `fork` 更省事——child 直接带着父会话的记忆开工，还不用重新交代背景。但恰恰因此它**天生不合格**（`packages/subagent/subagent-fork-in-process/src/index.ts:64`）：它会把父会话已完成轮次 seed 给 child，而那正是 Ralph 存在的意义要消灭的东西。`spawn` 才天生合格（`packages/subagent/subagent-spawn-in-process/src/index.ts:42,44`）。
 
-有个容易被当成低效的细节：**每次调用都重查 provider**，而不是在 `apply()` 时查一次。理由是 provider 注册是 effect 作用域的，插件生命周期和 HMR（热重载，[08 章](./08-effect与生命周期.md)）都可能让它变（`packages/workflow/tool-ralph/README.md:34`）。
+还有个容易被当成低效的细节：**每次调用都重查 provider**，而不是在 `apply()` 时查一次。理由是 provider 注册是 effect 作用域的，插件生命周期和 HMR（热重载，[08 章](./08-effect与生命周期.md)）都可能让它变（`packages/workflow/tool-ralph/README.md:34`）。
 
 ### 路由是脚本看不见的那一半
 
@@ -176,7 +178,7 @@ flowchart TD
 
 ## 每个 child 到底收到什么
 
-固定脚本每轮拼一段提示词，六段，用空行连接（`packages/workflow/tool-ralph/src/index.ts:155-162`）：
+新班组进场，手里到底有几张纸？固定脚本每轮拼一段提示词，六段，用空行连接（`packages/workflow/tool-ralph/src/index.ts:155-162`）：
 
 1. 身份：你是前台 Ralph loop 里的一个 fresh worker，**没有父会话、没有此前 child 的会话**；不要调用 `ralph` 工具，这一轮你就是它的 worker
 2. `Immutable objective:` + trim 后的目标原文
@@ -185,7 +187,7 @@ flowchart TD
 5. `Previous structured handoff:` + 上一轮报告的 JSON，第一轮是 `(none — this is the first round)`
 6. 报告要求：`continue` 必须带至少一条 nextSteps；`complete` 只在有具体证据且没有 nextSteps 时用；`blocked` 只在没有人类介入或外部状态变化就无法推进时用；`blocker` 除 blocked 外必须为空
 
-六段里有一半是脚本常量、每轮一字不差，真正随轮次变的只有轮号和上一轮那份报告：
+第四段就是工地比喻里"交接单可能写错，工地不会说谎"的官方版本——它明写着报告只是有界交接，事实以工作树为准。六段里有一半是脚本常量、每轮一字不差，真正随轮次变的只有轮号和上一轮那份报告：
 
 ```mermaid
 flowchart LR
@@ -227,7 +229,7 @@ child 自己的 system prompt 照常由它那棵插件树装配（[15 章](./15-
 
 child 侧唯一多出来的东西是结构化输出捕获契约：回放快照断言每个 child 的工具调用**只有一次** `structured_output`（`examples/headless-agent/tests/headless.snapshot.ts:768-772`；该工具名定义在 `packages/subagent/subagent-in-process-driver/src/structured.ts:19`）。
 
-## 交接报告：五个字段，三种状态，校验两遍
+## 交接报告是一张不许撕的交接单
 
 `agent()` 的 `schema` 参数就写在脚本顶部，五个字段全部 `required`、`additionalProperties: false`（`packages/workflow/tool-ralph/src/index.ts:91-102`，传入点 `:166`）：
 
@@ -292,15 +294,15 @@ flowchart LR
     class BAD danger
 ```
 
-超长为什么是让整个 workflow 失败，而不是截断留个尾巴？
+这里有一道验收题：报告超长，为什么是让整个 workflow 失败，而不是截断留个尾巴？截断听起来明明更宽容。
 
-Agent Note 的原话是：截断可能刚好切掉状态证据或 next steps，而剩下的东西**看起来仍然像一份权威交接**；生产者必须在配额内产出一份合法报告（`.agents/notes/implemented/feature/2026-07-19-fresh-agent-ralph-workflow-tool.md:57`）。
+想象把交接单撕掉后半张：留下来的前半张**仍然长得像一张完整的交接单**，下一班照着它开工，却不知道被撕掉的正是关键的证据或 next steps。Agent Note 的原话就是这个意思：截断可能刚好切掉状态证据或 next steps，而剩下的东西看起来仍然像一份权威交接；生产者必须在配额内产出一份合法报告（`.agents/notes/implemented/feature/2026-07-19-fresh-agent-ralph-workflow-tool.md:57`）。
 
 同一条逻辑贯穿到底——报告非法、缺失、超长都是**失败**，绝不会被误当成"轮次用光"（`packages/workflow/tool-ralph/README.md:11`）。
 
-## 终态、返回值，以及"worker reported"这几个字
+## 停不停，是 child 自己在报告里说的
 
-固定脚本的主循环写出来就这么长：
+谁来决定循环继续还是收工？不是脚本，不是引擎——**是每一轮 child 自己在报告里声明的，脚本只负责照做。** 固定脚本的主循环写出来就这么长：
 
 ```
 last_handoff = none
@@ -368,7 +370,7 @@ flowchart TD
 - `Ralph worker reported a blocker after N rounds.`
 - `Ralph reached its N rounds limit; the worker reported work remaining.`
 
-"**worker reported**"是设计要求，不是行文习惯。完成和阻塞都是 worker 的自我声明，不是独立认证——**dsh 里没有任何独立评估者去判定目标是否真的完成**，这一项被明确列为已推迟工作（`packages/workflow/tool-ralph/README.md:13,88`）。
+"**worker reported**"是设计要求，不是行文习惯。这几个字是本章的靶心：完成和阻塞都是 worker 的自我声明，不是独立认证——**dsh 里没有任何独立评估者去判定目标是否真的完成**，这一项被明确列为已推迟工作（`packages/workflow/tool-ralph/README.md:13,88`）。
 
 `maxResultChars` **只裁这段渲染文本**，包含信封和截断标记 `\n… [truncated]` 在内，不动 `result` 里那份已校验的权威值，也不动跨轮交接（`:351-358`，README 第 13 行）。
 
@@ -429,7 +431,7 @@ if exec.signal.aborted:                            // 补查一次
 
 worker-thread 引擎的 `dispose()` 幂等，会取消 run、在 `disposeGraceMs`（默认 5000ms）内等结果与 child 静默、然后无条件终止 worker 并做一次幸存者清扫（`packages/workflow/workflow-worker-thread/README.md:65,84`）。所以一次被取消的父步骤会**等到引擎有界终止、child 静默之后才返回**——它不会立刻甩手就走。
 
-## 配置与实操
+## 它装在哪、怎么发起、怎么逐轮看
 
 四个部署参数（`packages/workflow/tool-ralph/src/index.ts:35-40`，目录版见 `docs/config-catalog.md:2520-2538`）：
 
@@ -528,9 +530,9 @@ export function apply(ctx: Context): void {
 
 事后就翻会话日志（[16 章](./16-会话日志与分叉.md)）。判据是快照测试用的那套（`examples/headless-agent/tests/headless.snapshot.ts:734-763`）：`header.parentSession` 等于父会话 id 的就是 Ralph child，`delegationDepth` 为 1，`cwd` 与父一致，`seedLength` 缺席；每个 child 的首条 `user/message` 里能直接读到 `Ralph round: N of M.` 和上一轮交接。
 
-## Ralph 还是 goal
+## Ralph 还是 goal：分岔点只有一个
 
-两者都是"朝一个目标反复推进"，真正的分岔点只有一个：**上下文往哪儿放**。这一个选择往下决定了成本曲线、错误传染、可观测性、能不能 resume。
+两者都是"朝一个目标反复推进"，真正的分岔点只有一个：**上下文往哪儿放。** 这一个选择往下决定了成本曲线、错误传染、可观测性、能不能 resume。
 
 一边把状态存进对话、由驱动器判停，另一边把状态存进文件、由干活的 child 自己在报告里声明停不停：
 
@@ -557,6 +559,8 @@ flowchart LR
     class GB,GC,RC,RD data
 ```
 
+逐维度对下来，每一行都是"上下文放哪"这一个选择的推论——包括开头工地比喻推出的那三条（错误不传染、每轮重付读工作区的钱、拿工作区核对报告）：
+
 | 维度 | goal（same-session） | Ralph |
 |---|---|---|
 | 每轮的执行体 | 同一个 agent 的**下一个 turn**（一块 `<goal_round>` 用户消息，`packages/goal/goal-round-driver/README.md:48`） | 一个**全新的 child session** |
@@ -580,10 +584,17 @@ flowchart LR
 
 最后一条是踩坑重灾区：**Ralph 的成功不等于目标达成**。返回值里那句 "worker reported" 是字面意思——完成与阻塞都是干活的那个 child 自己说的，dsh 没有任何一方去核实（README 第 88 行）。要认证就得自己在外面加一层评估，而那正是被推迟的工作。
 
-## 一句话带走
+## 把整章串起来
 
-**goal 把状态留在对话里，Ralph 把状态留在文件里；前者靠上下文续跑，后者靠一份有上限的报告续跑。**
+回到开头那条工地：能不能把全章结论一条条重新推出来，是检验自己真懂了的办法。
 
-停止判据也跟着分岔：goal 由驱动器在同一条会话里判，Ralph 由每一轮 child 自己在报告里声明 `continue` / `complete` / `blocked`，脚本只负责照做。
+- 从"每轮换全新 child"推出：上一轮的胡话随 child 一起消失，错误不传染；代价是每个 child 一份独立的请求缓存、每轮重付一遍"读工作区"的钱——这正是它和 goal 在成本曲线上的分岔。
+- 从"工作区是长期记忆，对话不是"推出：报告只是有界交接单，可能写错，工地不会说谎，所以提示词第四段明写着要拿工作区去核对它。
+- 从"交接单是一张不许撕的单子"推出：超长不截断、直接整个失败——因为撕掉一半的交接单看起来仍像完整的；也因此报告非法、缺失、超长统统算失败，绝不被误当成"轮次用光"。
+- 从"fork 会 seed 父会话已完成轮次"推出：它天生过不了 provider 闸门——继承来的记忆正是 Ralph 要消灭的东西。
+- 从"worker reported 是字面意思"推出：Ralph 的成功不等于目标达成，dsh 没有独立评估者，要认证得自己在外面加一层。
+- 从"它只是一个普通插件"推出：内核一行没改，Ralph 全部行为都是 workflow + subagent 两条缝上的一个消费者拼出来的。
 
-[28 章](./28-自己写一个续跑插件.md)自己写续跑插件时，这两个选择就是你要先想清楚的那两个。想知道 Pi / Codex / LangChain 在同一道题上怎么选，见[五个 agent 系统源码解剖](../2026-08_五个agent系统源码解剖/00-总览与阅读指南.md)。
+一句话版本：**goal 把状态留在对话里，Ralph 把状态留在文件里；前者靠上下文续跑，后者靠一份有上限的报告续跑。** 停止判据也跟着分岔：goal 由驱动器在同一条会话里判，Ralph 由每一轮 child 自己在报告里声明 `continue` / `complete` / `blocked`，脚本只负责照做。
+
+[28 章](./28-自己写一个续跑插件.md)自己写续跑插件时，"状态放哪、谁判停"就是你要先想清楚的那两个选择。想知道 Pi / Codex / LangChain 在同一道题上怎么选，见[五个 agent 系统源码解剖](../2026-08_五个agent系统源码解剖/00-总览与阅读指南.md)。

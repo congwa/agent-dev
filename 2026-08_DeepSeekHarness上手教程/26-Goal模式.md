@@ -6,7 +6,7 @@
 
 你说"继续"，它就继续；你不说，它就一直停在那儿等你。
 
-问题不在模型不够努力，在于 harness 的默认节奏是**一次人类输入 = 一个 turn**。turn 结束，agent 回到 idle，没有人再推它。
+第一反应往往是"模型不够主动"。不是的。问题出在 harness 的默认节奏上：**一次人类输入 = 一个 turn**。turn 结束，agent 回到 idle，没有人再推它——它不是不想干，是没人给下一脚油门。
 
 这一章讲 dsh 对这件事的第一个答案：goal。它是"续跑"这一族里最完整的样本——怎么判断目标达成没有、达成不了时怎么体面地停、状态存在哪儿、并发改动怎么不打架。读懂它，后面 [27 章](./27-RalphLoop.md)的 Ralph 和 [28 章](./28-自己写一个续跑插件.md)自己动手就都有参照系了。
 
@@ -29,11 +29,13 @@ Goal
 
 层级出自 `.agents/notes/implemented/feature/2026-07-19-same-session-goal-round-driver.md:17`；turn / step / round 三个词的官方定义在 `docs/glossary.md:37-39`。
 
-有一条容易被忽略但很重要：同一会话里普通的人类 turn **不算** goal round，也不消耗额度（`docs/glossary.md:26`）。你在中途插一句"顺便看看 CI"，这句话不会吃掉目标的轮次预算。
+从这张层级图能直接推出一条容易被忽略的结论：goal round 数的是"goal 来源的 turn"，那么**同一会话里普通的人类 turn 就不算 goal round，也不消耗额度**（`docs/glossary.md:26`）。你在中途插一句"顺便看看 CI"，这句话不会吃掉目标的轮次预算。
 
 ---
 
 ## 四个包，谁也不管谁
+
+"一个功能一个插件"的直觉在这里会猜错——goal 不是一个包，是四个：
 
 ```
                  ┌──────────────────────────────┐
@@ -62,7 +64,7 @@ Goal
 
 拆成四个不是洁癖。`goal` 只管"目标现在是什么状态"，它明确**不决定什么时候续跑**（`packages/goal/goal/README.md:54`）；驱动器只管调度，连 `maxGoalRounds` 都不复制一份（理由后面说）；工具和命令是两个互不知道对方存在的消费者。
 
-四个里任何一个都可以单独不挂，剩下的照样能跑。
+**四个里任何一个都可以单独不挂，剩下的照样能跑。**
 
 把依赖方向摊平了看是这个形状：三个消费者各从自己的入口进来，都只落到 `ctx.goals` 这一个服务上，服务再往日志里写；只有驱动器反过来还订阅了 `goal/changed`。
 
@@ -98,7 +100,9 @@ flowchart LR
 
 这是整章最容易读错的地方，我建议慢一点看。
 
-一句话地图：目标身上挂着两个维度，一个叫 `phase`、写进日志、跟着会话走；另一个叫 `activation`、只活在进程内存里、从不落盘。要自动开下一轮，**两个必须同时成立**。
+先立一个几乎人人都会有的预期：resume 一个旧会话，看到目标还是 `active`，那它应该接着自动跑吧？
+
+不会。因为目标身上挂着两个维度：一个叫 `phase`、写进日志、跟着会话走；另一个叫 `activation`、只活在进程内存里、从不落盘。**要自动开下一轮，两个必须同时成立。** resume 回来的进程手里只有前者。
 
 ### 四个持久 phase
 
@@ -174,7 +178,7 @@ else:
     不动，等人再显式 resume 一次
 ```
 
-也就是说，它被摁回 `disarmed` 的时机一共三处：
+注意伪代码里"摁回 `disarmed`"的时机一共三处，全都是"这个进程对目标的了解可能过期了"的信号：
 
 | 时机 | 出处 |
 |---|---|
@@ -182,7 +186,7 @@ else:
 | 每一次 `agent/session-start` 边沿再 disarm 一次 | `index.ts:198-200` |
 | 每观察到一条 `goal/change` 事件也回落 disarmed，除非它正好是本进程这次变更预登记的那一条 | `index.ts:437-447` |
 
-两个维度是这么合起来判的——一个从日志里读出来，一个只活在进程内，而且有三处边沿专门把后者摁回去：
+两个维度是这么合起来判的——一个从日志里读出来，一个只活在进程内，三处边沿专门把后者摁回去：
 
 ```mermaid
 flowchart TD
@@ -214,7 +218,7 @@ flowchart TD
     class D1,D2,D3 entry
 ```
 
-于是 resume 一个旧会话、fork 一个会话、或者换掉驱动器插件，目标、phase、revision、已跑轮数全都在，但**它不会自己动**。
+现在开头那个预期的答案自己浮出来了：resume 一个旧会话、fork 一个会话、或者换掉驱动器插件，目标、phase、revision、已跑轮数全都在，但**它不会自己动**。
 
 要动，必须有人再显式 `resume` 一次——那次 resume 会写一条新 revision，是模型和人都看得见的授权边沿。
 
@@ -287,7 +291,7 @@ flowchart LR
 
 ## 谁也别想拿旧 revision 改状态
 
-一个会话里可能同时有人在敲 `/goal pause`、模型在调 `update_goal`、驱动器在预留下一轮。三方都能改同一个目标，所以每次改都得先亮身份。
+你可能以为一个会话里只有模型在动目标。数一数其实是三方：人在敲 `/goal pause`、模型在调 `update_goal`、驱动器在预留下一轮——三方都能改同一个目标，所以每次改都得先亮身份。
 
 ```ts
 interface GoalRef {
@@ -309,7 +313,7 @@ private expectCurrent(cache: GoalCache, ref: GoalRef): GoalSnapshot {
 }
 ```
 
-拿旧 revision 来改，直接拒。这就是为什么模型的系统提示词硬性要求"先 `get_goal` 再 `update_goal`，把 id 和 revision 原样抄过去"（`tool-goal/src/index.ts:116-117`）。
+**拿旧 revision 来改，直接拒。** 这就是为什么模型的系统提示词硬性要求"先 `get_goal` 再 `update_goal`，把 id 和 revision 原样抄过去"（`tool-goal/src/index.ts:116-117`）。
 
 另有一道身份检查：服务只认注册表里那个**一模一样的 live Agent 对象**，id 相同但对象不同也拒（`index.ts:414-418`）。
 
@@ -532,9 +536,9 @@ objective 用 `JSON.stringify` 包起来（`prompt.ts:16`），所以多行文�
 
 ## 上手
 
-### 启用
+### 官方 dsh 里你什么都不用装
 
-用官方 `dsh` 的话什么都不用做。base bundle 已经默认挂好了四个条目：`goal`、`goal-round-driver`、`command-goal`（`packages/bundle/base/cordis.patch.yml:256-263`）和 `tool-goal`（`:374-375`），全部不带 config，也就是 `defaultMaxGoalRounds: 256` 加 `blockedAfterConsecutiveRounds: 3`。
+base bundle 已经默认挂好了四个条目：`goal`、`goal-round-driver`、`command-goal`（`packages/bundle/base/cordis.patch.yml:256-263`）和 `tool-goal`（`:374-375`），全部不带 config，也就是 `defaultMaxGoalRounds: 256` 加 `blockedAfterConsecutiveRounds: 3`。
 
 Web 形态多绕了一道。`packages/bundle/web-app/cordis.patch.yml:345-346` 把 base 那行 `tool-goal` 整个 `disabled: true`，因为它被下放到了 agent preset——`code` / `standard` / `cordis` 三个 preset 各自重新挂了一行（`apps/cli/config/agent-presets/code/agent.cordis.yml:104-105`、`standard/agent.cordis.yml:97-98`、`cordis/agent.cordis.yml:85-86`）。
 
@@ -568,7 +572,7 @@ goal 服务、驱动器和 `/goal` 命令仍然留在 host plane，同文件 `:3
 
 顺带一提，`examples/headless-agent/goal.cordis.yml:1-11` 是一个**故意只挂 goal + tool-goal、不挂驱动器**的真实示例：模型能建目标、能读状态，但没有任何自动轮次。这正好对应 tool-goal README 的一条限制——没有驱动器，自主 complete / blocked 那条路是休眠的（`packages/goal/tool-goal/README.md:79`）。
 
-### 用命令跑起来
+### 控制词必须独占整条输入
 
 `/goal` 的完整语法在 `packages/goal/command-goal/README.md:9-16`，解析逻辑在 `command-goal/src/index.ts:33-43`：
 
@@ -580,7 +584,7 @@ goal 服务、驱动器和 `/goal` 命令仍然留在 host plane，同文件 `:3
 | `/goal edit`（不带目标） | 报错，不建目标（`index.ts:40`、`:119-120`） |
 | `/goal pause` / `/goal resume` / `/goal clear` | 对应 verb |
 
-最容易踩的是这个：控制词只有在**独占整条输入**时才是控制词。写成伪代码就一目了然：
+小节标题就是这里最容易踩的坑。写成伪代码就一目了然：
 
 ```
 剩下的串 = 去掉 "/goal " 之后的整串
@@ -613,7 +617,7 @@ blocked 时会在 `Status:` 下面多一行 `Blocker: <code>: <message>`（`inde
 
 Web 端另有一条 GoalBar。据包 README（`packages/client/ui-goal/README.md:5`，未逐行读 UI 源码），它是 `conversation.input.dock` 里的第二张卡（order 10），数据走 `useProjection('goal')`，只提供 edit / pause / resume / clear 四个动作——**建目标仍然只能走 `/goal` 命令**。
 
-### 在日志里看 `goal/change`
+### 去日志里亲眼看一条 `goal/change`
 
 会话日志默认落在 `~/.dsh/sessions`，布局是 `<root>/--<归一化 cwd>--/<编码后的 session id>/session.jsonl.zstd`。出处：默认根目录见 `packages/bundle/base/cordis.patch.yml:98-101`（`root: !!js dshHomePath('sessions')`），`~/.dsh` 这个缺省值见 `packages/util/home-paths/src/index.ts:12`，布局见 `packages/session/session-persistence-jsonl/README.md:9-15`。
 
@@ -621,7 +625,7 @@ Web 端另有一条 GoalBar。据包 README（`packages/client/ui-goal/README.md
 
 找的是 `type` 为 `goal/change` 的行，负载就是前面说的那两种形状之一。轮次则记在 `user/message` 事件的 `source` 上：`{ kind: 'goal', goalId, revision, round }`（`packages/goal/goal/src/domain.ts:46-53`）。
 
-### 写一个插件
+### 写一个插件：同进程代码是被信任的
 
 想监听目标变化，用 `goal/changed`。它是 emit 模式（五种派发模式见 [10 章](./10-事件系统.md)），按 agent 做 scope 过滤，监听器抛错会被容纳（`packages/goal/goal/src/domain.ts:104-115`）：
 
@@ -702,7 +706,16 @@ export function apply(ctx: Context): void {
 
 **goal 把"要不要再跑一轮"拆成了两个必须同时成立的条件：日志里那个持久的 `phase`，和从不落盘的进程内 `activation`。**
 
-前者让 resume 和 fork 天然继承目标，后者保证换个进程接手时它绝不自作主张。想自己写一个续跑插件，这两位就是最该先设计的东西——[28 章](./28-自己写一个续跑插件.md)会照着这个骨架走一遍。
+拿这一句当线头，把全章的结论逐条重新推一遍，推得出来才算真懂了：
+
+- 日志是唯一权威，phase、revision、roundsStarted 全是重放从 `goal/change` 和 `user/message` 里数出来的——所以 resume、fork 天然继承目标，不需要第二个数据库；
+- activation 从不落盘，缓存新建、session-start、别人写的 goal/change 三处边沿都把它摁回 disarmed——所以换个进程接手时目标绝不自作主张，要动必须有人再显式 resume 一次；
+- 三方（人、模型、驱动器）都能改同一个目标，靠 revision 这道 compare-and-set 栅栏排队——所以旧 revision 直接拒，系统提示词才要求先 `get_goal` 再改；
+- 预留只是驱动器进程内的一个念头，落成 `user/message` 才是事实——所以外来消息永远优先、stale 的预留不扣额度；
+- 一切"被挡住"都汇进唯一的 blocked，区分交给 code——所以生命周期不膨胀；
+- `maxGoalRounds` 写死进目标快照、blocked 阈值归 tool-goal、驱动器一个都不复制——**一个可调值只能有一个所有者**。
+
+想自己写一个续跑插件，phase 和 activation 这两位就是最该先设计的东西——[28 章](./28-自己写一个续跑插件.md)会照着这个骨架走一遍。
 
 > 想知道这一点上 Pi / Codex / LangChain 怎么做，见 [五个 agent 系统源码解剖](../2026-08_五个agent系统源码解剖/00-总览与阅读指南.md)。
 
