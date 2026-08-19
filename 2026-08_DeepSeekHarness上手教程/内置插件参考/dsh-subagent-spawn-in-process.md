@@ -6,6 +6,8 @@
 
 **一句话**：往 `ctx.subagents` 上注册名为 `spawn` 的 provider——在当前进程里开一个**全新**子 Agent，自己的 session、零父对话历史，复用宿主的 agent factory 与 LLM/工具服务。
 
+这个包小到可以一口气读完。真正干活的代码在别处（共享 driver），它只负责把一个 provider 挂上去，然后把请求原样转出去。
+
 ## 它在树上长什么样
 
 ```yaml
@@ -15,9 +17,11 @@
         providerName: spawn
 ```
 
-`packages/bundle/base/cordis.patch.yml:295-298`。YAML 没写 `inject`，模块导出 `export const inject = ['subagents']`（`packages/subagent/subagent-spawn-in-process/src/index.ts:22`），`docs/config-catalog.md:2192` 记为 `Requires: subagents`。
+YAML 里没写 `inject`，但依赖是有的：模块自己导出了 `export const inject = ['subagents']`，配置目录也把它记成 `Requires: subagents`。
 
-源码里特意注明 `tools` **不注入**：子 factory 在 setup 期已经提供了它，写在这里只会平白改变本 provider 的 apply 时机（`src/index.ts:20-21`）。
+有一处反直觉，源码里特意注了一笔：`tools` **不注入**。子 factory 在 setup 期已经把它提供好了，再写进 `inject` 只会平白改变本 provider 的 apply 时机，没有任何好处。
+
+出处：树上的挂载见 `packages/bundle/base/cordis.patch.yml:295-298`；`inject` 见 `packages/subagent/subagent-spawn-in-process/src/index.ts:22`，`docs/config-catalog.md:2192`；`tools` 不注入的说明见 `src/index.ts:20-21`。
 
 ## 它注册了什么
 
@@ -25,18 +29,40 @@
 |---|---|---|
 | provider | `spawn`（`config.providerName`） | `ctx.subagents.registerProvider(...)`，`src/index.ts:62-64` |
 
-没有工具、没有 prompt 段、**没有任何事件监听**（所以也谈不上 waterfall 拦截）。注册动作本身会让缝发出 `subagent/provider-added`，[tool-subagent](./dsh-tool-subagent.md) 靠这个事件决定何时挂载委派工具。
+没有工具、没有 prompt 段、**没有任何事件监听**，所以也谈不上 waterfall 拦截。
 
-provider 对象两个静态面（`src/index.ts:41-46`）：
+不过注册这个动作本身会让缝发出一条 `subagent/provider-added`，[tool-subagent](./dsh-tool-subagent.md) 就是靠这个事件决定什么时候挂载委派工具的。
+
+### 两个静态面
 
 | 面 | 值 |
 |---|---|
 | `capabilities` | `{ outputSchema: true, depthLimit: true, toolFilter: true, persona: true }` |
 | `inheritsParentContext` | `false` |
 
-四个能力全支持，理由是「it controls the child's creation window and can enforce all four features」。`inheritsParentContext: false` 会直接改变模型看到的工具描述文案——见 [tool-subagent](./dsh-tool-subagent.md)。
+四个能力全支持，理由是「it controls the child's creation window and can enforce all four features」——它控制着子的创建窗口，所以四项都强制得了。
 
-方法只有两个：`start()` 把请求原样丢给共享的 `startInProcessRun(request, {})`，不带 seed（`src/index.ts:48-53`）；`prepareContinuable()` 返回空对象 `{}`，因为新开的子没有种子可贡献，后续一切由 continuation manager 拥有（`:55-59`）。**有 `prepareContinuable` 就等于有可续能力**，这是缝的能力判定方式，所以 base 里 `tool-subagent` 能对它设 `backgroundMode: continuable`。
+`inheritsParentContext: false` 不只是个内部标记，它会直接改变模型看到的工具描述文案，细节见 [tool-subagent](./dsh-tool-subagent.md)。
+
+以上见 `src/index.ts:41-46`。
+
+### 两个方法
+
+方法只有两个，都短到可以写成伪代码：
+
+```
+start(request):
+    return startInProcessRun(request, {})   // 第二个参数是 seed，这里是空的
+
+prepareContinuable():
+    return {}                               // 新开的子没有种子可贡献
+```
+
+`start()` 把请求原样丢给共享的 `startInProcessRun`，不带 seed；`prepareContinuable()` 返回空对象，因为全新的子没有什么可以贡献给续跑，后续一切由 continuation manager 拥有。
+
+关键在于**有 `prepareContinuable` 就等于有可续能力**——缝就是这么判定的，不看返回值内容。所以 base 里 `tool-subagent` 能对它设 `backgroundMode: continuable`。
+
+出处：`start()` 见 `src/index.ts:48-53`，`prepareContinuable()` 见 `:55-59`。
 
 ## 配置项
 
@@ -44,17 +70,25 @@ provider 对象两个静态面（`src/index.ts:41-46`）：
 |---|---|---|---|
 | `providerName` | `string` | `spawn` | 在 `ctx.subagents` 上的注册名 |
 
-定义在 `src/index.ts:30-32`；base 显式写了 `spawn`，与默认值一致。
+定义在 `src/index.ts:30-32`。base 显式写了 `spawn`，与默认值一致。
 
 ## 模型看得见什么
 
-- **子侧**：新子逐字收到那份独立任务内容，默认继承父的 model 与 workspace，看到全局 prompt 加上配置的子作用域 persona 影子。工具过滤会移掉该子的全局 wire schema、可执行体查找和 Code Mode SDK 绑定，但不影响独立注册的 guidance。它拿到的父对话消息是**零条**；过滤是可见性/组合，不是从父继承来的授权。
-- **父侧**：只通过 [tool-subagent](./dsh-tool-subagent.md) 间接可见——父拿到的是子的最终输出或 stop-reason 错误。
-- **KV cache**：与父的请求缓存互相独立；子历史只追加，而 persona、tool filter、生成的 SDK、provider 或 model 变了就换一条子前缀。
+**子侧**：新子逐字收到那份独立任务内容，默认继承父的 model 与 workspace，看到全局 prompt 加上配置的子作用域 persona 影子。
+
+工具过滤会移掉该子的全局 wire schema、可执行体查找和 Code Mode SDK 绑定，但不影响独立注册的 guidance。
+
+它拿到的父对话消息是**零条**。这里容易读岔：过滤是可见性/组合，不是从父继承来的授权。
+
+**父侧**：只通过 [tool-subagent](./dsh-tool-subagent.md) 间接可见——父拿到的是子的最终输出，或者一个 stop-reason 错误。
+
+**KV cache**：与父的请求缓存互相独立。子历史只追加；而 persona、tool filter、生成的 SDK、provider 或 model 一旦变了，就换一条子前缀。
 
 ## 什么时候你会想换掉它 / 怎么换
 
-这是 base 的默认后端，`tool-subagent`（`subagent` 工具）和 [tool-ralph](./dsh-tool-ralph.md) 都默认指向它，一般不动。两个 provider 从同一个父分岔出去，子侧拿到的东西完全不同：
+这是 base 的默认后端，`tool-subagent`（`subagent` 工具）和 [tool-ralph](./dsh-tool-ralph.md) 都默认指向它，一般不动。
+
+要理解它和邻居的差别，看这张图就够了——两个 provider 从同一个父分岔出去，子侧拿到的东西完全不同：
 
 ```mermaid
 flowchart TD
@@ -75,17 +109,21 @@ flowchart TD
     class S1,F1 data
 ```
 
-会动的场景：
+会动的场景有三个：
 
-- 想让子**看得见**父已完成的对话 → 用 [fork provider](./dsh-subagent-fork-in-process.md)，base 已经并行装好了。
-- 想让子跑在别的进程/别的产品里 → 换成 `-acp` / `-codex` / `-claude-code` / `-dsh-sdk` 之一，再新开一个 `tool-subagent` 实例绑过去。
-- 想并存两套 spawn 参数 → 再挂一行本插件、改 `providerName`（比如 `spawn-lite`），然后新开一个 `toolName` 不同的委派工具。
+| 你想要 | 怎么做 |
+|---|---|
+| 子**看得见**父已完成的对话 | 用 [fork provider](./dsh-subagent-fork-in-process.md)，base 已经并行装好了 |
+| 子跑在别的进程/别的产品里 | 换成 `-acp` / `-codex` / `-claude-code` / `-dsh-sdk` 之一，再新开一个 `tool-subagent` 实例绑过去 |
+| 并存两套 spawn 参数 | 再挂一行本插件、改 `providerName`（比如 `spawn-lite`），然后新开一个 `toolName` 不同的委派工具 |
 
 ## 坑与边界
 
-- **fresh 意味着没有父的 transcript**——子继承 cwd、lineage、model 和显式配置的 persona/工具限制，但**一条父对话都不继承**；需要已完成 turn 的上下文时用 fork。
-- 启动失败不会留下已发布的子；fulfillment 之后卸载 provider 也不会撤销已经交给持有者的 run（README「Behavior」）。
-- 深度检查、persona 与 tool-filter 安装、结构化输出、必需 signal 的取消、一次性执行、结果读取和静默销毁**都不在本包**，全部由共享的 in-process driver 负责，读源码时别在这里找。
+**fresh 意味着没有父的 transcript。** 子继承 cwd、lineage、model 和显式配置的 persona/工具限制，但**一条父对话都不继承**。需要已完成 turn 的上下文，就得用 fork。
+
+启动失败不会留下已发布的子；反过来，fulfillment 之后卸载 provider 也不会撤销已经交给持有者的 run（README「Behavior」）。
+
+最后一条是省时间的：深度检查、persona 与 tool-filter 安装、结构化输出、必需 signal 的取消、一次性执行、结果读取和静默销毁**都不在本包**，全部由共享的 in-process driver 负责。读源码时别在这里找。
 
 ## 未确认
 

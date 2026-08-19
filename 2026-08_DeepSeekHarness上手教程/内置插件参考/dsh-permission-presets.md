@@ -4,6 +4,8 @@
 
 **一句话**：把两个各自独立的执行旋钮——[sandbox-policy](./dsh-sandbox-policy.md) 的 `sandbox/mode` 与 [user-approval](./dsh-user-approval.md) 的 `approval/policy`——打包成用户能一次选好的命名档位，自己**不做任何强制**，只记录意图再通过两个旋钮各自的写路径落下去。
 
+这个"不做强制"要认真理解：这个插件删掉之后，沙箱和审批照样拦你，只是没人再把它们捆在一起卖。
+
 ```mermaid
 flowchart TD
     A["<b>/permission 命令或新 session</b><br/>选定一个档位"]
@@ -47,7 +49,15 @@ flowchart TD
             approval: never
 ```
 
-bundle 把 schema 自带的两档表（`workspace-write` / `danger-full-access`，`packages/interaction/permission-presets/src/index.ts:167-176`）整个换掉，扩成三档——schemastery 的 dict 默认值只在整个字段缺省时生效，给了就是整表替换（`vendor/schemastery/src/index.ts:474-484`、`719-736`）——因此**丢掉了 schema 默认表里的 `name` / `description` 字段**，客户端显示时会回落到表的 key（`optionOf()`，`src/index.ts:366`）。`defaultPreset` 没给，走「匹配组合默认值」的推断路径（`src/index.ts:195-196`）。
+schema 自带的是两档表：`workspace-write` 和 `danger-full-access`。bundle 这里给了三档，看着像"加了一档 `read-only`"，其实是**整张表被换掉了**。
+
+原因在 schemastery：dict 的默认值只在整个字段缺省时才生效，一旦你给了值，就是整表替换，不做逐 key 合并。
+
+代价是那两档自带的 `name` / `description` 字段跟着默认表一起没了。客户端显示时会回落到表的 key，所以选择器上出现的就是 `read-only` / `workspace-write` / `danger-full-access` 这三个裸字符串。
+
+`defaultPreset` 这行 bundle 也没给，于是走「匹配组合默认值」的推断路径。
+
+出处：schema 两档表见 `packages/interaction/permission-presets/src/index.ts:167-176`；schemastery 的替换语义见 `vendor/schemastery/src/index.ts:474-484`、`719-736`；回落到 key 见 `optionOf()`，`src/index.ts:366`；推断路径见 `src/index.ts:195-196`。
 
 ## 它注册了什么
 
@@ -63,9 +73,34 @@ bundle 把 schema 自带的两档表（`workspace-write` / `danger-full-access`�
 
 ## 三档语义与 custom
 
-`set(session, name)` 的顺序是固定的（`apply()`，`src/index.ts:380-392`）：先在**档位确实变了**时 append 一条 `permission/preset`，再对两个旋钮**逐个比较有效值**，只有变了才调各自的 setter（`setSandboxMode` / `setApprovalPolicy`）。重选当前档位一个事件都不写。
+切档位的写入顺序是固定的：
 
-`current(events)`（`304-306`，逻辑在 `derive()`，`309-321`）的判定顺序：上次记录的选择若仍然匹配当前旋钮值 → 用它（这就是记录 `permission/preset` 的理由：两档共享同一组旋钮值时保住用户意图）；否则取表中第一条匹配；都不匹配 → `custom`。`custom` 是**只读派生态**：可以显示为当前值，但不能被选中，也不会成为事件载荷（`src/index.ts:66-70`）。
+```
+set(session, name):
+    if name != 当前档位:
+        append permission/preset 事件        // 档位没变就一条都不写
+    if 目标 sandbox != 当前有效 sandbox:
+        setSandboxMode(...)                  // 逐个旋钮比较有效值
+    if 目标 approval != 当前有效 approval:
+        setApprovalPolicy(...)
+```
+
+也就是说重选当前已经生效的档位，是一次彻底的空操作，事件流上什么都不留。实现在 `apply()`，`src/index.ts:380-392`。
+
+反过来读当前档位是一次推断，判定顺序有三步：
+
+```
+current(events):
+    if 上次记录的 permission/preset 仍然匹配当前旋钮值:
+        return 它                            // 记录这条事件的全部理由
+    if 表中存在匹配当前旋钮值的档:
+        return 第一条匹配
+    return custom
+```
+
+第一步之所以排在前面，是为了应付两档共享同一组旋钮值的情况——光看旋钮分不出用户当初选的是哪档，得靠那条 `permission/preset` 保住意图。实现见 `current(events)`（`304-306`），逻辑在 `derive()`（`309-321`）。
+
+`custom` 是**只读派生态**：可以显示为当前值，但不能被选中，也不会成为事件载荷（`src/index.ts:66-70`）。
 
 ```mermaid
 stateDiagram-v2
@@ -77,9 +112,26 @@ stateDiagram-v2
     自定义 --> 具名档位: 旋钮值重新匹配某档
 ```
 
-新 session 的钉入逻辑（`pinInitialPermission()`，`400-430`）：干净的新 session 用当前用户默认档，一次写三条事件；带种子或已部分初始化的 session 保留既有有效值，只补缺的那几条——`session/end-seed` 标记的空种子也按「已表态」处理。因为创建时就钉死了，**之后改设置不会影响已存在的 session**。
+新 session 的钉入分两种情况：
 
-构造期有三处硬性拒绝：表里出现名为 `custom` 的 key（`189-191`）、挂载的 shell executor 不做约束即 `ctx.shell.sandboxMode === undefined`（`192-194`）、组合默认值匹配不到任何档位且没显式给 `defaultPreset`（`197-199`）。
+```
+pinInitialPermission(session):
+    if session 是干净的新会话:
+        用当前用户默认档，一次写三条事件
+    else:                                    // 带种子，或已部分初始化
+        保留既有有效值，只补缺的那几条
+        // session/end-seed 标记的空种子也算「已表态」，不覆盖
+```
+
+这里有个容易踩的点：**权限是在会话创建那一刻钉死的**，之后你去改设置，已经存在的 session 一个都不受影响。实现见 `pinInitialPermission()`，`400-430`。
+
+构造期有三处硬性拒绝，命中直接抛：
+
+| 拒绝条件 | 行号 |
+|---|---|
+| 表里出现名为 `custom` 的 key | `189-191` |
+| 挂载的 shell executor 不做约束，即 `ctx.shell.sandboxMode === undefined` | `192-194` |
+| 组合默认值匹配不到任何档位，且没显式给 `defaultPreset` | `197-199` |
 
 ## 配置项
 
@@ -94,7 +146,11 @@ README 的 Model Experience（`packages/interaction/permission-presets/README.md
 
 > Indirectly, through `dsh-user-approval` and `dsh-tool-bash`, which render the approval-policy prompt, switch notice, and sandboxed tool outcomes selected by this service's knob events; `permissionPresets/preset` itself is log-only.
 
-KV Cache effect：`No direct invalidation; the named consumer owns any request-prefix changes.`（同文件 `:21`）。换句话说模型永远不知道「档位」这个概念，只会看到 [sandbox-policy](./dsh-sandbox-policy.md) 和 [user-approval](./dsh-user-approval.md) 各自那句策略文本变了。（引文里的 `permissionPresets/preset` 是 README 的旧名，源码是 `permission/preset`，见下节。）
+KV Cache effect：`No direct invalidation; the named consumer owns any request-prefix changes.`（同文件 `:21`）。
+
+换句话说模型永远不知道「档位」这个概念，只会看到 [sandbox-policy](./dsh-sandbox-policy.md) 和 [user-approval](./dsh-user-approval.md) 各自那句策略文本变了。
+
+（引文里的 `permissionPresets/preset` 是 README 的旧名，源码是 `permission/preset`，见下节。）
 
 ## 什么时候你会想换掉它 / 怎么换
 
@@ -112,10 +168,17 @@ README 的 Known Limitations and Deferred Work（`packages/interaction/permissio
 - **档位表是进程级的**——配置在插件生命周期内固定，要改可选档位必须重载插件。
 - **存下来的默认档必须还在表里**——把被引用的档位删掉，会让 Permission 设置注册一直失败，直到 `settings.yaml` 里的相应段被更新或重置。
 
-读源码补两条：
+读源码补两条。
 
-- 可选的 `./invariant` 伴生插件会校验每条 `permission/preset` 事件命名的档位仍然可解析，不在表里就 fail（`src/invariant.ts:16-18`）——这正是上面最后一条限制在事件层面的体现。
-- **README 的三处命名已过时，按源码写**：事件是 `permission/preset`（`src/index.ts:50`），不是 README 的 `permissionPresets/preset`（README `7`、`9`、`17`）；命令是 `/permission`（`src/index.ts:259`），不是 `/permissionPresets`（README `13`）；settings 命名空间是 `permission`（`src/index.ts:73`），不是 README `9`、`28` 的 `permissionPresets`。三处都有独立佐证：事件名见仓库自动生成的 `docs/persistence-catalog.md:501`、`docs/capability-seams.md:454`、`docs/subsystems/permission-presets.md:66`；命令名见 web 客户端提交的命令行 `packages/client/ui-permission-presets/src/client/index.ts:164`；命名空间必须匹配小写 kebab-case（`packages/settings/settings/src/index.ts:19`、`26-31`），`permissionPresets` 根本过不了校验。
+第一条：可选的 `./invariant` 伴生插件会校验每条 `permission/preset` 事件命名的档位仍然可解析，不在表里就 fail（`src/invariant.ts:16-18`）——这正是上面最后一条限制在事件层面的体现。
+
+第二条：**README 的三处命名已过时，按源码写。** 三处都有独立佐证，不是我一个人的判断：
+
+| 东西 | README 写的 | 源码是 | 独立佐证 |
+|---|---|---|---|
+| 事件 | `permissionPresets/preset`（README `7`、`9`、`17`） | `permission/preset`（`src/index.ts:50`） | 自动生成的 `docs/persistence-catalog.md:501`、`docs/capability-seams.md:454`、`docs/subsystems/permission-presets.md:66` |
+| 命令 | `/permissionPresets`（README `13`） | `/permission`（`src/index.ts:259`） | web 客户端提交的命令行 `packages/client/ui-permission-presets/src/client/index.ts:164` |
+| settings 命名空间 | `permissionPresets`（README `9`、`28`） | `permission`（`src/index.ts:73`） | 命名空间必须匹配小写 kebab-case（`packages/settings/settings/src/index.ts:19`、`26-31`），`permissionPresets` 根本过不了校验 |
 
 ## 未确认
 

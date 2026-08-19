@@ -13,9 +13,11 @@
       name: '@deepseek-ai/dsh-tool-call-timeout-policy'
 ```
 
-两行到底：没有 `inject` 行（写在代码里），没有 `config`（它压根没有配置项）。`web-app` 与 `headless` 两个 bundle 都没有覆写或禁用这一行，三个 profile 里它本身的行为一致。
+两行到底。没有 `inject` 行——它写在代码里；也没有 `config`——它压根没有配置项。
 
-包目录 `packages/guard/timeout-policy`，包名却是 `dsh-tool-call-timeout-policy`——源码顶部留着 FIXME（`src/index.ts:6-9`）：`settle the intended @deepseek-ai/dsh-timeout-guard rename before the first tagged release`，紧接着标了 `suggestion only`，所以这只是个待拍板的改名提议，不是已定事项。
+`web-app` 与 `headless` 两个 bundle 都没有覆写或禁用这一行，所以三个 profile 里它本身的行为一致。
+
+包名和目录对不上：目录是 `packages/guard/timeout-policy`，包名却是 `dsh-tool-call-timeout-policy`。源码顶部留着一条 FIXME（`src/index.ts:6-9`）：`settle the intended @deepseek-ai/dsh-timeout-guard rename before the first tagged release`，但紧接着又标了 `suggestion only`——所以这只是个待拍板的改名提议，不是已定事项。
 
 ## 它注册了什么
 
@@ -29,11 +31,29 @@
 
 它不注册任何工具，也不往 system prompt 里加任何字。它是 [dsh-tools](./dsh-tools.md) 的 `tools/execute` 消费者——按 `docs/event-producer-consumer.md:56`，全仓库这个事件只有它和 `session-checkpoint-policy` 两个消费者，两个都在 base 里（`cordis.patch.yml:343`、`:355`）。
 
-三步逻辑（`src/index.ts:56-80`）：
+拦截逻辑三步，写成示意代码是这样：
 
-1. `ctx.tools.get(exec.name, exec.agent)?.timeoutMs`——没声明就 `return next()`，完全不碰。
-2. `using d = deadline(exec.signal, timeoutMs, TOOL_TIMEOUT)`，把派生信号换到 `exec.signal` 上，`finally` 里恢复调用方原信号，好让 `tools/post-execute` 看到的不是这个可能已 abort 的信号。
-3. dispatch 回来后用 `timeoutOf(d.signal, TOOL_TIMEOUT)` 判断**是不是自己这只表**响的；是就整个替换结果。判定基于信号而非结果形状，因为下游 provider 抛出的上游取消错误早已被注册表规整成普通 error 结果了。
+```
+on tools/execute (waterfall) as (exec, next):
+    预算 = ctx.tools.get(exec.name, exec.agent)?.timeoutMs
+    if 没有预算:
+        return next()                        // 完全不碰
+
+    原信号 = exec.signal
+    using d = deadline(原信号, 预算, TOOL_TIMEOUT)
+    try:
+        exec.signal = d.signal               // 派生信号顶上去
+        结果 = next()                         // 真正 dispatch
+    finally:
+        exec.signal = 原信号                  // 还回去
+    if timeoutOf(d.signal, TOOL_TIMEOUT):     // 是自己这只表响的吗
+        return 整个替换掉的超时结果
+    return 结果
+```
+
+两处容易读漏的细节。一是 `finally` 里恢复调用方原信号，为的是让 `tools/post-execute` 看到的不是这个可能已 abort 的信号。二是第 3 步的判定基于**信号**而非结果形状——因为下游 provider 抛出的上游取消错误，早已被注册表规整成普通 error 结果了，从结果形状上分不出来。
+
+实现在 `src/index.ts:56-80`。
 
 三步落成图，关键分岔在第 3 步——它要分清是自己的表响了，还是外层另一个取消先到：
 
@@ -70,7 +90,7 @@ flowchart TD
 
 **无配置项。** 预算不来自这个插件，而来自被调工具自己的 `ToolDefinition.timeoutMs`——README 原话 `so this plugin is **zero-config**`，且「不可能写错工具名」。注册表只在 `packages/core/tools/src/index.ts:1046-1049` 校验它是正有限数，然后不管执行。
 
-base 树上真正声明了 `timeoutMs` 的自带工具（README 只点了 web 那两个，源码里其实有四个）：
+base 树上真正声明了 `timeoutMs` 的自带工具，README 只点了 web 那两个，源码里其实有四个：
 
 | 工具 | 声明处 | base 下的实际值 |
 |---|---|---|
@@ -79,26 +99,48 @@ base 树上真正声明了 `timeoutMs` 的自带工具（README 只点了 web �
 | `glob` | `packages/fs/tool-fs-search/src/glob.ts:326` | `30000`（默认值 `packages/fs/tool-fs-search/src/search-core.ts:42`，base 未覆写） |
 | `grep` | `packages/fs/tool-fs-search/src/grep.ts:292` | 同上 `30000` |
 
-`--profile web` 下这两个包的 base 行都被关掉了——`tool-web`（`packages/bundle/web-app/cordis.patch.yml:407-408`）和 `tool-fs-search`（`:315-316`）都是 `disabled: true`，注释说明这是因为 Web 面把模型可见的工具改成由每个会话自己挂 preset（`:276-285`）。装机自带的 `standard` preset 又把两个都挂了回来（`apps/cli/config/agent-presets/standard/agent.cordis.yml:59-62`、`:247-251`，后者仍是 `fetch: false` + `searchTimeoutMs: 60000`），所以 web 下谁带 `timeoutMs` 取决于会话挂的是哪个 preset，而不是 base 那几行。`bash` / `read` / `write` / `edit` 按 README 是**故意不声明**的（源码核对：`tool-bash` 里的 `timeoutMs` 是模型可传的调用参数 `packages/shell/tool-bash/src/index.ts:254`，不是 `ToolDefinition.timeoutMs`）。
+`--profile web` 下这张表要重读一遍：`tool-web`（`packages/bundle/web-app/cordis.patch.yml:407-408`）和 `tool-fs-search`（`:315-316`）的 base 行都被 `disabled: true` 关掉了，注释说明这是因为 Web 面把模型可见的工具改成由每个会话自己挂 preset（`:276-285`）。
+
+装机自带的 `standard` preset 又把两个都挂了回来（`apps/cli/config/agent-presets/standard/agent.cordis.yml:59-62`、`:247-251`，后者仍是 `fetch: false` + `searchTimeoutMs: 60000`）。所以 web 下谁带 `timeoutMs`，取决于会话挂的是哪个 preset，而不是 base 那几行。
+
+`bash` / `read` / `write` / `edit` 按 README 是**故意不声明**的。这里有个同名陷阱：`tool-bash` 里也有个 `timeoutMs`（`packages/shell/tool-bash/src/index.ts:254`），但那是模型可传的调用参数，不是 `ToolDefinition.timeoutMs`——源码核对过了。
 
 ## 模型看得见什么
 
-不加 schema、不加 prompt。只有截止时间赢了才多出一条结果文本，逐字是 `Error: tool call timed out after <ms>ms`，结构体是 `{ isError: true, error: { message, info: { name: 'ToolTimeoutError', code: 'TOOL_TIMEOUT' } } }`（`src/index.ts:41-48`）。非超时调用零 token；超时时它反而能挡住一个更大的迟到结果进上下文。README 说 KV cache 影响是 append-only。
+| 场景 | 模型这边的表现 |
+|---|---|
+| 工具 schema / system prompt | 不加 schema、不加 prompt |
+| 正常调用 | 零 token |
+| 截止时间赢了 | 多出一条结果文本，逐字是 `Error: tool call timed out after <ms>ms` |
+| KV cache | README 说影响是 append-only |
+
+超时结果的结构体是 `{ isError: true, error: { message, info: { name: 'ToolTimeoutError', code: 'TOOL_TIMEOUT' } } }`（`src/index.ts:41-48`）。
+
+反直觉的一点：超时并不总是净成本——它反而能挡住一个更大的迟到结果进上下文。
 
 ## 什么时候你会想换掉它 / 怎么换
 
-- **想给所有工具一个兜底预算**：换不了，这个插件没有配置。要么改各工具插件的 timeout 配置（如 `tool-web` 的 `searchTimeoutMs`、`tool-fs-search` 的 `timeoutMs`，`packages/fs/tool-fs-search/src/index.ts:106`），要么自己写一个 `tools/execute` 插件按名字兜底。
+- **想给所有工具一个兜底预算**：换不了，这个插件没有配置。要么改各工具插件自己的 timeout 配置（如 `tool-web` 的 `searchTimeoutMs`、`tool-fs-search` 的 `timeoutMs`，`packages/fs/tool-fs-search/src/index.ts:106`），要么自己写一个 `tools/execute` 插件按名字兜底。
 - **不想要超时**：`- id: timeout-policy` + `disabled: true`，之后所有工具的 `timeoutMs` 声明都变成纯装饰。
-- **要叠重试 / 沙箱 / 度量**：都挂同一个 `tools/execute`。README 原话——注册顺序决定语义：`"timeout covers the whole retry operation" (timeout registered outer) versus "timeout covers each attempt" (timeout registered inner)`。
+- **要叠重试 / 沙箱 / 度量**：都挂同一个 `tools/execute`，注册顺序决定语义。
+
+重试那条值得画出来，两种嵌套是两种完全不同的东西：
+
+```
+timeout( retry( attempt ) )    // timeout 注册在外
+retry( timeout( attempt ) )    // timeout 注册在内
+```
+
+README 原话：`"timeout covers the whole retry operation" (timeout registered outer) versus "timeout covers each attempt" (timeout registered inner)`。
 
 ## 坑与边界
 
-- **协作式，永远不是硬杀**。派生信号只负责通知，终止权在工具自己和它把 `exec.signal` 转发到的那个能力上；`dsh-timeout` 库不拥有任何 kill。声明 `timeoutMs` 等于承诺「我会响应 `exec.signal` 并静默收敛」，不响应的工具超时后照跑。
+- **协作式，永远不是硬杀**。派生信号只负责通知，终止权在工具自己、以及它把 `exec.signal` 转发到的那个能力上；`dsh-timeout` 库不拥有任何 kill。声明 `timeoutMs` 等于承诺「我会响应 `exec.signal` 并静默收敛」——不响应的工具，超时后照跑。
 - **没有全局兜底预算**（README: `No blanket budget`）——没声明就没截止时间。
 - `timeoutOf` 用自有 code 做 scope，是为了不把**外层另一个 wrapper 先响的表**误读成自己超时；那种情况在这里读作普通的上游取消。
-- 它替换的是最终模型可见结果，之后还要过 `tools/post-execute`（`packages/core/tools/src/index.ts:1569-1599` → `:1743`）——所以 [dsh-repeat-tool-reminder](./dsh-repeat-tool-reminder.md) 照样会看见这次调用并计数：模型反复调用同一个必超时的工具，会先吃 `TOOL_TIMEOUT`，再吃重复调用提醒。
+- 它替换的是最终模型可见结果，之后还要过 `tools/post-execute`（`packages/core/tools/src/index.ts:1569-1599` → `:1743`）。所以 [dsh-repeat-tool-reminder](./dsh-repeat-tool-reminder.md) 照样会看见这次调用并计数：模型反复调用同一个必超时的工具，会先吃 `TOOL_TIMEOUT`，再吃重复调用提醒。
 - `TOOL_TIMEOUT` 不额外产生 session 事件，README 的理由是它就是最终的 `tool/result`，loop 已经记了。
-- 它的 invariant 伴生插件是空实现（`src/invariant.ts:21`，理由在 `:18-19`：`No runtime invariant: this stateless policy plugin owns no package-local event history or mutable data relation beyond the seam it intercepts.`）。
+- 它的 invariant 伴生插件是空实现（`src/invariant.ts:21`），理由写在 `:18-19`：`No runtime invariant: this stateless policy plugin owns no package-local event history or mutable data relation beyond the seam it intercepts.`
 
 ## 未确认
 

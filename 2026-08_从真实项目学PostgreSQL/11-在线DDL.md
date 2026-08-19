@@ -6,32 +6,36 @@
 
 ## 一、先记住两个数字
 
+一句话地图：**锁级别**决定挡住谁，**持有时长**决定挡多久，两者相乘才是风险。下面两张表就是这两个维度的实测结果。
+
 **数字一：DDL 拿的锁级别**（实测 `labs/exp25_ddl2.py`）：
 
-```
-  ALTER TABLE d ADD COLUMN z int                        → AccessExclusiveLock   ← 挡一切，包括 SELECT
-  ALTER TABLE d ADD CONSTRAINT ck CHECK (...) NOT VALID → AccessExclusiveLock   ← 也是！只是持有时间极短
-  ALTER TABLE d VALIDATE CONSTRAINT ck                  → ShareUpdateExclusiveLock ← 不挡读写 ✅
-  CREATE INDEX i ON d(v)                                → ShareLock             ← 挡写，允许读
-  CREATE INDEX CONCURRENTLY i ON d(s)                   → （不挡读写）✅
-```
+| DDL | 锁级别 | 影响 |
+|---|---|---|
+| `ALTER TABLE d ADD COLUMN z int` | AccessExclusiveLock | 挡一切，包括 SELECT |
+| `ALTER TABLE d ADD CONSTRAINT ck CHECK (...) NOT VALID` | AccessExclusiveLock | 也是！只是持有时间极短 |
+| `ALTER TABLE d VALIDATE CONSTRAINT ck` | ShareUpdateExclusiveLock | 不挡读写 ✅ |
+| `CREATE INDEX i ON d(v)` | ShareLock | 挡写，允许读 |
+| `CREATE INDEX CONCURRENTLY i ON d(s)` | —— | 不挡读写 ✅ |
 
 **数字二：DDL 持有锁的时长**（实测，200 万行）：
 
-```
-  ADD COLUMN（无默认值）                          0.00s   ✅
-  ADD COLUMN DEFAULT 42（常量，PG11+）            0.00s   ✅
-  ADD COLUMN DEFAULT gen_random_uuid()（易变函数） 8.45s   ❌ 全表重写
-  ALTER COLUMN v TYPE bigint                     3.87s   ❌ 全表重写
-  RENAME COLUMN                                  0.00s   ✅ 只改元数据
-  DROP COLUMN                                    0.00s   ✅ 只改元数据
-```
+| DDL | 耗时 | 结论 |
+|---|---|---|
+| ADD COLUMN（无默认值） | 0.00s | ✅ |
+| ADD COLUMN DEFAULT 42（常量，PG11+） | 0.00s | ✅ |
+| ADD COLUMN DEFAULT gen_random_uuid()（易变函数） | 8.45s | ❌ 全表重写 |
+| ALTER COLUMN v TYPE bigint | 3.87s | ❌ 全表重写 |
+| RENAME COLUMN | 0.00s | ✅ 只改元数据 |
+| DROP COLUMN | 0.00s | ✅ 只改元数据 |
 
 **核心公式**：
 
 > **风险 = 锁级别 × 持有时长**
 
-`AccessExclusiveLock` 持有 0.001 秒没关系；持有 8 秒，加上第 5 篇讲的**锁队列 FIFO**效应，就是整张表停摆 8 秒 + 后面积压的所有请求。
+`AccessExclusiveLock` 持有 0.001 秒没关系。
+
+持有 8 秒就完全是另一回事：加上第 5 篇讲的**锁队列 FIFO** 效应，那是整张表停摆 8 秒 + 后面积压的所有请求。
 
 判断一条 DDL 危不危险，沿着这条判定树走一遍就有数：
 
@@ -75,7 +79,7 @@ ALTER TABLE d ALTER COLUMN v TYPE bigint    3.87s（200 万行）
 
 200 万行 3.87 秒，一张 10 亿行的表就是**半小时以上的全表锁**。
 
-**注意：`int → bigint` 也要重写**，因为存储宽度变了。
+**注意：`int → bigint` 也要重写**，因为存储宽度变了。这个我第一遍是想当然的——总觉得"变宽而已，老数据又不用改"，实际上行内存储宽度变了，每一行都得重新写一遍。
 
 两条路线走出来的结果差别很大：
 
@@ -146,10 +150,12 @@ ALTER TABLE orders RENAME COLUMN amount_new TO amount;
 
 ### ② `ADD COLUMN ... DEFAULT`（看默认值是不是常量）
 
-```
-ADD COLUMN c2 int DEFAULT 42                    0.00s   ✅ PG 11+ 免重写
-ADD COLUMN c3 uuid DEFAULT gen_random_uuid()    8.45s   ❌ 必须重写
-```
+同一条语法，差别全在默认值那半句：
+
+| 语句 | 耗时 | 结论 |
+|---|---|---|
+| `ADD COLUMN c2 int DEFAULT 42` | 0.00s | ✅ PG 11+ 免重写 |
+| `ADD COLUMN c3 uuid DEFAULT gen_random_uuid()` | 8.45s | ❌ 必须重写 |
 
 **PG 11 起，常量默认值不再重写表**——它把默认值存进 `pg_attribute.attmissingval`，读到老行时"补"出来。
 
@@ -194,21 +200,21 @@ ALTER TABLE t ALTER COLUMN col SET NOT NULL;                              -- 秒
 ALTER TABLE t DROP CONSTRAINT t_col_nn;                                   -- 可选，清理
 ```
 
+四条语句里真正花时间的只有第二条，而它恰好是不阻塞读写的那条——这就是全部收益所在。
+
 ### ④ `ADD CONSTRAINT CHECK` / `ADD FOREIGN KEY`
 
 实测（521 MB，500 万行）：
 
-```
-  ADD CHECK（AccessExclusiveLock 全程持有）        1.50s   ❌
-  ADD CHECK ... NOT VALID                        0.00s   ✅
-  VALIDATE CONSTRAINT（ShareUpdateExclusiveLock）  1.26s   ✅ 不阻塞读写
-```
+| 操作 | 耗时 | 结论 |
+|---|---|---|
+| ADD CHECK（AccessExclusiveLock 全程持有） | 1.50s | ❌ |
+| ADD CHECK ... NOT VALID | 0.00s | ✅ |
+| VALIDATE CONSTRAINT（ShareUpdateExclusiveLock） | 1.26s | ✅ 不阻塞读写 |
 
 **总耗时几乎一样（1.50s vs 1.26s），但阻塞时长从 1.5 秒变成 0 秒。**
 
 这就是 `NOT VALID` 的全部意义：**把"长时间的强锁"拆成"瞬间的强锁 + 长时间的弱锁"。**
-
-两条路线的总耗时接近，但阻塞读写的时长天差地别：
 
 ```mermaid
 flowchart TD
@@ -232,6 +238,8 @@ flowchart TD
     class A3 data
 ```
 
+外键也是同一套写法：
+
 ```sql
 -- ✅ 两步法，外键同理
 ALTER TABLE child ADD CONSTRAINT fk FOREIGN KEY (pid) REFERENCES parent(id) NOT VALID;
@@ -249,10 +257,12 @@ ALTER TABLE child VALIDATE CONSTRAINT fk;
 
 实测（`labs/exp13_ddl.py`，200 万行，同时有业务在写）：
 
-```
-[A] CREATE INDEX（普通）        DDL 耗时 2.12s   业务 UPDATE 最长被卡 2115 ms
-[B] CREATE INDEX CONCURRENTLY  DDL 耗时 2.10s   业务 UPDATE 最长被卡  183 ms
-```
+| 方式 | DDL 耗时 | 业务 UPDATE 最长被卡 |
+|---|---|---|
+| [A] CREATE INDEX（普通） | 2.12s | 2115 ms |
+| [B] CREATE INDEX CONCURRENTLY | 2.10s | 183 ms |
+
+DDL 自己的耗时几乎没区别，被卡的业务写入却差了一个数量级。
 
 `CONCURRENTLY` 之所以不阻塞读写，是因为它把一遍扫描拆成了两遍，中间让业务事务先走完：
 
@@ -295,6 +305,8 @@ DROP COLUMN c1    0.00s   ✅
 
 ## 三、迁移文件的工程约定（从 sub2api 抄）
 
+四条约定分别防四件事：非事务迁移被塞进事务、重跑失败、历史文件被偷改、迁移把库锁死。
+
 ### 约定 1：`_notx.sql` 后缀标记非事务迁移
 
 sub2api 的迁移执行器（`internal/repository/migrations_runner.go`）：
@@ -305,7 +317,21 @@ const nonTransactionalMigrationSuffix = "_notx.sql"
 // 逐条语句执行，避免将多条 CONCURRENTLY 语句放入同一个隐式事务块。
 ```
 
-而且它做了**静态校验**，写错了直接拒绝执行：
+而且它做了**静态校验**，写错了直接拒绝执行。校验器的判断顺序大致是这样：
+
+```
+对每个迁移文件：
+    if 文件名不是 *_notx.sql 且 内容含 "CONCURRENTLY":
+        拒绝 → "CONCURRENTLY 必须放进 *_notx.sql"
+    if 是 *_notx.sql:
+        if 含 BEGIN/COMMIT/ROLLBACK:            拒绝 → 非事务文件里不许有事务控制
+        对每条语句:
+            if CREATE INDEX CONCURRENTLY 缺 IF NOT EXISTS:  拒绝 → 幂等性要求
+            if DROP  INDEX CONCURRENTLY 缺 IF EXISTS:       拒绝 → 幂等性要求
+            if 不是 CONCURRENTLY 语句:                       拒绝 → 不许混
+```
+
+对应的真实代码：
 
 ```go
 if strings.Contains(upperContent, "CONCURRENTLY") {
@@ -370,13 +396,23 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 // - 如果迁移文件内容被修改（checksum 不匹配），会返回错误
 ```
 
-**❌ 不做 checksum 校验会怎样**：有人改了一个已经在生产跑过的迁移文件（比如"修一个笔误"），本地和测试环境重新建库时跑的是新版本，生产上跑的是旧版本。**两边的 schema 从此永久分叉**，而且没有任何人知道。
+**❌ 不做 checksum 校验会怎样**：有人改了一个已经在生产跑过的迁移文件（比如"修一个笔误"），本地和测试环境重新建库时跑的是新版本，生产上跑的是旧版本。
+
+**两边的 schema 从此永久分叉**，而且没有任何人知道。
 
 sub2api 甚至为"历史上误改过的迁移"专门做了一套兼容规则：
 
 ```go
 // migrationChecksumCompatibilityRules 仅用于兼容历史上误修改过的迁移文件 checksum。
 // 规则必须同时匹配「迁移名 + 数据库 checksum + 当前文件 checksum」且两者都落在该迁移的已知版本集合内才会放行
+```
+
+放行条件是三个条件同时成立，缺一不可：
+
+```
+放行 = 迁移名匹配规则
+     且 数据库里记的 checksum ∈ 该迁移的已知版本集合
+     且 当前文件的 checksum   ∈ 该迁移的已知版本集合
 ```
 
 **这是被现实教育过的痕迹。**
@@ -427,6 +463,8 @@ DDL 安全只是一半，另一半是**应用代码和 schema 的版本必须能
 2. 滚动发布应用
 3. 在 2 完成之前，还没更新的旧 Pod 全部报错：column "old_name" does not exist
 ```
+
+注意这条迁移在速查表里是"瞬间、✅"级别的——锁的账算得再干净，也拦不住这种翻车。
 
 **✅ 扩展-收缩（expand-contract）模式**：任何破坏性变更都拆成 **3 次发布**：
 
@@ -514,6 +552,21 @@ flowchart TD
     class U,C,W,N main
     class D data
 ```
+
+循环本身只有五行：
+
+```
+last_id = 0
+loop:
+    这批 = 取 id > last_id 且 new_col IS NULL 的行，按 id 排序，最多 5000 条
+    更新这批，记下实际影响行数 n
+    if n == 0: 退出          // 没有可做的了
+    last_id = 这批里最大的 id  // 游标只前进，不回头
+    COMMIT                   // 一批一个事务，锁立刻释放
+    sleep 0.05s              // 把窗口让给 autovacuum 和业务
+```
+
+对应的可执行版本：
 
 ```sql
 DO $$

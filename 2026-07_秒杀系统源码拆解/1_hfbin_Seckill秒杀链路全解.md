@@ -38,7 +38,7 @@
 
 **但今天不一样。** 今天门口一下子涌进来 10000 个人，全都在同一秒喊「我要可乐」。
 
-这时候会发生三件很可怕的事：
+这时候会发生三件很可怕的事。
 
 ### 可怕的事情一：卖超了（术语叫「超卖」）
 
@@ -66,7 +66,9 @@ A 查到「还剩 1 瓶」的那一刻，B 也查到了「还剩 1 瓶」。两�
 
 > **MySQL（数据库）** = 仓库里那本厚厚的手写账本。它非常准确、非常可靠，一笔一笔清清楚楚，停电了也不会丢。但是它**翻页很慢**。
 
-一本账本，你一秒钟最多能翻个几百次、上千次。现在有 10000 个人同时要你翻账本，你的手会废掉。在真实系统里，就是数据库连接被占满、CPU 打到 100%、所有请求全部超时，**整个网站崩溃**——不只是秒杀页面崩，连正常买东西的页面都跟着崩。
+一本账本，你一秒钟最多能翻个几百次、上千次。现在有 10000 个人同时要你翻账本，你的手会废掉。
+
+在真实系统里，这就是数据库连接被占满、CPU 打到 100%、所有请求全部超时，**整个网站崩溃**——不只是秒杀页面崩，连正常买东西的页面都跟着崩。
 
 ### 可怕的事情三：黄牛和脚本
 
@@ -114,10 +116,12 @@ A 查到「还剩 1 瓶」的那一刻，B 也查到了「还剩 1 瓶」。两�
 
 有意思的是，这两个版本在 `v2.0` 分支里**同时存在**。你可以在同一个类里看到它们并排放着：
 
-- 朴素版（同步下单）：`SeckillController.list2()`，接口路径 `/seckill/seckill2`
-- 优化版（异步下单）：`SeckillController.list()`，接口路径 `/seckill/{path}/seckill`
+| 版本 | 方法 | 接口路径 |
+|---|---|---|
+| 朴素版（同步下单） | `SeckillController.list2()` | `/seckill/seckill2` |
+| 优化版（异步下单） | `SeckillController.list()` | `/seckill/{path}/seckill` |
 
-文件路径：`/home/claude/repos/hfbin-seckill/src/main/java/cn/hfbin/seckill/controller/SeckillController.java`
+两者都在 `/home/claude/repos/hfbin-seckill/src/main/java/cn/hfbin/seckill/controller/SeckillController.java`。
 
 本文重点讲**优化版**，但会拿朴素版做对照。
 
@@ -381,13 +385,21 @@ sequenceDiagram
 
 ### 2.1 第 0 步（用户还没来）：把库存从「账本」搬到「小白板」
 
-**发生了什么**
-
 项目一启动，还没有任何用户访问，系统就先干了一件事：把数据库里 4 个商品的秒杀库存，抄一份到 Redis 里，同时在 Java 进程的内存里建一张「售罄小抄」。
 
-**对应代码在哪**
+用伪代码看，这一步一共就做了这么点事：
 
-文件：`/home/claude/repos/hfbin-seckill/src/main/java/cn/hfbin/seckill/controller/SeckillController.java`
+```
+启动时（Spring 自动调 afterPropertiesSet）：
+    商品列表 = 查 MySQL(goods left join seckill_goods)
+    if 商品列表 为空:  直接返回
+
+    for 商品 in 商品列表:
+        Redis["GoodsKey:gs" + 商品.id] = 商品.库存   // 过期时间用 GOODS_LIST
+        localOverMap[商品.id] = false                // JVM 内存里的售罄小抄
+```
+
+真实代码在 `/home/claude/repos/hfbin-seckill/src/main/java/cn/hfbin/seckill/controller/SeckillController.java`：
 
 ```java
 @Controller
@@ -416,24 +428,22 @@ public class SeckillController implements InitializingBean {
     }
 ```
 
-**这段代码怎么读**
+四个细节：
 
 - `implements InitializingBean` + `afterPropertiesSet()`：这是 Spring 的一个约定。翻译成人话就是「**这个类被 Spring 创建好之后，请自动帮我执行一下这个方法**」。所以它相当于一个「开机自检 / 开机预热」的钩子。
 - `seckillGoodsService.getSeckillGoodsList()` 去数据库查出所有秒杀商品（SQL 在 `GoodsMapper.xml` 的 `selectAllGoodes`，是 `goods` 表 left join `seckill_goods` 表）。
 - `redisService.set(GoodsKey.getSeckillGoodsStock, "1", 94, ...)` → 在 Redis 里写下 `GoodsKey:gs1 = 94`。
 - `localOverMap.put(1L, false)` → 在 JVM 内存里记一笔「1 号商品：还没卖完」。
 
-**为什么要这么设计**
-
-这叫 **缓存预热**。
+**为什么要这么设计**：这叫 **缓存预热**。
 
 > **缓存预热** = 演唱会开演前，先把票据从仓库搬到售票窗口。别等观众冲进来了才派人跑去仓库找。
 
-如果不预热会怎样？第一个用户点秒杀的瞬间，系统发现 Redis 里没有库存数据，只好去查数据库。而秒杀的特点是**第一秒就是最高峰**，几万个请求会在同一瞬间全部扑向数据库——这就是所谓的「缓存击穿」，预热就是为了避免它。
+如果不预热会怎样？第一个用户点秒杀的瞬间，系统发现 Redis 里没有库存数据，只好去查数据库。
 
-**这里有个坑（真实存在）**
+而秒杀的特点是**第一秒就是最高峰**，几万个请求会在同一瞬间全部扑向数据库——这就是所谓的「缓存击穿」，预热就是为了避免它。
 
-看 `/home/claude/repos/hfbin-seckill/src/main/java/cn/hfbin/seckill/common/Const.java`：
+**这里有个坑（真实存在）。** 看 `/home/claude/repos/hfbin-seckill/src/main/java/cn/hfbin/seckill/common/Const.java`：
 
 ```java
 public interface RedisCacheExtime{
@@ -445,19 +455,19 @@ public interface RedisCacheExtime{
 }
 ```
 
-`GOODS_LIST = 60 * 30 * 24` 实际是 **43200 秒 = 12 小时**，但注释写的是「1分钟」。库存 key 用的就是这个过期时间。这意味着：**服务跑满 12 小时后，Redis 里的库存 key 会自己消失**。key 消失以后再来一次 `DECR`，Redis 会当它是 0，减完变成 -1，于是所有人都会看到「商品已经秒杀完毕」——哪怕数据库里还有 94 件库存。这是一个真实的注释/取值不一致的坑，学习时要留意。
+`GOODS_LIST = 60 * 30 * 24` 实际是 **43200 秒 = 12 小时**，但注释写的是「1分钟」。库存 key 用的就是这个过期时间。
+
+这意味着：**服务跑满 12 小时后，Redis 里的库存 key 会自己消失**。key 消失以后再来一次 `DECR`，Redis 会当它是 0，减完变成 -1，于是所有人都会看到「商品已经秒杀完毕」——哪怕数据库里还有 94 件库存。
+
+这是一个真实的注释/取值不一致的坑，学习时要留意。
 
 ---
 
 ### 2.2 第 1 步：用户登录，拿到一张「手环」
 
-**发生了什么**
-
 用户在 `http://localhost:8888/page/login` 输入手机号密码。登录成功后，服务端给浏览器种一个 Cookie，同时在 Redis 里存一份「这个 Cookie 对应哪个用户」。
 
-**对应代码在哪**
-
-文件：`/home/claude/repos/hfbin-seckill/src/main/java/cn/hfbin/seckill/controller/LoginController.java`
+代码在 `/home/claude/repos/hfbin-seckill/src/main/java/cn/hfbin/seckill/controller/LoginController.java`：
 
 ```java
 @RequestMapping("/login")
@@ -473,8 +483,6 @@ public Result<User> doLogin(HttpServletResponse response, HttpSession session, @
 }
 ```
 
-**小白比喻**
-
 这就像去游乐园：你在门口买票（登录），工作人员给你戴一个**手环**（Cookie，名字叫 `seckill_login_token`，见 `CookieUtil.java` 第 20 行），同时在他们的电脑上记一笔「手环号 XXX = 张三，有效期 30 分钟」（Redis 里的 `UserKey:name{token}`）。
 
 之后你在园区里玩任何项目，只要伸出手环，工作人员一扫就知道你是谁，不用你再掏身份证。
@@ -485,7 +493,7 @@ public Result<User> doLogin(HttpServletResponse response, HttpSession session, @
 
 把登录信息放 Redis 里，3 台服务器都去问同一个 Redis，问题就没了。这叫**分布式 Session**。
 
-**还有个小细节：登录态会自动续期**
+**还有个小细节：登录态会自动续期。**
 
 文件：`/home/claude/repos/hfbin-seckill/src/main/java/cn/hfbin/seckill/filter/SessionExpireFilter.java`
 
@@ -513,8 +521,6 @@ public void doFilter(ServletRequest servletRequest, ServletResponse servletRespo
 ---
 
 ### 2.3 第 2 步：打开商品详情页，看到那个「立即秒杀」按钮
-
-**发生了什么**
 
 用户从商品列表页 `/goods/list` 点进某个商品。注意看 `goods_list.html` 第 29 行的链接：
 
@@ -632,8 +638,6 @@ function countDown() {
 
 ### 2.4 第 3 步：点击按钮 → 先去要一个「暗号」（秒杀路径）
 
-**发生了什么**
-
 用户点击按钮后，**并没有直接发起秒杀**，而是先发了一个请求去要一串随机字符串：
 
 ```javascript
@@ -659,9 +663,7 @@ function getSeckillPath(){
 }
 ```
 
-**对应后端代码**
-
-`SeckillController.java`：
+对应后端在 `SeckillController.java`：
 
 ```java
 @AccessLimit(seconds=5, maxCount=5, needLogin=true)
@@ -733,7 +735,9 @@ public String createMiaoshaPath(User user, long goodsId) {
 
 很多同类秒杀教程在这一步还会加一个「数学公式验证码」接口（`/seckill/verifyCode`），既能防机器人，又能把用户的点击时间打散。
 
-**但这个仓库的 `v2.0` 分支里没有这个接口**——我把 `src/main/java` 全翻了一遍，`SeckillController` 只有三个接口：`/path`、`/{path}/seckill`、`/result`（外加一个演示用的 `/seckill2`）。README 里列的优化项也只提了「隐藏秒杀接口地址」，没提验证码。所以这一环是缺失的，属于可以自己动手补的练习题。
+**但这个仓库的 `v2.0` 分支里没有这个接口**——我把 `src/main/java` 全翻了一遍，`SeckillController` 只有三个接口：`/path`、`/{path}/seckill`、`/result`（外加一个演示用的 `/seckill2`）。README 里列的优化项也只提了「隐藏秒杀接口地址」，没提验证码。
+
+所以这一环是缺失的，属于可以自己动手补的练习题。
 
 **这一步的返回值判断**
 
@@ -763,9 +767,7 @@ public static CodeMsg USER_NO_LOGIN = new CodeMsg(500216, "用户未登录");
 
 ### 2.5 第 4 步：请求进服务端，第一个拦住它的是「限流闸机」
 
-**发生了什么**
-
-`GET /seckill/path` 这个请求到达服务器后，**在进入 Controller 之前**，会先后经过：
+`GET /seckill/path` 这个请求到达服务器后，**在进入 Controller 之前**，会先后经过三关：
 
 ```
 HTTP 请求
@@ -796,9 +798,7 @@ HTTP 请求
 
 > **Interceptor（拦截器）** = 景区门口的闸机。跟 Filter 的区别是：Filter 更外层、更「傻」（只知道 URL）；Interceptor 在 Spring 内部，**知道这个请求最终要交给哪个类的哪个方法**，所以能读到方法上的注解。这个能力对限流至关重要。
 
-**注解定义**
-
-文件：`/home/claude/repos/hfbin-seckill/src/main/java/cn/hfbin/seckill/annotations/AccessLimit.java`
+先看注解定义，`/home/claude/repos/hfbin-seckill/src/main/java/cn/hfbin/seckill/annotations/AccessLimit.java`：
 
 ```java
 @Retention(RUNTIME)
@@ -812,9 +812,25 @@ public @interface AccessLimit {
 
 翻译：`@AccessLimit(seconds=5, maxCount=5, needLogin=true)` 的意思是「**这个方法，同一个已登录用户，5 秒内最多访问 5 次**」。
 
-**拦截器实现**
+拦截器的逻辑，压成伪代码是这样：
 
-文件：`/home/claude/repos/hfbin-seckill/src/main/java/cn/hfbin/seckill/interceptor/AuthorityInterceptor.java`
+```
+请求进来 → Spring 已经知道它要交给哪个方法了
+注解 = 那个方法上的 @AccessLimit
+if 注解 不存在:                        放行
+if 方法所在类 != "SeckillController":   放行            // 作者写死的
+
+user = Cookie 里的 token → 去 Redis 换出来的用户
+if 注解.needLogin 且 user 为空:         打回「用户未登录」
+
+key = 请求URI + "_" + user.id                          // 按人计数，不是按接口
+次数 = Redis[key]
+if 次数 为空:                Redis[key] = 1，设 注解.seconds 秒后自动过期
+elif 次数 < 注解.maxCount:   Redis INCR key
+else:                       打回「访问太频繁！」
+```
+
+对应实现在 `/home/claude/repos/hfbin-seckill/src/main/java/cn/hfbin/seckill/interceptor/AuthorityInterceptor.java`：
 
 ```java
 @Override
@@ -934,7 +950,29 @@ function doMiaosha(path) {
 }
 ```
 
-服务端的处理方法是整个项目的**心脏**。完整贴出来（`SeckillController.java` 第 103~142 行）：
+服务端的处理方法是整个项目的**心脏**。先看它的骨架——**五道闸门串联，任何一道不过就直接返回**：
+
+```
+list(goodsId, path):
+    user = Redis[UserKey:name + cookie里的token]
+    if user 为空:                              闸门① → 用户未登录
+
+    if path != Redis[SeckillKey:mp{uid}_{gid}]  闸门② → 请求非法
+
+    if localOverMap[goodsId] == true            闸门③ → 商品已经秒杀完毕（0 次网络 IO）
+
+    if DB 里 seckill_order(uid, gid) 已存在      闸门④ → 不能重复秒杀
+
+    stock = Redis DECR GoodsKey:gs{goodsId}     闸门⑤ ★
+    if stock < 0:
+        localOverMap[goodsId] = true
+        → 商品已经秒杀完毕
+
+    发消息 {user, goodsId} 进 seckill.queue
+    return success(0)                           「排队中，你等着」
+```
+
+完整代码（`SeckillController.java` 第 103~142 行）：
 
 ```java
 @RequestMapping(value = "/{path}/seckill", method = RequestMethod.POST)
@@ -979,7 +1017,7 @@ public Result<Integer> list(Model model,
 }
 ```
 
-这 40 行代码是**五道闸门串联**，我们一道一道过。
+这 40 行代码，我们一道闸门一道闸门过。五道里真正值得停下来看的只有第三道（内存标记）和第五道（Redis 预减），前两道是模板。
 
 #### 闸门 ①：你登录了吗？
 
@@ -1021,7 +1059,9 @@ if (over) { return Result.error(CodeMsg.MIAO_SHA_OVER); }
 
 **为什么要这一层？**
 
-想象一下秒杀开始 3 秒后，货已经卖光了。但外面还有 50 万人在疯狂点按钮。如果没有这层内存标记，这 50 万个请求每一个都要去 Redis 做一次 `DECR`——Redis 虽然快，但也扛不住无意义的 50 万次写。
+想象一下秒杀开始 3 秒后，货已经卖光了。但外面还有 50 万人在疯狂点按钮。
+
+如果没有这层内存标记，这 50 万个请求每一个都要去 Redis 做一次 `DECR`——Redis 虽然快，但也扛不住无意义的 50 万次写。
 
 有了这层标记，第一个发现「减完变成负数」的请求会把 `localOverMap[goodsId]` 设成 `true`，后面 49 万 9999 个请求在这里就被瞬间弹回去了。
 
@@ -1068,7 +1108,9 @@ if (order != null) { return Result.error(CodeMsg.REPEATE_MIAOSHA); }
 
 > 修改预减库存与是否秒杀到商品的顺序，解决一个人重复点击，虽然返回不能重复秒杀，但是会造成redis判断商品的库存会减少到0以下，导致库存还有99，但是已经显示秒杀完成的问题。
 
-翻译：如果先 `DECR` 再判断重复，那么一个用户狂点 100 次，Redis 库存就被白白扣掉 100 个。虽然后面 99 次都会返回「不能重复秒杀」，但 Redis 里的库存已经被扣成负数了 → 内存标记被置成售罄 → **明明数据库还有 99 件货，系统却对所有人说卖完了**。
+翻译：如果先 `DECR` 再判断重复，那么一个用户狂点 100 次，Redis 库存就被白白扣掉 100 个。
+
+虽然后面 99 次都会返回「不能重复秒杀」，但 Redis 里的库存已经被扣成负数了 → 内存标记被置成售罄 → **明明数据库还有 99 件货，系统却对所有人说卖完了**。
 
 调换顺序后，重复点击在 `DECR` 之前就被挡掉了。这个 bug 修得很典型，值得记住：**扣减类操作要尽量靠后，只在真正必要时才执行**。
 
@@ -1169,7 +1211,9 @@ Redis 处理命令是**单线程**的。你可以理解为：Redis 门口只有�
       全部包在一个数据库事务里
 ```
 
-三条 SQL + 一个事务，可能要 10~50 毫秒。如果让用户在浏览器前面干等这 50 毫秒，倒也不是不行——但问题是**并发**：Tomcat 的线程池是有限的（默认 200 个），每个线程被一次下单占住 50ms，那么每秒最多处理 200 / 0.05 = 4000 个请求。一旦流量超过这个数，后面的请求就得排队，排到超时，页面转圈圈。
+三条 SQL + 一个事务，可能要 10~50 毫秒。如果让用户在浏览器前面干等这 50 毫秒，倒也不是不行——但问题是**并发**。
+
+Tomcat 的线程池是有限的（默认 200 个），每个线程被一次下单占住 50ms，那么每秒最多处理 200 / 0.05 = 4000 个请求。一旦流量超过这个数，后面的请求就得排队，排到超时，页面转圈圈。
 
 于是就有了**消息队列**。
 
@@ -1177,7 +1221,7 @@ Redis 处理命令是**单线程**的。你可以理解为：Redis 门口只有�
 
 ### 2.7 第 6 步：★ 扔进消息队列，然后立刻说「你排上队了」
 
-**代码**
+接上一节的最后四行：
 
 ```java
 //入队
@@ -1350,7 +1394,7 @@ Redis DECR (0.1ms)   │  用户只等这么点时间
 
 ### 2.8 第 7 步：前端开始「催单」（轮询）
 
-**前端代码**（`goods_detail.htm`）：
+前端代码（`goods_detail.htm`）：
 
 ```javascript
 function getMiaoshaResult(goodsId) {
@@ -1380,7 +1424,7 @@ function getMiaoshaResult(goodsId) {
 
 关键就是 `setTimeout(..., 200)`：**每 200 毫秒问一次「我的好了吗？」**，直到拿到明确的成功或失败。
 
-**后端接口**（`SeckillController.java`）：
+后端接口（`SeckillController.java`）：
 
 ```java
 /**
@@ -1402,7 +1446,17 @@ public Result<Long> miaoshaResult(@RequestParam("goodsId") long goodsId, HttpSer
 }
 ```
 
-**判断逻辑**（`SeckillOrderServiceImpl.java`）：
+判断逻辑就三行，先看伪代码：
+
+```
+getSeckillResult(userId, goodsId):
+    order = DB 查 seckill_order(userId, goodsId)
+    if order 存在:                     return order.orderId   // > 0，成功
+    if Redis 里有 SeckillKey:go{gid}:  return -1              // 已售罄，失败
+    return 0                                                  // 还在队列里排队
+```
+
+实现（`SeckillOrderServiceImpl.java`）：
 
 ```java
 public long getSeckillResult(Long userId, long goodsId) {
@@ -1451,9 +1505,12 @@ private boolean getGoodsOver(long goodsId) {
 
 优点：实现极其简单，前后端都不用改造，兼容所有浏览器。
 
-缺点：浪费。一个用户等 2 秒，就要发 10 次请求。10 万人同时等，就是每秒 50 万次请求打到 `/seckill/result`——而这个接口每次都要**查一次数据库**（`selectByUserIdAndGoodsId`）。讽刺的是，我们前面费尽心思把数据库压力降下来，结果轮询接口又把它顶上去了。
+缺点：浪费。一个用户等 2 秒，就要发 10 次请求。10 万人同时等，就是每秒 50 万次请求打到 `/seckill/result`——而这个接口每次都要**查一次数据库**（`selectByUserIdAndGoodsId`）。
+
+讽刺的是，我们前面费尽心思把数据库压力降下来，结果轮询接口又把它顶上去了。
 
 改进方向（项目里没做，但值得知道）：
+
 - 把「用户是否秒杀成功」的结果也写一份到 Redis，轮询只查 Redis；
 - 或者改用 WebSocket / SSE，下单成功后服务端**主动推送**给浏览器，不用轮询。
 
@@ -1461,9 +1518,27 @@ private boolean getGoodsOver(long goodsId) {
 
 ### 2.9 第 8 步：★ 后台消费者真正下单
 
-这是链路的最后一段，也是唯一真正碰数据库写操作的地方。
+这是链路的最后一段，也是唯一真正碰数据库写操作的地方。整段逻辑是这样：
 
-**代码**：`/home/claude/repos/hfbin-seckill/src/main/java/cn/hfbin/seckill/mq/MQReceiver.java`
+```
+每收到一条消息（10 个线程并发跑）:
+    {user, goodsId} = 反序列化(消息)
+
+    goods = DB 查商品
+    if goods.库存 <= 0:                        直接 return，消息丢弃
+    if DB 里 seckill_order(user, goodsId) 存在: 直接 return，消息丢弃
+
+    事务 {
+        影响行数 = UPDATE seckill_goods SET stock_count = stock_count - 1
+        if 影响行数 == 1:
+            INSERT order_info        → 自增主键回填到 orderInfo.id
+            INSERT seckill_order     (user_id, order_id, goods_id)
+        else:
+            Redis 打售罄标记 SeckillKey:go{goodsId}，60 秒
+    }
+```
+
+代码在 `/home/claude/repos/hfbin-seckill/src/main/java/cn/hfbin/seckill/mq/MQReceiver.java`：
 
 ```java
 @Service
@@ -1589,7 +1664,9 @@ private void setGoodsOver(Long goodsId) {
 }
 ```
 
-在 Redis 里打一个 `SeckillKey:go{goodsId} = true` 的标记，有效期 60 秒。这个标记就是给**轮询接口**用的——让还在傻等的用户能收到 `-1`，看到「对不起，秒杀失败」，而不是无限转圈。
+在 Redis 里打一个 `SeckillKey:go{goodsId} = true` 的标记，有效期 60 秒。
+
+这个标记就是给**轮询接口**用的——让还在傻等的用户能收到 `-1`，看到「对不起，秒杀失败」，而不是无限转圈。
 
 ---
 
@@ -2034,6 +2111,7 @@ WHERE goods_id = #{goodsId} AND stock_count > 0
 **为什么实际跑起来通常不出问题？** 因为前面 Redis 的 `DECR` 已经把进入队列的消息数**严格限制**在库存数以内了。所以 MQReceiver 收到的消息本来就不会超量，数据库层的缺陷被上游掩盖了。
 
 但这依然是个隐患。举几个 Redis 那层失守的场景：
+
 - Redis 重启，`GoodsKey:gs1` 丢了，`DECR` 从 -1 重新开始（这种情况反而变成一件都卖不出去）；
 - 运维手动改了 Redis 里的库存值；
 - 手工往 `seckill.queue` 里补发了消息；
@@ -2195,7 +2273,7 @@ MQ 消费失败无补偿                        → 死信队列 + 重试 + 失�
 
 ## 8. 自己跑起来需要什么
 
-按 `README.md` 的说明 + 我读代码发现的几个坑，完整清单如下：
+按 `README.md` 的说明 + 我读代码发现的几个坑，完整清单如下。
 
 ### 8.1 环境准备
 

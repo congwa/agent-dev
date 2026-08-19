@@ -12,7 +12,19 @@
   disabled: !!js process.platform !== 'win32'
 ```
 
-`packages/bundle/base/cordis.patch.yml:214-216`。与 `tool-bash` 的 `disabled` 条件严格互补，同一台机器上只会活一个。注入清单在源码：`export const inject = ['tools', 'shell', 'systemPrompt', 'shellEnv']`（`packages/shell/tool-pwsh/src/index.ts:49`）。
+这一行的 `disabled` 条件与 `tool-bash` 严格互补，所以选型在启动时就定死了，一台机器上只会活一个：
+
+```
+if process.platform == 'win32':
+    激活 tool-pwsh      // tool-bash 的 disabled 为真，整个关掉
+else:
+    激活 tool-bash      // 这里的 disabled 为真，整个关掉
+两条分支最终都接到同一个 ctx.shell 接缝，参数与渲染逻辑互为镜像
+```
+
+注入清单在源码里写的是 `export const inject = ['tools', 'shell', 'systemPrompt', 'shellEnv']`。
+
+出处：树上那段 `packages/bundle/base/cordis.patch.yml:214-216`；inject 见 `packages/shell/tool-pwsh/src/index.ts:49`。
 
 web 档同样整行关掉：
 
@@ -22,8 +34,6 @@ web 档同样整行关掉：
 ```
 
 `packages/bundle/web-app/cordis.patch.yml:296-297`。
-
-两者的 `disabled` 条件严格互补，同一台机器上只会活一个，但共用同一套 `ctx.shell` 接缝与渲染逻辑：
 
 ```mermaid
 flowchart TD
@@ -66,7 +76,7 @@ prompt 段正文（逐字）：
 Non-zero exits are reported as `[exit code: N]` markers; investigate failures before moving on. On Windows a killed process settles as `[exit code: 1]` without a signal marker; treat a bare exit 1 after an interruption as a termination, not a command failure.
 ```
 
-参数面与 `bash` 逐字对齐（源码用 `jscpd:ignore-start` 标记这是刻意的镜像，`src/index.ts:255`）：`command`、`description` 必填，`timeoutMs`、`workdir` 可选，`run_in_background` 与 `sandbox_permissions`/`justification` 同样是条件字段。
+参数面与 `bash` 逐字对齐：`command`、`description` 必填，`timeoutMs`、`workdir` 可选，`run_in_background` 与 `sandbox_permissions`/`justification` 同样是条件字段。这份重复是刻意的，源码用 `jscpd:ignore-start` 标了出来（`src/index.ts:255`）。
 
 ## 配置项
 
@@ -78,27 +88,77 @@ base bundle 未给 config，跑的是默认值。
 
 ## 模型看得见什么
 
-- **系统提示**：上面那段 order 105 文本。它比 bash 那句多一层 Windows 特有的教学——被强杀的进程结算成 `[exit code: 1]` 且**没有**信号标记，不要把它读成命令失败。
-- **工具描述**：以 ``Execute a PowerShell command (`pwsh -Command`) and return its stdout/stderr.`` 起手，明确教「路径写原生 `C:\...`、环境变量读 `$env:NAME`」，并把 `$env:DSH_*` 作为环境事实的通用约定（`src/index.ts:107-115`）。
-- **前台结果**：与 bash 同一套标记行——`[output truncated; full output: <path>]`、`[sandbox: file access denied under <mode> mode]`（+ 组合公开升权时的 `[sandbox: escalation available — …]`）、`[timed out after <timeoutMs>ms]`、`[killed by signal: <signal>]`、`[exit code: <exitCode>]`；干净退出不产生任何标记，空体渲染 `(no output)`（README.md:83）。`[killed by signal: …]` 在 Windows 上实际不会出现，是 POSIX-only（README.md:33）。
-- **后台**：`started background job <id>`，后续由 `job_output` / `job_kill` 接管。
-- **错误**：稳定串见 README.md:111，与 bash 侧高度重合。
+**系统提示**就是上面那段 order 105 文本。它比 bash 那句多一层 Windows 特有的教学——被强杀的进程结算成 `[exit code: 1]` 且**没有**信号标记，不要把它读成命令失败。
+
+**工具描述**以 ``Execute a PowerShell command (`pwsh -Command`) and return its stdout/stderr.`` 起手，明确教「路径写原生 `C:\...`、环境变量读 `$env:NAME`」，并把 `$env:DSH_*` 作为环境事实的通用约定（`src/index.ts:107-115`）。
+
+**前台结果**与 bash 共用同一套标记行：
+
+| 标记 | 出现时机 |
+|---|---|
+| `[output truncated; full output: <path>]` | 输出被截断 |
+| `[sandbox: file access denied under <mode> mode]` | 沙箱拒绝文件访问 |
+| `[sandbox: escalation available — …]` | 组合公开升权时追加 |
+| `[timed out after <timeoutMs>ms]` | 超时 |
+| `[killed by signal: <signal>]` | POSIX-only，Windows 上实际不会出现 |
+| `[exit code: <exitCode>]` | 非零退出 |
+| 无任何标记 | 干净退出 |
+| `(no output)` | 空体渲染 |
+
+出处：标记行与 `(no output)` 见 README.md:83；`[killed by signal: …]` 是 POSIX-only 见 README.md:33。
+
+**后台**打印 `started background job <id>`，后续由 `job_output` / `job_kill` 接管。**错误**的稳定串见 README.md:111，与 bash 侧高度重合。
 
 ## 什么时候你会想换掉它 / 怎么换
 
-- 想在 Windows 上仍然用 bash 语义：把这一行的 `disabled` 改成 `true`，同时把 `tool-bash` 的 `disabled` 改成 `false`，并保证 `ctx.shell` 由一个 bash 方言执行器提供——工具契约是方言绑定的，没有翻译层（README.md:125）。
-- 想关后台：`config: { enableRunInBackground: false }`。
-- 想让它在非 Windows 上也能用来跑 pwsh：改 `disabled` 表达式即可，但 `ctx.shell` 必须换成 `dsh-pwsh-local` 或 [pwsh-sandbox](./dsh-pwsh-sandbox.md)。
+| 想干什么 | 怎么改 |
+|---|---|
+| Windows 上仍用 bash 语义 | 这一行 `disabled` 改 `true`，`tool-bash` 的改 `false`，并保证 `ctx.shell` 由 bash 方言执行器提供 |
+| 关掉后台 | `config: { enableRunInBackground: false }` |
+| 非 Windows 上也跑 pwsh | 改 `disabled` 表达式即可，但 `ctx.shell` 必须换成 `dsh-pwsh-local` 或 [pwsh-sandbox](./dsh-pwsh-sandbox.md) |
+
+第一条要注意：工具契约是方言绑定的，中间没有翻译层（README.md:125）。
 
 ## 坑与边界
 
-- **read-only 模式下 PowerShell 会掉进 ConstrainedLanguage**：在 Windows ACL 沙箱里，read-only 的临时目录写入被拒 → AppLocker 探测 fail closed，于是 `Add-Type`、非核心 .NET 静态成员（`[System.IO.*]::`、`[math]::`）、COM、反射全部报 “only core types” 错，且**无法从内部提升**。workspace-write 有私有 temp，探测能完成，通常保持 FullLanguage（README.md:123）。
-- **两种受限模式都禁止 named pipe 打开**：受限命令里再 spawn 一个带管道 stdio 的子进程会拿到 EPERM（README.md:123）。
-- **没有持久 shell / PTY**：每次都是全新 `pwsh -Command`；PTY 后端目前只有 Linux/macOS，Windows ConPTY 持久 shell 是路线图（README.md:124）。
-- **session cwd 未做规范化**：workdir 基准直接取 `session.header.cwd` 原样（`src/index.ts:151-157`），而受限执行器那边的 workspace root **是**规范化过的（由共享 policy 服务处理）。原始 cwd 与其规范形式不同时，workdir 与限制根会分叉——这是与 bash 侧的已知平价缺口（README.md:126）。bash 侧用 `canonicalPath` 处理了同一问题（`packages/shell/tool-bash/src/index.ts:150`）。
-- **加载期错误信息里写的是 “bash executor”**：`tool-pwsh: the mounted bash executor confines but ctx.sandboxPolicy is missing`（`src/index.ts:202`）——查日志时别被这个词误导，抛它的是 pwsh 包。
-- **README inject 写错**：README.md:7 抄的是 `['tools', 'bash', 'systemPrompt', 'bashEnv']`，源码为 `['tools', 'shell', 'systemPrompt', 'shellEnv']`（`src/index.ts:49`）。
-- **`docs/tool-catalog.md:22` 说它「mirrors the bash tool call-for-call minus sandbox controls」**，但源码确实带 `sandbox_permissions` / `justification` 与 `approveEscalation` 调用（`src/index.ts:34, 232, 270-280`），README 也有升权描述——目录那句话的措辞已过时。
+**read-only 模式下 PowerShell 会掉进 ConstrainedLanguage。** 这是一条踩下去很难自救的链子：
+
+```
+Windows ACL 沙箱 + read-only
+  → 临时目录写入被拒
+  → AppLocker 探测 fail closed
+  → 语言模式降为 ConstrainedLanguage
+  → Add-Type、非核心 .NET 静态成员（[System.IO.*]::、[math]::）、COM、反射
+    全部报 "only core types"
+  → 无法从内部提升
+```
+
+workspace-write 有私有 temp，探测能完成，通常保持 FullLanguage（README.md:123）。
+
+**两种受限模式都禁止 named pipe 打开**：受限命令里再 spawn 一个带管道 stdio 的子进程会拿到 EPERM（README.md:123）。
+
+**没有持久 shell / PTY**：每次都是全新 `pwsh -Command`。PTY 后端目前只有 Linux/macOS，Windows ConPTY 持久 shell 还在路线图上（README.md:124）。
+
+**session cwd 未做规范化**，这是与 bash 侧的已知平价缺口：
+
+```
+workdir 基准 = session.header.cwd          // 原样取用，不规范化
+限制根       = canonicalize(workspace root) // 共享 policy 服务处理过
+若 原始 cwd != 其规范形式 → 两者分叉
+```
+
+bash 侧用 `canonicalPath` 处理了同一问题（`packages/shell/tool-bash/src/index.ts:150`）。pwsh 侧见 `src/index.ts:151-157`，缺口记录在 README.md:126。
+
+**加载期错误信息里写的是 "bash executor"**：`tool-pwsh: the mounted bash executor confines but ctx.sandboxPolicy is missing`（`src/index.ts:202`）——查日志时别被这个词误导，抛它的是 pwsh 包。
+
+另有两处文档与源码对不上：
+
+| 文档 | 文档写的 | 源码实际 |
+|---|---|---|
+| README.md:7 | inject 是 `['tools', 'bash', 'systemPrompt', 'bashEnv']` | `['tools', 'shell', 'systemPrompt', 'shellEnv']`（`src/index.ts:49`） |
+| `docs/tool-catalog.md:22` | 「mirrors the bash tool call-for-call minus sandbox controls」 | 确实带 `sandbox_permissions` / `justification` 与 `approveEscalation` 调用（`src/index.ts:34, 232, 270-280`） |
+
+README 也有升权描述，所以目录那句话的措辞已过时。
 
 ## 相关
 

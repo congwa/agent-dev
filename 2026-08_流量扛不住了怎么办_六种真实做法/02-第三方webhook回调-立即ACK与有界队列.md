@@ -7,7 +7,13 @@
 
 ## 先看别人的规矩
 
-这不是最佳实践建议，这是人家白纸黑字的硬性要求。
+这不是最佳实践建议，这是人家白纸黑字的硬性要求。三家的措辞不一样，说的是同一件事：**先回 2xx，再干活。**
+
+| 平台 | 硬性要求 |
+|---|---|
+| GitHub | 收到投递后 **10 秒内**返回 2XX |
+| Stripe | 在任何可能导致超时的复杂逻辑**之前**返回 2xx |
+| Svix | 合理时间内返回 2xx（Svix 是 **15 秒**）|
 
 **GitHub**（[Best practices for using webhooks](https://docs.github.com/en/webhooks/using-webhooks/best-practices-for-using-webhooks)）：
 
@@ -27,7 +33,24 @@
 
 注意 GitHub 的官方示例代码返回的是 **202 Accepted**，不是 200。这个语义更准确：「收到了，稍后处理」。
 
-Svix 的重推退避表是这样的：**立刻 → 5 秒 → 5 分钟 → 30 分钟 → 2 小时 → 5 小时 → 10 小时 → 再 10 小时**。加起来单条消息的可补救窗口大约 **27.6 小时**。（另外还有个「某个端点连续失败 5 天就禁用」的规则，别把这两个 5 天/27 小时搞混。）
+### 那张退避表
+
+Svix 的重推退避是这样的：**立刻 → 5 秒 → 5 分钟 → 30 分钟 → 2 小时 → 5 小时 → 10 小时 → 再 10 小时**。
+
+| 第几次重推 | 距上一次 |
+|---|---|
+| 1 | 立刻 |
+| 2 | 5 秒 |
+| 3 | 5 分钟 |
+| 4 | 30 分钟 |
+| 5 | 2 小时 |
+| 6 | 5 小时 |
+| 7 | 10 小时 |
+| 8 | 再 10 小时 |
+
+加起来，单条消息的可补救窗口大约 **27.6 小时**。
+
+另外还有个「某个端点连续失败 5 天就禁用」的规则，别把这两个 5 天 / 27 小时搞混 —— 前者管的是端点的死活，后者管的是单条消息。
 
 **记住这张表。** 后面会用到 —— 你回 503 的代价，比你想的小得多。
 
@@ -35,12 +58,18 @@ Svix 的重推退避表是这样的：**立刻 → 5 秒 → 5 分钟 → 30 分
 
 ## 跑一下，看三种接法的下场
 
-场景：
+同一批推送，三种接法，三种死法：A 把数据推丢了还顺手把流量放大三倍，B 一条不丢但重启就全没，C 主动丢一部分、丢的都能捡回来。
 
-- 你的处理逻辑（写库 + 发通知）要 **100ms**
-- 你有 **5 个 worker** → 处理能力 **50 条/秒**
-- 对方峰值推 **200 条/秒**，是你的 4 倍
-- 对方超时 300ms（真实是 10~15 秒，这里等比缩小），失败重推 3 次
+场景是这样设定的：
+
+| 参数 | 取值 |
+|---|---|
+| 处理逻辑耗时（写库 + 发通知） | 100ms |
+| worker 数量 | 5 个 |
+| 你的处理能力 | 50 条/秒 |
+| 对方峰值推送 | 200 条/秒（你的 4 倍）|
+| 对方超时 | 300ms（真实是 10~15 秒，这里等比缩小）|
+| 失败重推 | 3 次 |
 
 三条路径从这里分岔开：
 
@@ -100,6 +129,18 @@ python3 demos/demo02_webhook.py
 
 > 这个 demo 跑的是真实并发调度，每次运行数字会有小幅波动（几个百分点），但趋势和量级是稳定的。
 
+横过来对着看，差别更刺眼（三组都是对方共推 600 条，C 的队列上限是 200）：
+
+| 指标 | A 处理完再返回 | B 无界队列 | C 有界队列 |
+|---|---|---|---|
+| ACK 的 P99 耗时 | 305 ms | 0 ms | 0 ms |
+| 对方判定超时 | 1755 | 0 | 0 |
+| 你主动回 503 | 0 | 0 | 715 |
+| 触发重推 | 1170 | 0 | 495 |
+| 对方彻底放弃 | 585 | 0 | 220 |
+| 队列峰值长度 | 0 | 450 | 200 |
+| 停推后清空积压 | 0.0s | 9.1s | 4.1s |
+
 一行一行看。
 
 ---
@@ -131,7 +172,9 @@ sequenceDiagram
     Note over W,H: 请求量变成原始的 3 倍，越忙越慢
 ```
 
-而且注意 A 的「队列峰值长度」是 0 —— 你没有任何队列。**你的队列就是对方的重推缓冲区**，只不过你完全控制不了它。
+而且注意 A 的「队列峰值长度」是 0 —— 你没有任何队列。
+
+**你的队列就是对方的重推缓冲区**，只不过你完全控制不了它：多大、留多久、什么时候放弃，全是对方说了算。
 
 这就是第 00 篇说的：**你越慢，它推得越多，你更慢。**
 
@@ -186,6 +229,8 @@ FastAPI 的 `BackgroundTasks` 就是这个模式。官方文档自己承认了�
 1. **同进程** —— 跟请求处理抢 CPU；同步函数走 `run_in_threadpool`，线程池打满会连带阻塞正常请求
 2. **无持久化** —— 进程死了任务就没了，而你已经回过 200
 3. **无上限** —— `BackgroundTasks.tasks` 就是一个普通 `list`，没有 maxsize、没有拒绝路径、没有丢弃计数
+
+第三条值得多看一眼：普通 `list` 意味着你连「我正在丢东西」都统计不出来 —— 没有 maxsize 就没有满，没有满就没有拒绝路径，没有拒绝路径自然也没人去数丢了多少。
 
 Netflix 的 [Dispatch](https://github.com/Netflix/dispatch)（6.5k stars，2025-09 已归档）就是这么接 Slack 事件的：
 
@@ -243,7 +288,18 @@ flowchart TD
 
 注意 C 的表里也有 220 条「彻底放弃」。别被这个数字吓到 —— 那是因为 demo 里对方只重试 3 次、退避 0.2/0.4 秒。
 
-**真实世界的退避窗口是二十多个小时**（回去看 Svix 那张表）。只要尖峰在这个窗口内过去，这些回调都能补回来。
+**真实世界的退避窗口是二十多个小时**（回去看 Svix 那张表）。被你 503 掉的那条消息，在对方那边其实是这样一段循环：
+
+```
+for 间隔 in [立刻, 5秒, 5分钟, 30分钟, 2小时, 5小时, 10小时, 10小时]:
+    等(间隔)
+    再推一次
+    if 收到 2xx:
+        补回成功，结束            // 只要尖峰在这期间过去就没事
+# 全程走完 ≈ 27.6 小时
+```
+
+只要尖峰在这个窗口内过去，这些回调都能补回来。
 
 所以 C 的丢失是**暂时的、可见的、可恢复的**；B 的丢失是**永久的、无声的**。
 
@@ -257,11 +313,13 @@ flowchart TD
 >
 > `put_nowait(item)`：不阻塞地放入一个元素。如果没有空位，抛出 `QueueFull`。
 
-三个要点：
+三个要点，一张表说完：
 
-1. `asyncio.Queue()` **默认无界**（`maxsize=0`）
-2. `await put()` 是「满则等待」—— 这是背压，但会拖慢你的 HTTP 响应（→ 变成方案 A）
-3. `put_nowait()` 是「满则立刻抛异常」—— 这才是你要的
+| 写法 | 队列满时 | webhook 场景 |
+|---|---|---|
+| `asyncio.Queue()` | 默认 `maxsize=0`，无界，永远不满 | ❌ 就是方案 B |
+| `await put()` | 满则等待（这是背压） | ❌ 会拖慢 HTTP 响应，退化成方案 A |
+| `put_nowait()` | 满则立刻抛 `QueueFull` | ✅ 这才是你要的 |
 
 一个能直接用的 FastAPI 接收端：
 
@@ -308,7 +366,9 @@ async def receive(request: Request):
         return Response(status_code=503, headers={"Retry-After": "10"})
 
     return Response(status_code=202)             # ④ 立刻返回，什么业务逻辑都不做
+```
 
+```python
 def verify(raw: bytes, sig: str) -> bool:
     expected = hmac.new(SECRET, raw, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, sig)
@@ -375,7 +435,7 @@ def get_response_from_webhookpayload(self, cells, identifier=None, integration_i
     return HttpResponse(status=status.HTTP_202_ACCEPTED)
 ```
 
-它的**每一层都有上限**，这点特别值得学（`hybridcloud/models/webhookpayload.py` 和 `tasks/deliver_webhooks.py`）：
+它的**每一层都有上限**，这点特别值得学。重试节奏在 `hybridcloud/models/webhookpayload.py`：
 
 ```python
 MAX_ATTEMPTS = 10
@@ -387,6 +447,8 @@ def schedule_next_attempt(self) -> None:
     backoff = BACKOFF_INTERVAL * BACKOFF_RATE**attempts
 ```
 
+投递侧的几个上限在 `tasks/deliver_webhooks.py`：
+
 ```python
 MAX_MAILBOX_DRAIN = 300
 BATCH_SIZE = 1000
@@ -394,7 +456,19 @@ MAX_DELIVERY_AGE = 3 days      # 超过 3 天直接 delete()，打点 outcome="m
 # attempts >= MAX_ATTEMPTS 时也 delete()，打点 outcome="attempts_exceed"
 ```
 
-**尝试次数有上限、消息年龄有上限、单次处理量有上限，而且每种丢弃都有对应的打点。** 这就是「有界」的完整含义。
+把两处的丢弃条件合起来写，就是这么一段循环：
+
+```
+for payload in 待投递:
+    if payload.attempts >= MAX_ATTEMPTS:      // 10 次
+        delete(payload); 打点 attempts_exceed
+    elif payload 存活时间 > 3 天:
+        delete(payload); 打点 max_age
+    else:
+        投递(payload)                          // 失败就按 3 * 1.4**attempts 退避重排
+```
+
+**尝试次数有上限、消息年龄有上限、单次处理量有上限，而且每种丢弃都有对应的打点。** 这就是「有界」的完整含义 —— 不是只给队列长度封个顶就完事。
 
 三层上限对应的丢弃路径：
 
@@ -440,13 +514,15 @@ if not self._worker.submit(send_envelope_wrapper):
         self.record_lost_event("queue_overflow", item=item)
 ```
 
-**丢弃有明确的原因分类**（`full_queue` / `queue_overflow`）。而且队列满还会让 `is_healthy()` 返回 False —— 队列满 = 传输不健康，这个信号会一路传上去。
+**丢弃有明确的原因分类**（`full_queue` / `queue_overflow`）。
+
+而且队列满还会让 `is_healthy()` 返回 False —— 队列满 = 传输不健康，这个信号会一路传上去。
 
 ---
 
 ## 用消息队列的话，别忘了给队列设上限
 
-「我用 RabbitMQ / Redis / Celery，总不会有问题了吧」—— 会有，而且默认配置几乎肯定有。
+「我用 RabbitMQ / Redis / Celery，总不会有问题了吧」—— 会有，而且默认配置几乎肯定有。下面三节的结论都一样：**默认值是给吞吐设计的，不是给你的数据安全设计的。**
 
 ### RabbitMQ：`x-max-length` + `x-overflow`
 
@@ -459,6 +535,18 @@ if not self._worker.submit(send_envelope_wrapper):
 | `x-overflow` | 溢出行为 |
 
 `x-overflow` 有三个合法值，**默认值是最危险的那个**：
+
+```
+当 队列写满（x-max-length 到顶）:
+    if x-overflow == "drop-head":          // 默认
+        丢掉队首（最老的那条），谁也不通知
+    if x-overflow == "reject-publish":
+        丢掉新来的那条
+        if 开了 publisher confirms: 用 basic.nack 告诉发送方
+        else:                       照样静默丢弃，只是丢的是新的
+    if x-overflow == "reject-publish-dlx":
+        同上，另外把被拒的消息投进死信队列存档
+```
 
 - **`drop-head`（默认）** —— 丢**队首**，也就是最老的消息。对 webhook 来说这意味着「静默丢弃最早的支付回调」，而且发送方完全不知道。
 - **`reject-publish`** —— 丢**新来的**，并通过 `basic.nack` **告诉发送方**。这才是真背压。
@@ -492,7 +580,15 @@ flowchart TD
 XADD webhooks MAXLEN ~ 10000 * payload "..."
 ```
 
-`~` 是近似裁剪：只在整个 macro node 都可淘汰时才删，所以实际长度可能略大于 10000，但性能是 O(1) 摊销的，比精确裁剪快得多。
+`~` 是近似裁剪，行为大致是：
+
+```
+XADD 之后:
+    if 当前长度 > 10000 且 最老的整个 macro node 都可淘汰:
+        整块删掉                     // O(1) 摊销，比精确裁剪快得多
+    else:
+        先留着                       // 所以实际长度可能略大于 10000
+```
 
 redis-py 里有个坑（`redis/commands/core.py`）：
 
@@ -500,13 +596,25 @@ redis-py 里有个坑（`redis/commands/core.py`）：
 def xadd(self, name, fields, id="*", maxlen=None, approximate=True, ...)
 ```
 
-**`approximate` 默认就是 True**。所以 `r.xadd("webhooks", {...}, maxlen=10000)` 已经等价于 `MAXLEN ~ 10000`。要精确必须显式写 `approximate=False`。另外 `maxlen` 和 `minid` 不能同时给。
+**`approximate` 默认就是 True**。所以 `r.xadd("webhooks", {...}, maxlen=10000)` 已经等价于 `MAXLEN ~ 10000`。
+
+要精确必须显式写 `approximate=False`。另外 `maxlen` 和 `minid` 不能同时给。
 
 ### Celery：默认配置就是无界的
 
 **[celery/celery](https://github.com/celery/celery)** · 28.5k stars。它有几个默认行为会让队列悄悄长到 OOM：
 
-**1. `task_create_missing_queues` 默认是开的。** 你路由到一个不存在的队列，Celery 会运行时自动声明一个**没有任何 argument 的无界队列**。这是「悄悄长到 OOM」的头号原因。
+**1. `task_create_missing_queues` 默认是开的。** 你路由到一个不存在的队列，Celery 会运行时自动声明一个**没有任何 argument 的无界队列**：
+
+```
+publish(task, routing_key="webhooks"):
+    if 队列 "webhooks" 不存在:
+        if task_create_missing_queues:        // 默认开
+            自动声明一个队列，不带任何 argument   // 没有 x-max-length → 无界
+    投递
+```
+
+这是「悄悄长到 OOM」的头号原因。
 
 **2. 生产者侧完全没有背压。** `apply_async()` 只是一次 publish，broker 不满即成功，永不阻塞、永不 reject。
 
@@ -632,7 +740,9 @@ async def worker(n):
             queue.task_done()
 ```
 
-一个未捕获异常杀掉一个 worker，你的处理能力就少了 1/8。跑几天就全没了，而且没有任何告警 —— 队列还在收，只是没人处理了。
+一个未捕获异常杀掉一个 worker，你的处理能力就少了 1/8。
+
+跑几天就全没了，而且没有任何告警 —— 队列还在收，只是没人处理了。
 
 **5. 别在 handler 里做「只要 1ms」的事**
 
@@ -640,7 +750,9 @@ async def worker(n):
 
 **6. 优雅退出**
 
-进程收到 SIGTERM 时，要先停止接收新请求，把队列里的东西处理完（或者持久化），再退出。K8s 默认给 30 秒。这就是为什么方案 B 在滚动发布时特别容易丢数据。
+进程收到 SIGTERM 时，要先停止接收新请求，把队列里的东西处理完（或者持久化），再退出。K8s 默认给 30 秒。
+
+这就是为什么方案 B 在滚动发布时特别容易丢数据。
 
 ---
 

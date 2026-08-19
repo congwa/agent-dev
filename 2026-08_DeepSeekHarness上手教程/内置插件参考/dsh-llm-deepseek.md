@@ -15,7 +15,13 @@
       name: '@deepseek-ai/dsh-llm-deepseek'
 ```
 
-`packages/bundle/base/cordis.patch.yml:446-451`，正好是 base bundle 的最后一行（全文 451 行）。**不带 config**，所以下面表格里的默认值就是它实际跑的值。源码级 `inject = ['llm']`（`packages/llm/llm-deepseek/src/index.ts:42`），依赖 [llm](./dsh-llm.md) 提供的 `ctx.llm`。
+这段正好是 base bundle 的最后一行，全文 451 行，它占 `446-451`。
+
+注意它**不带 config**，所以下面那张配置表里的默认值，就是它实际跑起来的值——没有任何一行 bundle 配置在中间改写。
+
+源码级 `inject = ['llm']`，依赖 [llm](./dsh-llm.md) 提供的 `ctx.llm`。
+
+出处：bundle 那一段见 `packages/bundle/base/cordis.patch.yml:446-451`；`inject` 见 `packages/llm/llm-deepseek/src/index.ts:42`。
 
 ## 它注册了什么
 
@@ -25,7 +31,9 @@
 | configurable provider 目录项 | provider `deepseek-official`，`displayName: 'DeepSeek'`，`settingsNs: llm-deepseek`，`settingsPath: []` | `src/index.ts:251-253`。整个 section 就是 profile，所以 path 是空 |
 | settings section | 命名空间 `llm-deepseek`，schema 就是它自己的 `Config` | `installSettingsSection(...)`，`src/index.ts:270-275` |
 
-**不监听任何事件**（`src/` 下没有一处 `ctx.on`），也不注册工具 / prompt 段 / 命令。它是 [llm](./dsh-llm.md) 的 provider，不是拦截者。
+它**不监听任何事件**——`src/` 下没有一处 `ctx.on`——也不注册工具、prompt 段、命令。
+
+换句话说，它是 [llm](./dsh-llm.md) 的 provider，不是拦截者。这个区别决定了它不会在别人的链路里插话，只会在被路由到时干活。
 
 ## 配置项
 
@@ -43,11 +51,41 @@ schema 在 `src/index.ts:91-101`，字段注释在 `:62-81`：
 | `streamIdleTimeoutMs` | number（正有限，≤ 定时器上限） | `300000` | 单次 provider 读的空闲上限，不计消费者思考时间 |
 | `retryPolicy` | `RetryPolicyConfig` | 省略 ⇒ normal 默认 | 注册时被 `ctx.llm` 抓取冻结，由 [llm-retry](./dsh-llm-retry.md) 执行 |
 
-常量出处：`DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000`、`DEFAULT_CONTEXT_WINDOW = 1_000_000`、`DEFAULT_MAX_TOKENS = 256_000`，全在 `src/adapter.ts:89-93`。
+三个默认值常量长这样：
 
-**连接事实不在装载时冻结**：`resolveAdapterOptions` 是唯一的解析步骤，adapter 通过 thunk **每次操作重读一遍**（`src/index.ts:200-223`）。settings 文档里的 `llm-deepseek:` section 覆盖 bundle 那一行，改完下一次请求生效，不用重启；正在流的那次请求保留它开始时的事实。一份通过 schema 但违反 schema 之外边界的快照（重复 catalog id、坏的 thinking/effort 组合）会**保留上一份好配置**并打日志（`src/index.ts:212-221`），而 bundle 自己的 entry config 出错则直接装载失败（`README.md:54`）。
+```
+DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000
+DEFAULT_CONTEXT_WINDOW        = 1_000_000
+DEFAULT_MAX_TOKENS            = 256_000
+```
 
-唯一在注册时被捕获的事实是 retry policy，所以它变了要原地 `registration.replace([PROVIDER])`——同一个 adapter 实例、一个同步段，避免中间出现空路由集被观察者看到（`src/index.ts:258-268`）。这两条时间线（每次调用现读 vs 注册那一刻冻结）拆开看更清楚：
+全在 `src/adapter.ts:89-93`。
+
+### 连接事实不在装载时冻结
+
+`resolveAdapterOptions` 是唯一的解析步骤，adapter 通过 thunk **每次操作重读一遍**：
+
+```
+每次操作:
+    snapshot = 读 settings 里的 llm-deepseek 段
+    if snapshot 通过 schema 且不违反 schema 之外的边界:
+        last_good = snapshot                 // 下一次请求就用它
+    else:
+        打日志，继续用 last_good              // 坏配置不会让运行中的 adapter 崩掉
+    return last_good
+```
+
+"schema 之外的边界"指重复 catalog id、坏的 thinking/effort 组合这类——schema 校验放行了，语义上不成立。
+
+所以 settings 文档里的 `llm-deepseek:` section 覆盖 bundle 那一行，改完下一次请求生效，不用重启；正在流的那次请求保留它开始时的事实。
+
+但同样的容错**不适用于 bundle 自己的 entry config**：那里出错是直接装载失败（`README.md:54`）。
+
+出处：thunk 与解析 `src/index.ts:200-223`；坏快照回退到上一份好配置 `src/index.ts:212-221`。
+
+唯一在注册时被捕获的事实是 retry policy，所以它变了要原地 `registration.replace([PROVIDER])`——同一个 adapter 实例、一个同步段，避免中间出现空路由集被观察者看到（`src/index.ts:258-268`）。
+
+这两条时间线（每次调用现读 vs 注册那一刻冻结）拆开看更清楚：
 
 ```mermaid
 flowchart TD
@@ -80,13 +118,35 @@ flowchart TD
 
 ## 模型看得见什么
 
-README 的 Model Experience 分请求/响应两半（`README.md:79-107`）。请求侧：所选模型收到 harness system prompt、消息历史、工具 schema、stop 序列和 call config，**adapter 自己不加任何 prompt 文字**。关键的一条是 reasoning 回传规则（`README.md:72`）：
+README 的 Model Experience 分请求 / 响应两半（`README.md:79-107`）。
+
+请求侧：所选模型收到 harness system prompt、消息历史、工具 schema、stop 序列和 call config。**adapter 自己不加任何 prompt 文字**——它只是搬运。
+
+关键的一条是 reasoning 回传规则（`README.md:72`）：
 
 > **Reasoning passback rule**: on assistant turns that carried tool calls, `reasoning_content` is serialized back in history (required by the API in thinking mode); on tool-call-free turns it is dropped (ignored anyway — saves tokens).
 
-KV cache：未变的前缀可复用，adapter 在 usage 里回报（`cacheReadTokens` 取 `prompt_cache_hit_tokens` / `prompt_tokens_details.cached_tokens`，DeepSeek 不报 cache-write）。换模型或换路由等于换 cache 域。
+写成判断就是两行：
 
-另外两个模型看不见但会出现在 HTTP 头上的东西：`x-deepseek-harness-user-id`（匿名稳定 id）和 `x-deepseek-harness-session-id`（携带 `GenerateOptions.sessionId` 时），加上 compaction 请求专有的 `x-deepseek-harness-compact: 1`（`README.md:63-65`）。
+```
+for turn in 历史里的 assistant turn:
+    if turn 带了 tool call:   把 reasoning_content 序列化回历史   // thinking 模式下 API 强制要求
+    else:                     丢掉                              // 反正也不会被用，省 token
+```
+
+KV cache：未变的前缀可复用，adapter 在 usage 里回报——`cacheReadTokens` 取 `prompt_cache_hit_tokens` / `prompt_tokens_details.cached_tokens`，DeepSeek 不报 cache-write。
+
+换模型或换路由等于换 cache 域，这一点在算命中率的时候容易忘。
+
+另外两个模型看不见、但会出现在 HTTP 头上的东西：
+
+| 头 | 何时出现 | 内容 |
+|---|---|---|
+| `x-deepseek-harness-user-id` | 总是 | 匿名稳定 id |
+| `x-deepseek-harness-session-id` | 携带 `GenerateOptions.sessionId` 时 | 会话 id |
+| `x-deepseek-harness-compact: 1` | compaction 请求专有 | 固定值 1 |
+
+出处：`README.md:63-65`。
 
 ## 什么时候你会想换掉它 / 怎么换
 
@@ -100,7 +160,9 @@ KV cache：未变的前缀可复用，adapter 在 usage 里回报（`cacheReadTo
   disabled: true
 ```
 
-`disabled` 是 patch 的合法字段（`vendor/include/src/index.ts:151`），被停掉的 entry 不会 mount（`vendor/loader/src/config/entry.ts:126`）。此时 `ctx.llm` 仍在，只是没有 `deepseek-official` 路由——agent-default-model 的出厂默认就指向了一条不存在的路由。
+`disabled` 是 patch 的合法字段（`vendor/include/src/index.ts:151`），被停掉的 entry 不会 mount（`vendor/loader/src/config/entry.ts:126`）。
+
+停掉之后 `ctx.llm` 仍在，只是没有 `deepseek-official` 路由——于是 agent-default-model 的出厂默认就指向了一条不存在的路由。摘之前先想好谁来顶。
 
 ## 坑与边界
 
@@ -140,7 +202,20 @@ flowchart TD
     class G note
 ```
 
-`AUTH` 排最先，`QUOTA` 不看状态码、比 429 分支还靠前判——这两条容易被直觉的"先看状态码"顺序带偏。传输层失败是 `TRANSPORT`（链上 `cause` 保留原始 DNS/TLS/ECONNREFUSED，`src/adapter.ts:258`），协议违规是 `STREAM_CLOSED`（`src/sse.ts:39`）/ `MALFORMED_RESPONSE`（`src/translate.ts:124`），`stop` 却一个内容块都没开的退化完成是 `EMPTY_RESPONSE`（`src/translate.ts:113`，默认策略会重试）。key 解析不到是 `MISSING_CREDENTIAL` 且路由仍然注册、目录仍可浏览（`src/index.ts:241-245`）——首次上手就是「先浏览模型、再存 key、再提问」，中间不用重启（`README.md:55`）。
+链上有两处容易被直觉带偏：`AUTH` 排最先；`QUOTA` 不看状态码，而且比 429 分支还靠前判。如果你按"先看状态码"的习惯去读，就会把配额错认成 `RATE_LIMIT`。
+
+HTTP 之外还有几类错误，各有自己的出处：
+
+| 情形 | 错误码 | 出处 |
+|---|---|---|
+| 传输层失败 | `TRANSPORT`（链上 `cause` 保留原始 DNS/TLS/ECONNREFUSED） | `src/adapter.ts:258` |
+| SSE 协议违规 | `STREAM_CLOSED` | `src/sse.ts:39` |
+| 响应结构不对 | `MALFORMED_RESPONSE` | `src/translate.ts:124` |
+| `stop` 却一个内容块都没开的退化完成 | `EMPTY_RESPONSE`（默认策略会重试） | `src/translate.ts:113` |
+
+最后一个特殊情况：key 解析不到时报 `MISSING_CREDENTIAL`，但**路由仍然注册、目录仍可浏览**（`src/index.ts:241-245`）。
+
+这是故意的——首次上手就是「先浏览模型、再存 key、再提问」，中间不用重启（`README.md:55`）。
 
 ## 未确认
 

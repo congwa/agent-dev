@@ -15,7 +15,9 @@
         maxInlineBytes: 50000
 ```
 
-`packages/bundle/base/cordis.patch.yml:349-352`。**这个值只有 bundle 给**：字段本身默认是「省略」，而省略等于整个插件什么都不注册（`packages/spill/spill-policy/src/index.ts:112-113`）。它紧跟在提供后端的 [spill-local](./dsh-spill-local.md)（第 346 行）之后。
+这个值**只有 bundle 给**。字段本身的默认是「省略」，而省略不是「用个内置默认值」，是整个插件什么都不注册——真正的 no-op。
+
+它紧跟在提供后端的 [spill-local](./dsh-spill-local.md)（第 346 行）之后。出处：`packages/bundle/base/cordis.patch.yml:349-352`，省略即空注册见 `packages/spill/spill-policy/src/index.ts:112-113`。
 
 ## 它注册了什么
 
@@ -26,7 +28,9 @@
 | inject | `tools` | `export const inject = ['tools']`（`packages/spill/spill-policy/src/index.ts:73`）——它要的就是工具注册表的这两个扩展点 |
 | 软引用 | `ctx.get('spillStore')` | 取不到就 warn 并保留内联结果（`packages/spill/spill-policy/src/index.ts:142-146`） |
 
-**不注册任何 service，也不注册工具或 prompt 段。** 预览机制在 `@deepseek-ai/dsh-output-retention` 的 `TextRetainer`，存储在 `ctx.spillStore`；它只决定**什么时候**外溢并拼那行告示。
+**不注册任何 service，也不注册工具或 prompt 段。**
+
+它自己什么都不发明：预览机制在 `@deepseek-ai/dsh-output-retention` 的 `TextRetainer`，存储在 `ctx.spillStore`。它只决定**什么时候**外溢，外加拼那行告示。
 
 ## 配置项
 
@@ -34,11 +38,13 @@
 |---|---|---|---|
 | `maxInlineBytes` | number | *（省略）* | 纯文本结果的模型侧上下文上限，单位 UTF-8 字节，非负整数，加载期校验。**省略即整体禁用**；base bundle 给的是 `50000` |
 
-校验放在加载期而不是每次调用（`packages/spill/spill-policy/src/index.ts:117-119`）：负数或小数会在 `TextRetainer` 里抛错，把每一次超长结果都变成 `isError`——坏配置必须让部署失败，而不是让工具失败。
+校验放在加载期，不放在每次调用（`packages/spill/spill-policy/src/index.ts:117-119`）。
+
+这个位置是故意选的：负数或小数不会在加载期被静静吞掉，而是会在 `TextRetainer` 里抛错，把每一次超长结果都变成 `isError`。坏配置必须让部署失败，而不是让工具失败。
 
 ## 判定顺序
 
-触发点在 `tools/post-execute` 内部，谁被直接放过、谁才会走到字节封顶，分支关系是这样：
+触发点在 `tools/post-execute` 内部。谁被直接放过、谁才会走到字节封顶，分支关系是这样：
 
 ```mermaid
 flowchart TD
@@ -69,11 +75,41 @@ flowchart TD
     class C,E,G note
 ```
 
-1. 先 `next()` 让工具跑完，所以它封顶的是下游 hook 最终接受的内容。
-2. 跳过嵌套执行（`exec.parent` 存在）、被接受的 value 替换、`read`（避免 `read → spill → read again` 循环）、以及一切非 `accept` 决定（`block` 的纠正反馈原样通过）。
-3. 只在内容**全是** `text` 块时才展平；含任何非文本块的结果原样放过。
-4. UTF-8 字节数 `≤ maxInlineBytes` 则不动。
-5. 否则存全文，替换成「预览 + 空行 + 告示」，且**整体**仍在 `maxInlineBytes` 之内——告示的字节成本先从预算里扣掉（`packages/spill/spill-policy/src/index.ts:171-172`），预览按剩余预算对半分头尾。
+写成代码就是一路 early return：
+
+```
+on tools/post-execute(result):
+    result = await next()          // 先让工具和下游 hook 跑完，封顶的是终稿
+
+    if 命中任一跳过条件:  return result
+    if 内容不是全 text 块: return result      // 含任何非文本块就不展平
+    if utf8_len(内容) <= maxInlineBytes: return result
+
+    存全文到 spillStore
+    return 预览 + 空行 + 告示           // 整体仍 <= maxInlineBytes
+```
+
+第一步 `next()` 是关键：它封顶的是下游 hook 最终接受的内容，不是工具刚吐出来的原始内容。
+
+四条跳过条件各有各的理由：
+
+| 跳过条件 | 为什么 |
+|---|---|
+| 嵌套执行（`exec.parent` 存在） | 不在子调用层重复封顶 |
+| 被接受的 value 替换 | 结果已被下游整体换掉 |
+| `read` | 避免 `read → spill → read again` 循环 |
+| 一切非 `accept` 决定 | `block` 的纠正反馈要原样通过 |
+
+替换体的预算是先扣后分：
+
+```
+预算 = maxInlineBytes
+预算 -= len(告示)              // 告示的字节成本先扣掉
+头 = 预算 / 2
+尾 = 预算 - 头                 // 剩下的对半分给头尾预览
+```
+
+所以「整体仍在 `maxInlineBytes` 之内」不是靠估的，是靠先给告示留位置。数告示占多少 UTF-8 字节、再从预算里扣掉，都在 `packages/spill/spill-policy/src/index.ts:171-172`。
 
 ## 模型看得见什么
 
@@ -85,16 +121,30 @@ flowchart TD
 (Omitted N bytes. Full formatted result stored at: /…/session-…/…-web_fetch.txt. Use read with offset/limit, or grep this path to search within it.)
 ```
 
-末尾那句取回提示由后端提供，本地后端的原文见 [spill-local](./dsh-spill-local.md)。告示单独就填满预算时预览为空、只返回告示；连告示都超上限就干脆保留内联原文——策略**永不**发出超过上限的替换。
+末尾那句取回提示由后端提供，本地后端的原文见 [spill-local](./dsh-spill-local.md)。
 
-Token 影响：成功替换后至多 `maxInlineBytes` 字节，并且一直留在历史里直到压缩；全文不会再发给模型。KV cache 是 append-only 的，新内容跟在可复用的请求前缀后面，不使已有缓存失效——这一点和 [compaction-basic](./dsh-compaction-basic.md)、[tool-result-pruner](./dsh-compaction-tool-result-pruner.md) 的 replace 语义正好相反。
+预算被压到极限时有两级退让：告示单独就填满预算，预览为空、只返回告示；连告示都超上限，就干脆保留内联原文。策略**永不**发出超过上限的替换。
+
+Token 影响有个反直觉的地方。成功替换后至多 `maxInlineBytes` 字节，并且一直留在历史里直到压缩，全文不会再发给模型——这部分是意料之中的。
+
+意料之外的是它对缓存友好：KV cache 是 append-only 的，新内容跟在可复用的请求前缀后面，不使已有缓存失效。这一点和 [compaction-basic](./dsh-compaction-basic.md)、[tool-result-pruner](./dsh-compaction-tool-result-pruner.md) 的 replace 语义正好相反。
 
 ## 什么时候你会想换掉它 / 怎么换
 
 - **想放宽或收紧**：改 `maxInlineBytes`。注意它同时是替换体的总预算，调小会让预览一起变小。
 - **想彻底关掉**：`disabled: true`，或者把 `maxInlineBytes` 从 config 里去掉（省略 = 真正的 no-op，一个监听都不注册）。
 - **换存储位置**：不动这一行，换 [spill-local](./dsh-spill-local.md) 的 `root` 或整个 `spillStore` 后端即可，本策略只认 seam。
-- **和压缩侧的分工**：本插件在工具执行时按**字节**封顶模型可见结果（append-only）；[tool-result-pruner](./dsh-compaction-tool-result-pruner.md) 在压缩时按 **Unicode 码点**重写**已经进了 surface** 的工具结果（replace，默认阈值 8192 码点）。两者都开时，先被 spill 压到 50000 字节以下的结果通常不会再触发 pruner。
+- **和压缩侧的分工**：见下表。
+
+| | spill-policy | [tool-result-pruner](./dsh-compaction-tool-result-pruner.md) |
+|---|---|---|
+| 什么时候动手 | 工具执行时 | 压缩时 |
+| 按什么算 | UTF-8 **字节** | **Unicode 码点** |
+| 动谁 | 模型可见结果 | **已经进了 surface** 的工具结果 |
+| 语义 | append-only | replace |
+| 阈值 | base bundle 给 50000 字节 | 默认 8192 码点 |
+
+两者都开时，先被 spill 压到 50000 字节以下的结果通常不会再触发 pruner。
 
 ## 坑与边界
 

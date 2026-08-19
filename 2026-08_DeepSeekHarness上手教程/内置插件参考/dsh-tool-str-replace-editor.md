@@ -4,6 +4,8 @@
 
 **一句话**：把 `view` / `create` / `str_replace` / `insert` 四个命令塞进**一个**名叫 `str_replace_editor` 的工具，跑在 `ctx.fs` 之上——与 [tool-fs](./dsh-tool-fs.md) 的四工具方案并行存在的另一套模型接口，共用同一套 `fs/*` 事件与沙箱策略。
 
+换句话说，这不是 tool-fs 的替代升级版，是同一件事的另一种摆法：一个工具四个命令，还是四个工具各一个职责。
+
 ## 它在树上长什么样
 
 `packages/bundle/base/cordis.patch.yml:384-387`：
@@ -15,9 +17,16 @@
     maxOutputChars: 16000
 ```
 
-行内无 `inject`；包自身导出 `inject = ['tools', 'fs']`（`packages/fs/tool-str-replace-editor/src/index.ts:494`）——注意**没有 `systemPrompt`**，它不贡献任何 prompt 段。
+行内无 `inject`；包自身导出 `inject = ['tools', 'fs']`。注意这里**没有 `systemPrompt`**——它不贡献任何 prompt 段。出处 `packages/fs/tool-str-replace-editor/src/index.ts:494`。
 
-web profile 关掉这一行（`packages/bundle/web-app/cordis.patch.yml:318-319`）。真正把它用起来的是 minimal preset：那里开了一个 `isolate: { fs: true }` 的 group，用裸 `fs-local` 遮蔽 host 的沙箱 provider，再在同一 realm 里挂这个编辑器（`apps/cli/config/agent-presets/minimal/agent.cordis.yml:48-62`）。code / standard / cordis 三个 preset 都不挂它，改用 tool-fs。
+谁挂它、谁不挂它：
+
+| 位置 | 状态 | 说明 |
+|---|---|---|
+| base bundle | 挂着 | 与 tool-fs 并存 |
+| web profile | 关掉 | `packages/bundle/web-app/cordis.patch.yml:318-319` |
+| minimal preset | 真正用起来的地方 | 开一个 `isolate: { fs: true }` 的 group，用裸 `fs-local` 遮蔽 host 的沙箱 provider，再在同一 realm 里挂这个编辑器（`apps/cli/config/agent-presets/minimal/agent.cordis.yml:48-62`） |
+| code / standard / cordis preset | 都不挂 | 改用 tool-fs |
 
 ## 它注册了什么
 
@@ -30,7 +39,19 @@ web profile 关掉这一行（`packages/bundle/web-app/cordis.patch.yml:318-319`
 
 无 service，无 prompt 段。这两个 waterfall 的唯一决策者是 [fs-observation-policy](./dsh-fs-observation-policy.md)；策略不在时落到默认 thunk。
 
-与 tool-fs 的一个实现差异值得记：`str_replace` / `insert` 拿到 intent 后并不调 `ctx.fs.editText`，而是自己读全文、算好新内容再调 `writeText`；guard 用 intent 里的 version，**intent 为 undefined 时退回刚 stat 到的 version**（`src/index.ts:312-314`、`:354-356`）——也就是说即使没挂策略插件，它仍然做一次 CAS。
+### 写路径为什么没挂策略也仍然是 CAS
+
+与 tool-fs 的一个实现差异值得记：`str_replace` / `insert` 拿到 intent 后并不调 `ctx.fs.editText`，而是自己读全文、算好新内容再调 `writeText`。
+
+```
+version_now = stat(path).version        // 顺手记下刚看到的版本
+intent      = 派发 fs/edit-intent       // 有策略插件就由它给，没有就是 undefined
+old         = readText(path)
+new         = 在 old 上做替换/插入
+writeText(path, new, guard = intent?.version ?? version_now)
+```
+
+一句话点破：guard 用 intent 里的 version，**intent 为 undefined 时退回刚 stat 到的 version**——也就是说即使没挂策略插件，它仍然做一次 CAS。出处 `src/index.ts:312-314`、`:354-356`。
 
 `create` / `str_replace` / `insert` 三条写路径都要先过一次 waterfall，`fs-observation-policy` 插件在不在场直接决定 intent 是谁给的：
 
@@ -59,7 +80,16 @@ flowchart TD
     class E,F,G,H data
 ```
 
-沙箱侧由内部 `MutationPolicy` 处理：构造时若 `ctx.fs.sandboxMode !== undefined` 却拿不到 `ctx.sandboxPolicy`，直接抛 `tool-str-replace-editor: the mounted filesystem confines but ctx.sandboxPolicy is missing`（`src/index.ts:70-72`）。拒绝错误被映射成 `sandboxDenialMarker(mode)`（`src/index.ts:81-85`）——注意它**不追加**升级提示，也不注册 `sandbox_permissions` 参数，这点与 tool-fs 不同。
+### 沙箱侧
+
+沙箱由内部 `MutationPolicy` 处理，构造时就有一道硬检查：
+
+```
+if ctx.fs.sandboxMode !== undefined 且 拿不到 ctx.sandboxPolicy:
+    throw 'tool-str-replace-editor: the mounted filesystem confines but ctx.sandboxPolicy is missing'
+```
+
+拒绝错误被映射成 `sandboxDenialMarker(mode)`。注意它**不追加**升级提示，也**不注册** `sandbox_permissions` 参数——这点与 tool-fs 不同。出处 `src/index.ts:70-72`（构造检查）、`src/index.ts:81-85`（拒绝映射）。
 
 ## 配置项
 
@@ -78,9 +108,17 @@ README 的 Model Experience 一节写明：模型只看到生成的 `str_replace
 
 > Custom editing tool for viewing, creating and editing files
 
-结果侧：`view` 返回带 6 位右对齐行号的文本（`src/index.ts:180`）或两层深的目录清单——目录清单过滤掉 `.` 开头项、`node_modules`、`__pycache__`（`src/index.ts:194-197`）。`create` 返回 `New file created successfully at: <path>`（`src/index.ts:271`），`str_replace` / `insert` 返回 `The file <path> has been edited successfully.`（`src/index.ts:322`、`:364`）。超长视图保留前缀并追加 `<response clipped>` 提示。
+四个命令各自的返回与调用卡片：
 
-调用卡片：`view` 是 generic read 卡，`create` / `str_replace` 是 diff 卡，`insert` 是 generic edit 卡（`src/index.ts:372-417`）。
+| 命令 | 返回 | 调用卡片 |
+|---|---|---|
+| `view`（文件） | 带 6 位右对齐行号的文本（`:180`） | generic read |
+| `view`（目录） | 两层深的目录清单，过滤掉 `.` 开头项、`node_modules`、`__pycache__`（`:194-197`） | generic read |
+| `create` | `New file created successfully at: <path>`（`:271`） | diff |
+| `str_replace` | `The file <path> has been edited successfully.`（`:322`） | diff |
+| `insert` | 同上（`:364`） | generic edit |
+
+超长视图保留前缀并追加 `<response clipped>` 提示。卡片类型的出处是 `src/index.ts:372-417`。
 
 ## 什么时候你会想换掉它 / 怎么换
 
@@ -96,7 +134,9 @@ README 的 Model Experience 一节写明：模型只看到生成的 `str_replace
       <你自己的编辑器指南>
 ```
 
-patch 会整体替换该行 `config`，两个字段要一起写全（`packages/bundle/base/README.md:21`）。关掉它：
+这里有个坑：patch 会整体替换该行 `config`，两个字段要一起写全（`packages/bundle/base/README.md:21`）。
+
+关掉它：
 
 ```yaml
 - id: tool-str-replace-editor
@@ -105,11 +145,33 @@ patch 会整体替换该行 `config`，两个字段要一起写全（`packages/b
 
 ## 坑与边界
 
-- 只处理 UTF-8 文本，二进制不支持。
-- `str_replace` 故意拒绝零匹配与多匹配，且**没有** `replace_all` 参数；多匹配时报错里会列出所有命中行号（`src/index.ts:300-306`）。
-- 每次变更都过 `fs/write-intent` 或 `fs/edit-intent`，解析当前 session 的沙箱策略，把强制执行委托给挂载的 filesystem 与策略插件——本包自己不判权限。
-- 路径必须绝对，相对路径直接被拒并提示 `Maybe you meant /<path>?`（`src/index.ts:94-96`）。
-- `view` 的目录分支用 `ctx.fs.listDir` 逐目录递归两层（`src/index.ts:185-214`）：每个目录一次 provider 调用，**串行**，没有条目数上限，只有输出字符上限；工具定义未声明 `timeoutMs`，取消只靠传下去的 `exec.signal`。
+只处理 UTF-8 文本，二进制不支持。
+
+`str_replace` 故意拒绝零匹配与多匹配，且**没有** `replace_all` 参数。多匹配时报错里会列出所有命中行号（`src/index.ts:300-306`）：
+
+```
+hits = 在全文中找 old_str 的所有出现
+if len(hits) == 0:  报错「没找到」
+if len(hits) > 1:   报错，并把每一处的行号都列出来
+否则               替换这唯一的一处
+```
+
+路径必须绝对，相对路径直接被拒并提示 `Maybe you meant /<path>?`（`src/index.ts:94-96`）。
+
+每次变更都过 `fs/write-intent` 或 `fs/edit-intent`，解析当前 session 的沙箱策略，把强制执行委托给挂载的 filesystem 与策略插件——本包自己不判权限。
+
+`view` 的目录分支用 `ctx.fs.listDir` 逐目录递归两层（`src/index.ts:185-214`）：
+
+```
+list(dir, depth):
+    entries = ctx.fs.listDir(dir)     // 一个目录一次 provider 调用，串行
+    for e in entries:
+        收进清单
+        if e 是目录 且 depth < 2:
+            list(e, depth + 1)
+```
+
+没有条目数上限，只有输出字符上限；工具定义未声明 `timeoutMs`，取消只靠传下去的 `exec.signal`。目录多的时候这条串行链是唯一的等待来源。
 
 ## 未确认
 

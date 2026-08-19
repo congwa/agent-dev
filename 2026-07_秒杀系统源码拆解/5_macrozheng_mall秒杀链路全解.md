@@ -14,20 +14,15 @@
 > 它没有独立的秒杀下单接口，没有 Redis 预减库存，没有 Lua 脚本，没有消息队列削峰，也没有分布式锁。
 > 用户抢购走的就是普通的「加购物车 → 提交订单」流程。**
 
-这不是我猜的，是我把仓库整个翻了一遍得出的结论。后面第 5 章我会一行一行地给你看证据，
-并且花一大节专门回答你心里那个问题：**「star 最高的项目怎么反而没有秒杀链路？」**
+这不是我猜的，是我把仓库整个翻了一遍得出的结论。后面第 5 章我会一行一行地给你看证据，并且花一大节专门回答你心里那个问题：**「star 最高的项目怎么反而没有秒杀链路？」**
 
 ---
 
 ## 0. 读之前：先搞懂「秒杀」到底难在哪
 
-先来个生活场景。
-
 假设你是一家奶茶店老板，今天搞活动：**下午 3 点，5 杯 1 元奶茶，先到先得。**
 
-3 点整，门口涌进来 100 个人，全都冲到收银台喊「我要！」。
-
-你只有一个收银员，他手里只有一本账本。现在的问题是：
+3 点整，门口涌进来 100 个人，全都冲到收银台喊「我要！」。你只有一个收银员，他手里只有一本账本。
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -47,7 +42,7 @@
 └──────────────────────────────────────────────────────────────┘
 ```
 
-秒杀的难点，说白了就三件事：
+秒杀的难点，说白了就三件事。
 
 **难点一：卖多了（超卖）**
 
@@ -63,13 +58,11 @@
         两个人都认为自己抢到了 → 1 杯卖给了 2 个人 → 超卖！
 ```
 
-这个「先读、再算、后写」的过程被别人插了一脚，专业名词叫 **竞态条件（Race Condition）**。
-生活比喻：**你和室友都看到冰箱里还有一瓶可乐，然后你们同时伸手去拿。**
+这个「先读、再算、后写」的过程被别人插了一脚，专业名词叫 **竞态条件（Race Condition）**。生活比喻：**你和室友都看到冰箱里还有一瓶可乐，然后你们同时伸手去拿。**
 
 **难点二：人太多，把系统压垮**
 
-100 个人还好，如果是 10 万个人呢？数据库（MySQL）就像那本厚厚的手写账本 —— 准确，但翻页慢。
-10 万个人同时要求翻账本，账本会被撕烂（数据库连接池打满、CPU 100%、超时雪崩）。
+100 个人还好，如果是 10 万个人呢？数据库（MySQL）就像那本厚厚的手写账本 —— 准确，但翻页慢。10 万个人同时要求翻账本，账本会被撕烂（数据库连接池打满、CPU 100%、超时雪崩）。
 
 **难点三：黄牛**
 
@@ -101,8 +94,6 @@
 用户点击 → 直接查 MySQL → 直接改 MySQL → 直接写订单表
 ```
 
-好，接下来我们从头看这个项目。
-
 ---
 
 ## 1. 十分钟认识这个项目
@@ -113,9 +104,7 @@
 
 > `mall`项目是一套电商系统，包括前台商城系统及后台管理系统，基于SpringBoot+MyBatis实现，采用Docker容器化部署。
 
-它的定位很关键：**它是一个「教学 + 脚手架」性质的全功能电商项目**，
-覆盖的是「商品 / 订单 / 会员 / 促销 / 优惠券 / 搜索 / 内容 / 权限」这些**广度**，
-而不是「10 万 QPS 秒杀」这种**深度**。
+它的定位很关键：**它是一个「教学 + 脚手架」性质的全功能电商项目**，覆盖的是「商品 / 订单 / 会员 / 促销 / 优惠券 / 搜索 / 内容 / 权限」这些**广度**，而不是「10 万 QPS 秒杀」这种**深度**。
 
 这一点直接解释了它为什么没有专用秒杀链路 —— 后面第 5.6 节详细展开。
 
@@ -210,6 +199,10 @@ mall
 ---
 
 ## 2. 【主线】一次秒杀请求，从点击到下单的完整链路
+
+一句话骨架：**运营在后台配活动 → 首页现查 MySQL 展示专区 → 用户加购物车 → 提交订单时判库存、锁库存、发延迟消息 → 要么付款转实扣，要么超时释放。**
+
+这一整条链路里只有一步值得反复看：**第七步的 `lockStock()`**，全文的问题都出在那 6 行。其余都是模板。
 
 ### 2.0 先看总图
 
@@ -407,10 +400,6 @@ sequenceDiagram
     end
 ```
 
-好，现在一步一步拆。
-
----
-
 ### 2.1 第一步：运营在后台配一场限时购
 
 **发生了什么**
@@ -454,10 +443,13 @@ sms_flash_promotion_product_relation  「商品限时购与商品关系表」
 
 **对应代码在哪**
 
-- `mall-admin/src/main/java/com/macro/mall/controller/SmsFlashPromotionController.java`（`@RequestMapping("/flash")`）
-- `mall-admin/src/main/java/com/macro/mall/controller/SmsFlashPromotionSessionController.java`（`@RequestMapping("/flashSession")`）
-- `mall-admin/src/main/java/com/macro/mall/controller/SmsFlashPromotionProductRelationController.java`（`@RequestMapping("/flashProductRelation")`）
-- 三个 `ServiceImpl` 在 `mall-admin/src/main/java/com/macro/mall/service/impl/` 下
+三个 Controller 都在 `mall-admin/src/main/java/com/macro/mall/controller/` 下，三个对应的 `ServiceImpl` 在 `mall-admin/src/main/java/com/macro/mall/service/impl/` 下：
+
+| 管的东西 | Controller | `@RequestMapping` |
+|---|---|---|
+| 活动 | `SmsFlashPromotionController.java` | `/flash` |
+| 场次 | `SmsFlashPromotionSessionController.java` | `/flashSession` |
+| 商品关联 | `SmsFlashPromotionProductRelationController.java` | `/flashProductRelation` |
 
 **代码怎么写的**
 
@@ -505,8 +497,8 @@ public int create(List<SmsFlashPromotionProductRelation> relationList) {
 **为什么这么设计 / 小白比喻**
 
 就像奶茶店门口贴了张海报：「1 元奶茶，限量 5 杯，每人限购 1 杯」。
-海报贴得很漂亮，但**店里的收银员根本没看过这张海报**，他只按正常流程收钱做奶茶。
-海报是给顾客看的，不是给收银员执行的。
+
+海报贴得很漂亮，但**店里的收银员根本没看过这张海报**，他只按正常流程收钱做奶茶。海报是给顾客看的，不是给收银员执行的。
 
 ---
 
@@ -554,7 +546,19 @@ private HomeFlashPromotion getHomeFlashPromotion() {
 }
 ```
 
-「怎么判断现在是不是在活动期内」也很朴素，就是两条 `Example` 条件查询：
+「怎么判断现在是不是在活动期内」是本节唯一需要动脑的地方，机制是把 `now` 劈成两半分别匹配：
+
+```
+今天 = now 抹掉时分秒          // 2026-11-05 14:23:07 → 2026-11-05 00:00:00
+活动 = 查 sms_flash_promotion
+        where status = 1 and start_date <= 今天 and end_date >= 今天
+
+此刻 = now 抹掉年月日          // 2026-11-05 14:23:07 → 1970-01-01 14:23:07
+场次 = 查 sms_flash_promotion_session
+        where start_time <= 此刻 and end_time >= 此刻
+```
+
+**「日期只跟日期比，时刻只跟时刻比」** —— 因为场次表的 `start_time` / `end_time` 是 time 类型，只有时分秒。对应的两条 `Example` 条件查询：
 
 ```java
 //根据时间获取秒杀活动
@@ -620,13 +624,13 @@ public static Date getTime(Date date) {   // 只留时间
 
 **这里要注意三件事：**
 
-1. **一次首页请求 = 至少 4~6 条 MySQL 查询**（广告、品牌、秒杀活动、秒杀场次、下一场次、秒杀商品、新品、人气、专题）。
-   `content()` 方法里九个方法一个接一个串行调用，**没有任何缓存**。
-2. **没有「缓存预热」**。业界秒杀的标准动作是活动开始前把商品数据搬到 Redis 里，mall 这里每次都是现查 MySQL。
-3. `getFlashProductList` 返回的 `flash_promotion_count` 是**配置值**，不是**剩余值**。页面上显示不出「还剩几件」，因为根本没有一个「已抢数量」字段。
+| 现象 | 细节 |
+|---|---|
+| 一次首页请求 = 至少 4~6 条 MySQL 查询 | 广告、品牌、秒杀活动、秒杀场次、下一场次、秒杀商品、新品、人气、专题；`content()` 里九个方法一个接一个串行调用，**没有任何缓存** |
+| 没有「缓存预热」 | 业界秒杀的标准动作是活动开始前把商品数据搬到 Redis 里，mall 这里每次都是现查 MySQL |
+| `flash_promotion_count` 是配置值，不是剩余值 | 页面上显示不出「还剩几件」，因为根本没有一个「已抢数量」字段 |
 
-**小白比喻**：奶茶店没有做「预告板」。每个进店的顾客问「今天有啥活动」，
-店员都要跑到后仓翻一遍账本，再跑回来告诉你。100 个顾客就跑 100 趟。
+**小白比喻**：奶茶店没有做「预告板」。每个进店的顾客问「今天有啥活动」，店员都要跑到后仓翻一遍账本，再跑回来告诉你。100 个顾客就跑 100 趟。
 
 ---
 
@@ -634,11 +638,9 @@ public static Date getTime(Date date) {   // 只留时间
 
 **发生了什么**
 
-这一步是本文第二个反常识点：**mall 里没有「秒杀下单」接口**。
+这一步是本文第二个反常识点：**mall 里没有「秒杀下单」接口。**
 
-我把 `mall-portal` 的 13 个 Controller 全列出来看过了，跟订单有关的只有 `OmsPortalOrderController`，
-它的接口清单是：`generateConfirmOrder` / `generateOrder` / `paySuccess` / `cancelTimeOutOrder` /
-`cancelOrder` / `list` / `detail` / `cancelUserOrder` / `confirmReceiveOrder` / `deleteOrder`。
+我把 `mall-portal` 的 13 个 Controller 全列出来看过了，跟订单有关的只有 `OmsPortalOrderController`，它的接口清单是：`generateConfirmOrder` / `generateOrder` / `paySuccess` / `cancelTimeOutOrder` / `cancelOrder` / `list` / `detail` / `cancelUserOrder` / `confirmReceiveOrder` / `deleteOrder`。
 
 **没有 `seckill`、没有 `flashOrder`、没有 `killOrder`。**
 
@@ -690,6 +692,7 @@ public int add(OmsCartItem cartItem) {
 **为什么这很重要**
 
 真实的秒杀之所以要单独做一个接口，就是因为要在这一步拦掉 99% 的流量。
+
 mall 把秒杀商品当普通商品处理，意味着**所有的压力全部原封不动地压到了下单接口和 MySQL 上**。
 
 ---
@@ -698,8 +701,7 @@ mall 把秒杀商品当普通商品处理，意味着**所有的压力全部原�
 
 **发生了什么**
 
-用户在购物车勾选商品点「去结算」，前端调 `POST /order/generateConfirmOrder`，传一串 `cartIds`。
-后端把「商品明细 + 收货地址列表 + 可用优惠券 + 我的积分 + 积分规则 + 总价」一次性算好返回。
+用户在购物车勾选商品点「去结算」，前端调 `POST /order/generateConfirmOrder`，传一串 `cartIds`。后端把「商品明细 + 收货地址列表 + 可用优惠券 + 我的积分 + 积分规则 + 总价」一次性算好返回。
 
 **对应代码在哪**
 
@@ -724,8 +726,9 @@ public ConfirmOrderResult generateConfirmOrder(List<Long> cartIds) {
 }
 ```
 
-**这一步纯读，不锁库存、不占坑。** 也就是说：确认单页面上写着「有货」，
-等你磨蹭 5 分钟点提交的时候，货可能早没了 —— 这是完全正常的电商设计，不算 bug。
+**这一步纯读，不锁库存、不占坑。**
+
+也就是说：确认单页面上写着「有货」，等你磨蹭 5 分钟点提交的时候，货可能早没了 —— 这是完全正常的电商设计，不算 bug。
 
 ---
 
@@ -733,8 +736,7 @@ public ConfirmOrderResult generateConfirmOrder(List<Long> cartIds) {
 
 **发生了什么**
 
-`POST /order/generateOrder`，进入 `OmsPortalOrderServiceImpl.generateOrder()`。
-这是全文最重要的方法，157 行，从校验一路干到发 MQ 消息。
+`POST /order/generateOrder`，进入 `OmsPortalOrderServiceImpl.generateOrder()`。这是全文最重要的方法，157 行，从校验一路干到发 MQ 消息。
 
 **对应代码在哪**
 
@@ -750,8 +752,7 @@ public ConfirmOrderResult generateConfirmOrder(List<Long> cartIds) {
 Map<String, Object> generateOrder(OrderParam orderParam);
 ```
 
-`@Transactional` 是什么？**大白话：一组操作要么全成功，要么全失败，中间出错就整体撤销。**
-生活比喻：**转账时「你扣 100」和「我加 100」必须捆在一起，不能只做一半。**
+`@Transactional` 是什么？**大白话：一组操作要么全成功，要么全失败，中间出错就整体撤销。** 生活比喻：**转账时「你扣 100」和「我加 100」必须捆在一起，不能只做一半。**
 
 **方法的骨架（我按顺序给你标了序号，这就是主链路的第 (1)~(10) 步）：**
 
@@ -808,9 +809,7 @@ public Map<String, Object> generateOrder(OrderParam orderParam) {
 order.setOrderType(0);
 ```
 
-数据模型里明明留了「1 = 秒杀订单」这个枚举值（见 `OmsOrder.java` 的 `@Schema(title = "订单类型：0->正常订单；1->秒杀订单")`），
-`oms_order_setting` 表里也留了 `flash_order_overtime`（秒杀订单超时关闭时间，默认 60 分钟）这个字段，
-**但整个仓库里没有任何一行代码会把 orderType 设成 1，也没有任何一行代码读取 flashOrderOvertime。**
+数据模型里明明留了「1 = 秒杀订单」这个枚举值（见 `OmsOrder.java` 的 `@Schema(title = "订单类型：0->正常订单；1->秒杀订单")`），`oms_order_setting` 表里也留了 `flash_order_overtime`（秒杀订单超时关闭时间，默认 60 分钟）这个字段，**但整个仓库里没有任何一行代码会把 orderType 设成 1，也没有任何一行代码读取 flashOrderOvertime。**
 
 这是典型的「**设计上预留了，实现上没做**」。
 
@@ -820,7 +819,15 @@ order.setOrderType(0);
 
 **发生了什么**
 
-在真正改数据之前，先看一眼「够不够」。
+在真正改数据之前，先看一眼「够不够」。判断逻辑三条，任何一条不满足就整单失败：
+
+```
+for 每个购物车条目:
+    if realStock 是 null:            return false   // 查不到库存
+    if realStock <= 0:               return false   // 没货了
+    if realStock < 本条目要买的数量:   return false   // 货不够
+return true
+```
 
 **对应代码在哪**
 
@@ -880,8 +887,7 @@ sku.lock_stock sku_lock_stock,
    ▼                 ▼                  ▼                 ▼
 ```
 
-这就是所谓的 **TOCTOU（Time-Of-Check to Time-Of-Use）问题**：
-**检查的那一刻和使用的那一刻，中间隔了一段时间，世界已经变了。**
+这就是所谓的 **TOCTOU（Time-Of-Check to Time-Of-Use）问题**：**检查的那一刻和使用的那一刻，中间隔了一段时间，世界已经变了。**
 
 小白比喻：**你在网上查到「某某餐厅还有空位」，开车 40 分钟过去，位子早满了。**
 
@@ -893,8 +899,18 @@ sku.lock_stock sku_lock_stock,
 
 **发生了什么**
 
-把「锁定库存」这个数字加上你买的数量。这样别人再来算 `realStock = stock - lock_stock` 的时候，
-就会发现可用的少了。**这就是 mall 防超卖的全部手段。**
+把「锁定库存」这个数字加上你买的数量。这样别人再来算 `realStock = stock - lock_stock` 的时候，就会发现可用的少了。**这就是 mall 防超卖的全部手段。**
+
+机制拆成三拍：
+
+```
+for 每个下单商品:
+    当前值 = SELECT ... FROM pms_sku_stock WHERE id = skuId    // 读，快照读不加锁
+    新值   = 当前值 + 本单数量                                   // 算，纯 Java 加法
+    UPDATE pms_sku_stock SET lock_stock = 新值 WHERE id = skuId // 写，写的是绝对值
+```
+
+**读、算、写是三个独立动作，中间任何时刻都可能被另一个线程插进来。** 记住第三拍写的是**算好的绝对值**，不是 `lock_stock + 1` —— 后面所有的麻烦都从这里长出来。
 
 **对应代码在哪**
 
@@ -1003,18 +1019,16 @@ MBG 生成的那段 XML 原文（`mall-mbg/src/main/resources/com/macro/mall/map
 
 **「那 @Transactional 不是能救吗？」**
 
-不能。这是个很多人搞错的地方。`@Transactional` 保证的是**原子性**（要么全做要么全不做），
-不保证**隔离性到「串行化」级别**。MySQL InnoDB 默认的隔离级别是 **可重复读（REPEATABLE READ）**：
+不能。这是个很多人搞错的地方。`@Transactional` 保证的是**原子性**（要么全做要么全不做），不保证**隔离性到「串行化」级别**。
+
+MySQL InnoDB 默认的隔离级别是 **可重复读（REPEATABLE READ）**：
 
 - `SELECT ... FROM pms_sku_stock WHERE id = ?` 是**快照读**，**不加任何锁**，两个事务可以同时读到 0。
-- `UPDATE` 时才加行锁，但那时候 Java 里的 `1` 这个值早就算好了，行锁只是让两条 UPDATE 排队执行，
-  **排队执行两条「SET lock_stock = 1」，结果还是 1。**
+- `UPDATE` 时才加行锁，但那时候 Java 里的 `1` 这个值早就算好了，行锁只是让两条 UPDATE 排队执行，**排队执行两条「SET lock_stock = 1」，结果还是 1。**
 
 要让 `SELECT` 也加锁，必须写成 `SELECT ... FOR UPDATE`（悲观锁）。**mall 里没有。**
 
-小白比喻：
-**`@Transactional` 像是「这几件事我打包一起做」，但它不阻止别人在你打包的时候也伸手拿同一个东西。
-真正的锁是「厕所门上那把插销」—— 你得主动把它插上。mall 没插。**
+小白比喻：**`@Transactional` 像是「这几件事我打包一起做」，但它不阻止别人在你打包的时候也伸手拿同一个东西。真正的锁是「厕所门上那把插销」—— 你得主动把它插上。mall 没插。**
 
 ---
 
@@ -1067,6 +1081,7 @@ redis:
 **这里有意思的地方**
 
 `redisService.incr()` 底层是 Redis 的 `INCR` 命令，**它是原子的**。
+
 也就是说：**mall 是知道「Redis 原子自增」这个能力的，也确实用上了 —— 但只用在了订单号上，没用在库存上。**
 
 ```
@@ -1089,8 +1104,7 @@ redis:
 └────────────────────────────────────────────────────────────────┘
 ```
 
-`RedisService` 接口本身（`mall-common/src/main/java/com/macro/mall/common/service/RedisService.java`）
-倒是提供了 `incr` / `decr` / `hSet` / `sAdd` / `lPush` 一整套方法 —— 工具都在，只是没往库存上用。
+`RedisService` 接口本身（`mall-common/src/main/java/com/macro/mall/common/service/RedisService.java`）倒是提供了 `incr` / `decr` / `hSet` / `sAdd` / `lPush` 一整套方法 —— 工具都在，只是没往库存上用。
 
 ---
 
@@ -1124,8 +1138,7 @@ deleteCartItemList(cartPromotionItemList, currentMember);
 
 删购物车是**逻辑删除**（`OmsCartItemServiceImpl.delete()` 把 `delete_status` 置 1），不是物理删除。
 
-顺带一提，扣积分那行 `currentMember.getIntegration() - orderParam.getUseIntegration()` 也是
-「读出来 - 在 Java 里减 - 写回去」的模式，跟 `lockStock` 一个毛病。
+顺带一提，扣积分那行 `currentMember.getIntegration() - orderParam.getUseIntegration()` 也是「读出来 - 在 Java 里减 - 写回去」的模式，跟 `lockStock` 一个毛病。
 
 ---
 
@@ -1134,16 +1147,17 @@ deleteCartItemList(cartPromotionItemList, currentMember);
 **发生了什么**
 
 订单建好了，状态是 0（待付款）。但库存已经被锁住了。
-如果用户一直不付款，这部分库存就永远被占着 —— 所以要有个机制：**「N 分钟后如果还没付，就自动取消，把库存还回去」**。
 
-mall 用的是 RabbitMQ 的 **TTL + 死信队列（DLX）** 组合。
+如果用户一直不付款，这部分库存就永远被占着 —— 所以要有个机制：**「N 分钟后如果还没付，就自动取消，把库存还回去」**。mall 用的是 RabbitMQ 的 **TTL + 死信队列（DLX）** 组合。
 
 **对应代码在哪**
 
-- `mall-portal/src/main/java/com/macro/mall/portal/component/CancelOrderSender.java`（发送者）
-- `mall-portal/src/main/java/com/macro/mall/portal/component/CancelOrderReceiver.java`（接收者）
-- `mall-portal/src/main/java/com/macro/mall/portal/config/RabbitMqConfig.java`（队列/交换机配置）
-- `mall-portal/src/main/java/com/macro/mall/portal/domain/QueueEnum.java`（名字常量）
+| 角色 | 文件 |
+|---|---|
+| 发送者 | `mall-portal/src/main/java/com/macro/mall/portal/component/CancelOrderSender.java` |
+| 接收者 | `mall-portal/src/main/java/com/macro/mall/portal/component/CancelOrderReceiver.java` |
+| 队列/交换机配置 | `mall-portal/src/main/java/com/macro/mall/portal/config/RabbitMqConfig.java` |
+| 名字常量 | `mall-portal/src/main/java/com/macro/mall/portal/domain/QueueEnum.java` |
 
 **这套机制的原理，先讲人话**
 
@@ -1280,13 +1294,9 @@ public enum QueueEnum {
 
 **这套设计有个已知的坑（值得你知道）**
 
-RabbitMQ 的 TTL 队列是**队头阻塞**的：它只检查队首那条消息有没有过期。
-如果队首是一条延迟 120 分钟的消息，后面跟着一条延迟 1 分钟的消息，
-那么**后面那条要等 120 分钟后才会被处理**。
+RabbitMQ 的 TTL 队列是**队头阻塞**的：它只检查队首那条消息有没有过期。如果队首是一条延迟 120 分钟的消息，后面跟着一条延迟 1 分钟的消息，那么**后面那条要等 120 分钟后才会被处理**。
 
-在 mall 里因为所有订单的延迟时间都一样（都读同一条 `oms_order_setting`），所以刚好不会踩到这个坑。
-但如果哪天你想给秒杀订单设 60 分钟、普通订单设 120 分钟（数据库里本来就是这么配的！），这个坑立刻就会出现。
-正确做法是用 `rabbitmq-delayed-message-exchange` 插件。
+在 mall 里因为所有订单的延迟时间都一样（都读同一条 `oms_order_setting`），所以刚好不会踩到这个坑。但如果哪天你想给秒杀订单设 60 分钟、普通订单设 120 分钟（数据库里本来就是这么配的！），这个坑立刻就会出现。正确做法是用 `rabbitmq-delayed-message-exchange` 插件。
 
 小白比喻：**这个 TTL 队列像一根只有一个出口的水管，前面的球不出来，后面的球就卡着。**
 
@@ -1335,12 +1345,9 @@ public Integer paySuccess(Long orderId, Integer payType) {
 </update>
 ```
 
-这条 SQL 用 `CASE WHEN` 一次性更新多行，用的是 `stock - n` 的**相对更新**，
-在数据库层面是原子的。**这里是写得对的。**
+这条 SQL 用 `CASE WHEN` 一次性更新多行，用的是 `stock - n` 的**相对更新**，在数据库层面是原子的。**这里是写得对的。**
 
-⚠️ 不过要注意：`paySuccess` 是个**开放的 HTTP 接口** `POST /order/paySuccess?orderId=x&payType=1`，
-它**没有校验订单当前状态是不是 0（待付款）**。理论上重复调用会把库存重复扣两次。
-（相比之下 `paySuccessByOrderSn` 就先查了 `andStatusEqualTo(0)`，做得更严谨。）
+⚠️ 不过要注意：`paySuccess` 是个**开放的 HTTP 接口** `POST /order/paySuccess?orderId=x&payType=1`，它**没有校验订单当前状态是不是 0（待付款）**。理论上重复调用会把库存重复扣两次。（相比之下 `paySuccessByOrderSn` 就先查了 `andStatusEqualTo(0)`，做得更严谨。）
 
 ---
 
@@ -1395,8 +1402,7 @@ public void cancelOrder(Long orderId) {
 }
 ```
 
-`andStatusEqualTo(0)` 这个条件很关键 —— **它保证了「已付款的订单不会被延迟消息误取消」**，
-也顺带提供了一点点幂等性（同一条消息重复消费，第二次会因为 status 已经是 4 而查不到，直接 return）。
+`andStatusEqualTo(0)` 这个条件很关键 —— **它保证了「已付款的订单不会被延迟消息误取消」**，也顺带提供了一点点幂等性（同一条消息重复消费，第二次会因为 status 已经是 4 而查不到，直接 return）。
 
 释放锁定的 SQL：
 
@@ -1445,11 +1451,9 @@ public class OrderTimeOutCancelTask {
 }
 ```
 
-`@Component` 被注释掉了，说明作者的意图是「**用 MQ 延迟队列替代定时扫表**」，
-把这个类留在仓库里作为教学对照。
+`@Component` 被注释掉了，说明作者的意图是「**用 MQ 延迟队列替代定时扫表**」，把这个类留在仓库里作为教学对照。
 
-不过 `cancelTimeOutOrder()` 这个方法本身还活着，被 `POST /order/cancelTimeOutOrder` 这个接口暴露着，
-可以手动调用，也可以让运维用 crontab 定时打这个接口作为兜底。
+不过 `cancelTimeOutOrder()` 这个方法本身还活着，被 `POST /order/cancelTimeOutOrder` 这个接口暴露着，可以手动调用，也可以让运维用 crontab 定时打这个接口作为兜底。
 
 它的实现：
 
@@ -1489,9 +1493,8 @@ public Integer cancelTimeOutOrder() {
 </select>
 ```
 
-⚠️ 一个隐患：如果定时任务和 MQ 延迟消息**同时**开着，同一个订单可能被取消两次
-（定时任务里的 `updateOrderStatus` 是无条件的 `set status=4 where id in (...)`，
-然后无条件调 `releaseSkuStockLock`），会导致 `lock_stock` 被多减一次，变成负数。
+⚠️ 一个隐患：如果定时任务和 MQ 延迟消息**同时**开着，同一个订单可能被取消两次（定时任务里的 `updateOrderStatus` 是无条件的 `set status=4 where id in (...)`，然后无条件调 `releaseSkuStockLock`），会导致 `lock_stock` 被多减一次，变成负数。
+
 所以作者把 `@Component` 注释掉，是有道理的。
 
 ---
@@ -1545,6 +1548,7 @@ CREATE TABLE `pms_sku_stock`  (
 ```
 
 这个「stock / lock_stock 双字段」的设计本身是**很标准的电商做法**（业界叫「预占库存」/「冻结库存」）。
+
 问题不在设计，在于**修改 `lock_stock` 的那一步没做原子性保护**。
 
 ### 3.2 三段改库存的 SQL 摆在一起看
@@ -1618,21 +1622,18 @@ if (promotionType == 1) {
 private Integer promotionType;
 ```
 
-对照一下：
+把字典和分支对照一下，缺口一目了然：
 
-```
-   promotion_type 取值    含义             calcCartPromotion 里有分支吗？
-   ─────────────────────────────────────────────────────────────────────
-        0              原价               →  else 分支「无优惠」   ✓ 合理
-        1              促销价              →  if (promotionType == 1)  ✓
-        2              会员价              →  ❌ 没有分支，掉进「无优惠」
-        3              阶梯价              →  else if (== 3)  ✓
-        4              满减                →  else if (== 4)  ✓
-        5              限时购 ★            →  ❌ 没有分支，掉进「无优惠」
-```
+| `promotion_type` | 含义 | `calcCartPromotion` 里有分支吗？ |
+|---|---|---|
+| 0 | 原价 | → `else` 分支「无优惠」 ✓ 合理 |
+| 1 | 促销价 | → `if (promotionType == 1)` ✓ |
+| 2 | 会员价 | ❌ 没有分支，掉进「无优惠」 |
+| 3 | 阶梯价 | → `else if (== 3)` ✓ |
+| 4 | 满减 | → `else if (== 4)` ✓ |
+| 5 | 限时购 ★ | ❌ 没有分支，掉进「无优惠」 |
 
-**也就是说：即使一个商品参加了限时购、后台配了 `flash_promotion_price = 1.00`，
-用户从购物车下单时，价格里根本不会用到这个 1 元。**
+**也就是说：即使一个商品参加了限时购、后台配了 `flash_promotion_price = 1.00`，用户从购物车下单时，价格里根本不会用到这个 1 元。**
 
 `handleNoReduce` 干的事是：
 
@@ -1655,8 +1656,7 @@ private void handleNoReduce(List<CartPromotionItem> cartPromotionItemList,
 
 价格直接沿用 `oms_cart_item.price`（加购物车那一刻前端传来的价格），优惠金额是 0。
 
-而且我搜遍了整个仓库：**`flashPromotionPrice` 这个字段，除了在两条展示用的 SELECT 里出现，
-以及在 MBG 生成的 Example 类里出现，没有任何业务代码读取它。**
+而且我搜遍了整个仓库：**`flashPromotionPrice` 这个字段，除了在两条展示用的 SELECT 里出现，以及在 MBG 生成的 Example 类里出现，没有任何业务代码读取它。**
 
 所以最终结论是：
 
@@ -1665,8 +1665,7 @@ private void handleNoReduce(List<CartPromotionItem> cartPromotionItemList,
 > **但下单的时候，价格不按 1 元算，数量不按 100 件限，每人不按 1 件限。**
 > 换句话说：**它是一个橱窗，不是一条链路。**
 
-（如果要在真实项目里用，你必须自己去 `OmsPromotionServiceImpl` 里补上 `promotionType == 5` 的分支，
-去 join `sms_flash_promotion_product_relation` 拿价格。这就是「二次开发脚手架」的含义。）
+（如果要在真实项目里用，你必须自己去 `OmsPromotionServiceImpl` 里补上 `promotionType == 5` 的分支，去 join `sms_flash_promotion_product_relation` 拿价格。这就是「二次开发脚手架」的含义。）
 
 ---
 
@@ -1715,42 +1714,26 @@ private void handleNoReduce(List<CartPromotionItem> cartPromotionItemList,
 
 ### 4.2 Redis
 
-```
-  key 格式：{redis.database}:{业务前缀}{标识}
+key 格式：`{redis.database}:{业务前缀}{标识}`
 
-  ┌──────────────────────────────────┬──────────┬──────────────────────────────┐
-  │ Key                              │ 类型      │ 用途                          │
-  ├──────────────────────────────────┼──────────┼──────────────────────────────┤
-  │ mall:oms:orderId20260731         │ String   │ INCR 生成订单号自增序号         │
-  │                                  │          │ （generateOrderSn）           │
-  ├──────────────────────────────────┼──────────┼──────────────────────────────┤
-  │ mall:ums:member:{username}       │ String   │ 会员对象缓存，TTL 86400 秒     │
-  │                                  │ (序列化)  │ （UmsMemberCacheServiceImpl） │
-  ├──────────────────────────────────┼──────────┼──────────────────────────────┤
-  │ mall:ums:authCode:{telephone}    │ String   │ 短信验证码，TTL 90 秒          │
-  └──────────────────────────────────┴──────────┴──────────────────────────────┘
+| Key | 类型 | 用途 |
+|---|---|---|
+| `mall:oms:orderId20260731` | String | INCR 生成订单号自增序号（`generateOrderSn`） |
+| `mall:ums:member:{username}` | String（序列化） | 会员对象缓存，TTL 86400 秒（`UmsMemberCacheServiceImpl`） |
+| `mall:ums:authCode:{telephone}` | String | 短信验证码，TTL 90 秒 |
 
-  ❌ 没有任何 stock / seckill / flash 开头的 key
-```
+❌ 没有任何 stock / seckill / flash 开头的 key
 
 ### 4.3 RabbitMQ
 
-```
-  ┌────────────────────────────┬──────────────────────────┬────────────────────┐
-  │ Exchange                   │ Queue                    │ 有消费者吗？         │
-  ├────────────────────────────┼──────────────────────────┼────────────────────┤
-  │ mall.order.direct.ttl      │ mall.order.cancel.ttl    │ ❌ 故意没有          │
-  │ （DirectExchange, durable）│ （带 x-dead-letter-*）    │ （靠 TTL 过期转发）  │
-  ├────────────────────────────┼──────────────────────────┼────────────────────┤
-  │ mall.order.direct          │ mall.order.cancel        │ ✅ CancelOrderReceiver│
-  └────────────────────────────┴──────────────────────────┴────────────────────┘
+| Exchange | Queue | 有消费者吗？ |
+|---|---|---|
+| `mall.order.direct.ttl`（DirectExchange, durable） | `mall.order.cancel.ttl`（带 `x-dead-letter-*`） | ❌ 故意没有（靠 TTL 过期转发） |
+| `mall.order.direct` | `mall.order.cancel` | ✅ `CancelOrderReceiver` |
 
-  消息体：就一个 Long 类型的 orderId（`amqpTemplate.convertAndSend(..., orderId, ...)`）
-  消息属性：expiration = 7200000（毫秒，即 120 分钟）
-
-  vhost 配置在 application-dev.yml：
-    spring.rabbitmq.virtual-host: /mall  用户名/密码：mall/mall
-```
+- 消息体：就一个 Long 类型的 orderId（`amqpTemplate.convertAndSend(..., orderId, ...)`）
+- 消息属性：`expiration = 7200000`（毫秒，即 120 分钟）
+- vhost 配置在 `application-dev.yml`：`spring.rabbitmq.virtual-host: /mall`，用户名/密码：mall/mall
 
 ---
 
@@ -1765,22 +1748,19 @@ private void handleNoReduce(List<CartPromotionItem> cartPromotionItemList,
 
 ### 5.2 完整的防线清单（有哪些、没哪些）
 
-```
-  业界秒杀常见的 9 道防线                    mall 有没有？
-  ─────────────────────────────────────────────────────────────────────
-  ① 前端按钮置灰 / 答题验证码                  ❌ （前端仓库另开，后端无痕迹）
-  ② 网关限流（Sentinel / Nginx limit_req）    ❌
-  ③ 单用户频次限制（一秒只让点一次）             ❌
-  ④ 活动时间校验（没开抢就下单直接拒）           ❌ 下单接口完全不知道限时购的存在
-  ⑤ 每人限购校验                             ❌ flash_promotion_limit 字段没人读
-  ⑥ Redis 预减库存（DECRBY / Lua）           ❌ 全仓库无 Lua、无库存 key
-  ⑦ MQ 异步下单削峰                          ❌ MQ 只用于延迟取消
-  ⑧ 数据库原子扣减（UPDATE ... WHERE 条件）    ⚠️ 部分有：付款扣减和释放锁定是原子的，
-                                                但**下单锁定不是**
-  ⑨ 唯一索引兜底（member_id + activity_id）   ❌
-  ─────────────────────────────────────────────────────────────────────
-  实际生效的：只有「读-算-写」+ @Transactional
-```
+| # | 业界秒杀常见的防线 | mall 有没有？ |
+|---|---|---|
+| ① | 前端按钮置灰 / 答题验证码 | ❌（前端仓库另开，后端无痕迹） |
+| ② | 网关限流（Sentinel / Nginx limit_req） | ❌ |
+| ③ | 单用户频次限制（一秒只让点一次） | ❌ |
+| ④ | 活动时间校验（没开抢就下单直接拒） | ❌ 下单接口完全不知道限时购的存在 |
+| ⑤ | 每人限购校验 | ❌ `flash_promotion_limit` 字段没人读 |
+| ⑥ | Redis 预减库存（DECRBY / Lua） | ❌ 全仓库无 Lua、无库存 key |
+| ⑦ | MQ 异步下单削峰 | ❌ MQ 只用于延迟取消 |
+| ⑧ | 数据库原子扣减（UPDATE ... WHERE 条件） | ⚠️ 部分有：付款扣减和释放锁定是原子的，但**下单锁定不是** |
+| ⑨ | 唯一索引兜底（member_id + activity_id） | ❌ |
+
+**实际生效的：只有「读-算-写」+ `@Transactional`。**
 
 ### 5.3 为什么说它会超卖（复现路径）
 
@@ -1810,9 +1790,7 @@ flowchart TD
     style F fill:#fff3cd,stroke:#e0a800
 ```
 
-**加一个变量**：如果两个用户买的数量不一样（A 买 1 件、B 买 3 件），
-最终 `lock_stock` 会等于后写的那个人的值（3 或者 1），跟实际卖出去的 4 件完全对不上。
-账会越滚越乱。
+**加一个变量**：如果两个用户买的数量不一样（A 买 1 件、B 买 3 件），最终 `lock_stock` 会等于后写的那个人的值（3 或者 1），跟实际卖出去的 4 件完全对不上。账会越滚越乱。
 
 ### 5.4 那它到底能不能用？
 
@@ -1829,46 +1807,35 @@ flowchart TD
 
 ### 5.5 补充：还有哪些「顺手能踩」的坑
 
-1. **`paySuccess` 没有校验订单状态**：`POST /order/paySuccess?orderId=1&payType=1` 可以重复调，
-   每次都会执行 `stock - n`，库存被重复扣。（`paySuccessByOrderSn` 就加了 `andStatusEqualTo(0)`，做对了。）
-2. **`releaseSkuStockLock` 没有下限保护**：`lock_stock - n` 没有 `AND lock_stock >= n`，可能变负数。
-   一旦 `lock_stock` 是负数，`realStock = stock - lock_stock` 就会比真实库存还大，
-   于是可以「凭空」多卖出货。
+1. **`paySuccess` 没有校验订单状态**：`POST /order/paySuccess?orderId=1&payType=1` 可以重复调，每次都会执行 `stock - n`，库存被重复扣。（`paySuccessByOrderSn` 就加了 `andStatusEqualTo(0)`，做对了。）
+2. **`releaseSkuStockLock` 没有下限保护**：`lock_stock - n` 没有 `AND lock_stock >= n`，可能变负数。一旦 `lock_stock` 是负数，`realStock = stock - lock_stock` 就会比真实库存还大，于是可以「凭空」多卖出货。
 3. **积分扣减也是读-算-写**：`memberService.updateIntegration(id, currentMember.getIntegration() - useIntegration)`。
-4. **优惠券状态更新是「查出第一张再改」**：`updateCouponStatus` 里 `couponHistoryList.get(0)`，
-   同一用户同一券有多张时行为不确定。
+4. **优惠券状态更新是「查出第一张再改」**：`updateCouponStatus` 里 `couponHistoryList.get(0)`，同一用户同一券有多张时行为不确定。
 
 ### 5.6 ★ 专题：为什么 star 最高的商城项目反而没有专用秒杀链路？
 
-这一节是我最想跟你聊的。
+这一节是我最想跟你聊的。答案有四层：定位取舍、业务形态、作者留的 TODO、以及它真实的承载上限。最后给出六把动刀方案。
 
 #### （1）因为它的定位是「全功能电商脚手架」，不是「高并发中间件教学项目」
 
-你去看 mall 的功能清单：商品管理、订单管理、会员管理、促销管理、运营管理、内容管理、
-统计报表、财务管理、权限管理、设置……**它的价值在「广」，不在「深」。**
+你去看 mall 的功能清单：商品管理、订单管理、会员管理、促销管理、运营管理、内容管理、统计报表、财务管理、权限管理、设置……**它的价值在「广」，不在「深」。**
 
-一个刚学完 Spring Boot 的人，最大的痛点是「我知道怎么写增删改查，但我不知道一个完整的电商系统长什么样」。
-mall 精准地解决了这个痛点：**它给了你一整套可运行的、结构清晰的、有真实业务复杂度的代码。**
+一个刚学完 Spring Boot 的人，最大的痛点是「我知道怎么写增删改查，但我不知道一个完整的电商系统长什么样」。mall 精准地解决了这个痛点：**它给了你一整套可运行的、结构清晰的、有真实业务复杂度的代码。**
 
-秒杀是一个**很窄很深**的技术点，需要 Redis + Lua + MQ + 限流 + 压测配套。
-把它做进来，会让整个项目的运行门槛（要装的中间件、要理解的概念）暴涨，
-而受益的读者只是很小一部分。**作者做了取舍。**
+秒杀是一个**很窄很深**的技术点，需要 Redis + Lua + MQ + 限流 + 压测配套。把它做进来，会让整个项目的运行门槛（要装的中间件、要理解的概念）暴涨，而受益的读者只是很小一部分。**作者做了取舍。**
 
-同一个作者还有一个专门的微服务版本 `mall-swarm`（基于 Spring Cloud Alibaba），
-以及一整套配套教程 `mall-learning` / macrozheng.com —— 高并发这类话题被放到了教程和其他项目里，
-而不是塞进主仓库。这是很清醒的产品决策。
+同一个作者还有一个专门的微服务版本 `mall-swarm`（基于 Spring Cloud Alibaba），以及一整套配套教程 `mall-learning` / macrozheng.com —— 高并发这类话题被放到了教程和其他项目里，而不是塞进主仓库。这是很清醒的产品决策。
 
 #### （2）因为「限时购」在真实电商里，本来就常常只是一个营销活动
 
-这一点很多人没意识到。在真实的电商公司里：
+这一点很多人没意识到。在真实的电商公司里，这是两个**不同的业务形态**，只是中文里都爱叫「秒杀」：
 
-- **「限时购 / 限时折扣」** = 运营配一个时间段的特价，量不大，用普通库存链路完全 OK。
-- **「秒杀 / 抢购」** = 用极低价格做流量爆点，量小但人多，才需要专用链路。
+| 叫法 | 实质 | 需要什么 |
+|---|---|---|
+| **限时购 / 限时折扣** | 运营配一个时间段的特价 | 量不大，用普通库存链路完全 OK |
+| **秒杀 / 抢购** | 用极低价格做流量爆点 | 量小但人多，才需要专用链路 |
 
-这两个是**不同的业务形态**，只是中文里都爱叫「秒杀」。
-mall 的 `sms_flash_promotion` 表注释写的是「**限时购表**」，
-只有 Java 里的 `@Schema(title = "秒杀时间段名称")` 和一些方法名用了「秒杀」这个词。
-**它做的是前者，不是后者。**（数据库注释比 Java 注释更诚实。）
+mall 的 `sms_flash_promotion` 表注释写的是「**限时购表**」，只有 Java 里的 `@Schema(title = "秒杀时间段名称")` 和一些方法名用了「秒杀」这个词。**它做的是前者，不是后者。**（数据库注释比 Java 注释更诚实。）
 
 #### （3）因为作者其实「知道」，只是没做完
 
@@ -1890,31 +1857,28 @@ mall 的 `sms_flash_promotion` 表注释写的是「**限时购表**」，
 ```
 
 **六处「留了坑没填」，指向的是同一个结论：秒杀链路是规划过的 TODO，不是遗漏。**
+
 `generateOrder` 里那句 `// TODO: 2018/9/3 bill_*,delivery_*` 也是同类痕迹 —— 这个项目从 2018 年起就是这个状态。
 
 #### （4）这套做法能撑多少并发？什么时候会顶不住？
 
-先给个粗略的量级判断（基于代码结构推算，不是压测数据）：
+先给个粗略的量级判断（基于代码结构推算，不是压测数据）。单次 `POST /order/generateOrder` 的数据库开销（买 1 个 SKU 的情况）：
 
-```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│  单次 POST /order/generateOrder 的数据库开销（买 1 个 SKU 的情况）                │
-├──────────────────────────────────────────────────────────────────────────────┤
-│   1. getCurrentMember()            → Redis 命中则 0 次 DB，未命中 1 次          │
-│   2. cartItemService.list()        → 1 次 SELECT oms_cart_item               │
-│   3. getPromotionProductList()     → 1 次 大 JOIN（product×sku×ladder×full）  │
-│   4. memberCouponService.listCart()→ 若用券，多条 SELECT                       │
-│   5. lockStock()                   → 每个 SKU：1 SELECT + 1 UPDATE            │
-│   6. selectByPrimaryKey(order_setting) → 1 次（generateOrder 里算自动收货天数） │
-│   7. INSERT oms_order              → 1 次                                    │
-│   8. insertList(order_item)        → 1 次批量                                │
-│   9. 优惠券 UPDATE / 积分 UPDATE     → 0~2 次                                  │
-│  10. deleteCartItemList()          → 1 次 UPDATE                             │
-│  11. selectByPrimaryKey(order_setting) 又一次（sendDelayMessageCancelOrder 里）│
-├──────────────────────────────────────────────────────────────────────────────┤
-│  合计：约 8~14 次 数据库往返，全部在一个事务里，串行执行                            │
-└──────────────────────────────────────────────────────────────────────────────┘
-```
+| # | 步骤 | 开销 |
+|---|---|---|
+| 1 | `getCurrentMember()` | Redis 命中则 0 次 DB，未命中 1 次 |
+| 2 | `cartItemService.list()` | 1 次 SELECT `oms_cart_item` |
+| 3 | `getPromotionProductList()` | 1 次大 JOIN（product×sku×ladder×full） |
+| 4 | `memberCouponService.listCart()` | 若用券，多条 SELECT |
+| 5 | `lockStock()` | 每个 SKU：1 SELECT + 1 UPDATE |
+| 6 | `selectByPrimaryKey(order_setting)` | 1 次（`generateOrder` 里算自动收货天数） |
+| 7 | `INSERT oms_order` | 1 次 |
+| 8 | `insertList(order_item)` | 1 次批量 |
+| 9 | 优惠券 UPDATE / 积分 UPDATE | 0~2 次 |
+| 10 | `deleteCartItemList()` | 1 次 UPDATE |
+| 11 | `selectByPrimaryKey(order_setting)` 又一次 | `sendDelayMessageCancelOrder` 里 |
+
+**合计：约 8~14 次数据库往返，全部在一个事务里，串行执行。**
 
 再看 `application-dev.yml` 里的连接池配置：
 
@@ -1933,21 +1897,11 @@ druid:
 
 **但注意，「顶不住」有两种完全不同的顶不住：**
 
-```
-  ┌────────────────────────────────────────────────────────────────────────┐
-  │ 顶不住类型 A：系统被压垮（性能问题）                                       │
-  │   现象：请求超时、连接池耗尽、CPU 打满、雪崩                                │
-  │   触发点：总 QPS 超过 ~500                                               │
-  │   影响：所有用户都用不了，但数据是**对的**                                  │
-  ├────────────────────────────────────────────────────────────────────────┤
-  │ 顶不住类型 B：数据错了（正确性问题）★★★ 这个更可怕                          │
-  │   现象：超卖。用户下单成功，发不出货。                                      │
-  │   触发点：**同一个 SKU** 上有两个请求在几毫秒内交错                          │
-  │   注意：这跟总 QPS 无关！                                                 │
-  │        哪怕全站只有 5 QPS，只要那 5 个请求全打在同一个 SKU 上，              │
-  │        并且刚好卡在 lockStock 的 SELECT 和 UPDATE 之间，就会超卖。          │
-  └────────────────────────────────────────────────────────────────────────┘
-```
+| | 类型 A：系统被压垮（性能问题） | 类型 B：数据错了（正确性问题）★★★ 这个更可怕 |
+|---|---|---|
+| 现象 | 请求超时、连接池耗尽、CPU 打满、雪崩 | 超卖。用户下单成功，发不出货 |
+| 触发点 | 总 QPS 超过 ~500 | **同一个 SKU** 上有两个请求在几毫秒内交错 |
+| 影响 | 所有用户都用不了，但数据是**对的** | 这跟总 QPS 无关！哪怕全站只有 5 QPS，只要那 5 个请求全打在同一个 SKU 上，并且刚好卡在 `lockStock` 的 SELECT 和 UPDATE 之间，就会超卖 |
 
 **这是本节最重要的判断：**
 
@@ -1960,124 +1914,113 @@ druid:
 
 #### （5）如果要给它加上真正的秒杀链路，该在哪几个点动刀？
 
-好，这是最实用的部分。我按「改动成本从小到大」排了个序，每一刀都指明了**具体文件和方法**。
+这是最实用的部分。我按「改动成本从小到大」排了个序，每一刀都指明了**具体文件和方法**。
+
+**刀 1【最小成本，先止血】把 lockStock 改成原子条件更新**
+
+位置：`mall-portal/.../service/impl/OmsPortalOrderServiceImpl.java` 第 727 行；`mall-portal/src/main/resources/dao/PortalOrderDao.xml`（加一条新语句）。
+
+现在是「SELECT → Java 加 → UPDATE SET lock_stock = 绝对值」，改成一条 SQL 搞定，让数据库自己判断够不够：
+
+```sql
+UPDATE pms_sku_stock
+SET lock_stock = lock_stock + #{quantity}
+WHERE id = #{skuId}
+  AND stock - lock_stock >= #{quantity}      -- ←←← 关键的条件
+```
+
+然后在 Java 里检查影响行数：
+
+```java
+int rows = portalOrderDao.lockSkuStock(skuId, quantity);
+if (rows == 0) { Asserts.fail("库存不足，无法下单"); }
+```
+
+原理：MySQL 执行一条 UPDATE 时会对目标行加排他行锁，「判断 + 修改」在数据库内部一步完成，别人插不进来。
+
+| 收益 | 代价 | 副作用 |
+|---|---|---|
+| ★★★★★ 这一刀下去，超卖问题基本解决 | ★（改动不到 20 行） | 热点行锁竞争，同一 SKU 的并发上限约几百 TPS —— 但至少**不会错** |
+
+【比喻】原来是「你先看一眼冰箱里有没有可乐，走回房间想一想，再回来拿」；现在是「你伸手进去，抓到就是你的，抓不到就说明没了」。
+
+**刀 2 让限时购的价格/限量/限购真正生效（业务正确性）**
+
+- 位置 A：`mall-portal/.../service/impl/OmsPromotionServiceImpl.java` 的 `calcCartPromotion()` 里补一个 `else if (promotionType == 5)` 分支，去 join `sms_flash_promotion_product_relation` 拿 `flash_promotion_price`。
+- 位置 B：`OmsPortalOrderServiceImpl.generateOrder()` 开头补校验 —— 当前时间是否落在活动 `start_date~end_date` 且场次 `start_time~end_time` 内（可以直接复用 `HomeServiceImpl` 里那两个私有方法的逻辑，抽到公共类）；本单数量 ≤ `flash_promotion_limit`；本人历史已购数量 + 本单数量 ≤ `flash_promotion_limit`（需要新建一张「秒杀购买记录表」，或者查 `oms_order_item` 统计）。
+- 位置 C：给 `flash_promotion_count` 加一个「已售数量」字段，下单时原子扣减：
+
+```sql
+UPDATE sms_flash_promotion_product_relation
+SET sold_count = sold_count + #{n}
+WHERE id = #{relationId} AND flash_promotion_count - sold_count >= #{n}
+```
+
+收益：★★★★ 没有这一刀，「限时购」永远只是个橱窗。代价：★★★。
+
+**刀 3 Redis 预减库存（真正的性能拐点）**
+
+位置：新建一个 `SeckillService`，在 `generateOrder` 之前拦一道。Redis 客户端已经有了（`RedisService` / `RedisServiceImpl` 在 `mall-common`），直接加一个 Lua 脚本执行的方法即可。
+
+活动开始前（缓存预热）：把每个秒杀 SKU 的库存写进 Redis。
 
 ```
-════════════════════════════════════════════════════════════════════════════════
-  刀 1【最小成本，先止血】把 lockStock 改成原子条件更新
-════════════════════════════════════════════════════════════════════════════════
-  位置：mall-portal/.../service/impl/OmsPortalOrderServiceImpl.java  第 727 行
-        mall-portal/src/main/resources/dao/PortalOrderDao.xml（加一条新语句）
-
-  现在：SELECT → Java 加 → UPDATE SET lock_stock = 绝对值
-  改成：一条 SQL 搞定，让数据库自己判断够不够
-
-        UPDATE pms_sku_stock
-        SET lock_stock = lock_stock + #{quantity}
-        WHERE id = #{skuId}
-          AND stock - lock_stock >= #{quantity}      ←←← 关键的条件
-
-  然后在 Java 里检查影响行数：
-        int rows = portalOrderDao.lockSkuStock(skuId, quantity);
-        if (rows == 0) { Asserts.fail("库存不足，无法下单"); }
-
-  原理：MySQL 执行一条 UPDATE 时会对目标行加排他行锁，
-        「判断 + 修改」在数据库内部一步完成，别人插不进来。
-  收益：★★★★★  这一刀下去，超卖问题基本解决。
-  代价：★（改动不到 20 行）
-  副作用：热点行锁竞争，同一 SKU 的并发上限约几百 TPS —— 但至少**不会错**。
-
-  【比喻】原来是「你先看一眼冰箱里有没有可乐，走回房间想一想，再回来拿」；
-          现在是「你伸手进去，抓到就是你的，抓不到就说明没了」。
-
-════════════════════════════════════════════════════════════════════════════════
-  刀 2 让限时购的价格/限量/限购真正生效（业务正确性）
-════════════════════════════════════════════════════════════════════════════════
-  位置 A：mall-portal/.../service/impl/OmsPromotionServiceImpl.java
-          calcCartPromotion() 里补一个 `else if (promotionType == 5)` 分支，
-          去 join sms_flash_promotion_product_relation 拿 flash_promotion_price。
-
-  位置 B：OmsPortalOrderServiceImpl.generateOrder() 开头补校验：
-          - 当前时间是否落在活动 start_date~end_date 且场次 start_time~end_time 内
-            （可以直接复用 HomeServiceImpl 里那两个私有方法的逻辑，抽到公共类）
-          - 本单数量 <= flash_promotion_limit
-          - 本人历史已购数量 + 本单数量 <= flash_promotion_limit
-            （需要新建一张「秒杀购买记录表」，或者查 oms_order_item 统计）
-
-  位置 C：给 flash_promotion_count 加一个「已售数量」字段，下单时原子扣减：
-          UPDATE sms_flash_promotion_product_relation
-          SET sold_count = sold_count + #{n}
-          WHERE id = #{relationId} AND flash_promotion_count - sold_count >= #{n}
-
-  收益：★★★★  没有这一刀，「限时购」永远只是个橱窗。
-  代价：★★★
-
-════════════════════════════════════════════════════════════════════════════════
-  刀 3 Redis 预减库存（真正的性能拐点）
-════════════════════════════════════════════════════════════════════════════════
-  位置：新建一个 SeckillService，在 generateOrder 之前拦一道。
-        Redis 客户端已经有了（RedisService / RedisServiceImpl 在 mall-common），
-        直接加一个 Lua 脚本执行的方法即可。
-
-        活动开始前（缓存预热）：把每个秒杀 SKU 的库存写进 Redis
-            SET seckill:stock:{relationId} 100
-
-        下单时先在 Redis 里「划一笔」（用 Lua 保证原子）：
-            if redis.call('get', KEYS[1]) >= ARGV[1] then
-                redis.call('decrby', KEYS[1], ARGV[1]);  return 1
-            else return 0 end
-
-        返回 0 → 直接告诉用户「已抢完」，**MySQL 一次都不用碰**。
-
-  原理：Redis 是单线程处理命令的，一条 Lua 脚本执行期间不会被插队，
-        天然原子。而且它在内存里，比 MySQL 快 100 倍。
-  收益：★★★★★  99% 的「抢不到」的请求在这里就被挡掉了，MySQL 压力骤降。
-  代价：★★★  需要处理「Redis 和 MySQL 数据不一致」「Redis 宕机怎么办」。
-
-  【比喻】收银台旁边挂个小白板写着「余 5」。100 个人来，前 5 个划掉数字拿到号，
-          后 95 个看一眼白板就知道没了，根本不用惊动后仓的账本。
-
-════════════════════════════════════════════════════════════════════════════════
-  刀 4 MQ 异步下单削峰
-════════════════════════════════════════════════════════════════════════════════
-  位置：RabbitMqConfig 里加一对新的 exchange/queue（比如 mall.order.seckill），
-        参照现成的 CancelOrderSender / CancelOrderReceiver 写法。
-
-        Redis 预减成功 → 发一条消息 → 立刻返回「排队中，请稍候」
-                                      ↓
-                               消费者慢慢地、限速地创建订单
-
-  收益：★★★★  把「瞬间 10000 QPS」摊平成「持续 500 TPS 跑 20 秒」。
-  代价：★★★★  用户体验要改（要做轮询查询订单状态），
-                要处理消息丢失、重复消费、消费失败回补 Redis 库存。
-
-════════════════════════════════════════════════════════════════════════════════
-  刀 5 限流 + 防刷
-════════════════════════════════════════════════════════════════════════════════
-  位置：新建一个 Spring Interceptor 或引入 Sentinel，挂在 /order/** 上。
-        - 接口级限流：整个秒杀接口每秒最多放 N 个
-        - 用户级限流：Redis SETNX seckill:limit:{memberId}:{relationId} EX 5
-        - 恶意 IP 黑名单
-
-  收益：★★★  防黄牛脚本，也保护后端。
-  代价：★★
-
-════════════════════════════════════════════════════════════════════════════════
-  刀 6 唯一索引兜底（最后一道保险）
-════════════════════════════════════════════════════════════════════════════════
-  位置：新建秒杀订单记录表，加联合唯一索引
-        UNIQUE KEY uk_member_relation (member_id, flash_promotion_relation_id)
-
-  原理：不管前面几道防线出了什么 bug，数据库的唯一索引是最后的物理保证 ——
-        同一个人对同一场活动的同一个商品，插入第二条会直接报错。
-  收益：★★★★  成本极低，效果极好，强烈建议**第一个就加上**。
-  代价：★（一行 DDL）
-════════════════════════════════════════════════════════════════════════════════
+SET seckill:stock:{relationId} 100
 ```
+
+下单时先在 Redis 里「划一笔」（用 Lua 保证原子）：
+
+```lua
+if redis.call('get', KEYS[1]) >= ARGV[1] then
+    redis.call('decrby', KEYS[1], ARGV[1]);  return 1
+else return 0 end
+```
+
+返回 0 → 直接告诉用户「已抢完」，**MySQL 一次都不用碰**。
+
+原理：Redis 是单线程处理命令的，一条 Lua 脚本执行期间不会被插队，天然原子。而且它在内存里，比 MySQL 快 100 倍。
+
+收益：★★★★★ 99% 的「抢不到」的请求在这里就被挡掉了，MySQL 压力骤降。代价：★★★ 需要处理「Redis 和 MySQL 数据不一致」「Redis 宕机怎么办」。
+
+【比喻】收银台旁边挂个小白板写着「余 5」。100 个人来，前 5 个划掉数字拿到号，后 95 个看一眼白板就知道没了，根本不用惊动后仓的账本。
+
+**刀 4 MQ 异步下单削峰**
+
+位置：`RabbitMqConfig` 里加一对新的 exchange/queue（比如 `mall.order.seckill`），参照现成的 `CancelOrderSender` / `CancelOrderReceiver` 写法。
+
+```
+Redis 预减成功 → 发一条消息 → 立刻返回「排队中，请稍候」
+                              ↓
+                       消费者慢慢地、限速地创建订单
+```
+
+收益：★★★★ 把「瞬间 10000 QPS」摊平成「持续 500 TPS 跑 20 秒」。代价：★★★★ 用户体验要改（要做轮询查询订单状态），要处理消息丢失、重复消费、消费失败回补 Redis 库存。
+
+**刀 5 限流 + 防刷**
+
+位置：新建一个 Spring Interceptor 或引入 Sentinel，挂在 `/order/**` 上。
+
+- 接口级限流：整个秒杀接口每秒最多放 N 个
+- 用户级限流：`Redis SETNX seckill:limit:{memberId}:{relationId} EX 5`
+- 恶意 IP 黑名单
+
+收益：★★★ 防黄牛脚本，也保护后端。代价：★★。
+
+**刀 6 唯一索引兜底（最后一道保险）**
+
+位置：新建秒杀订单记录表，加联合唯一索引。
+
+```sql
+UNIQUE KEY uk_member_relation (member_id, flash_promotion_relation_id)
+```
+
+原理：不管前面几道防线出了什么 bug，数据库的唯一索引是最后的物理保证 —— 同一个人对同一场活动的同一个商品，插入第二条会直接报错。
+
+收益：★★★★ 成本极低，效果极好，强烈建议**第一个就加上**。代价：★（一行 DDL）。
 
 **如果你只有一天时间，我建议的顺序是：刀 6（唯一索引） → 刀 1（原子 UPDATE） → 刀 2（业务校验）。**
-这三刀是「正确性」层面的，不加中间件、不改架构，就能把「会算错账」变成「算得对但慢」。
-刀 3/4/5 是「性能」层面的，等真有流量了再说。
+
+这三刀是「正确性」层面的，不加中间件、不改架构，就能把「会算错账」变成「算得对但慢」。刀 3/4/5 是「性能」层面的，等真有流量了再说。
 
 ---
 
@@ -2085,9 +2028,7 @@ druid:
 
 **答案：基本没有。**
 
-我把 `mall-portal` 的安全相关配置全看了一遍：
-
-`mall-portal/src/main/resources/application.yml`：
+我把 `mall-portal` 的安全相关配置全看了一遍。`mall-portal/src/main/resources/application.yml`：
 
 ```yaml
 secure:
@@ -2104,35 +2045,29 @@ secure:
       - /alipay/**
 ```
 
-`/order/**` **不在白名单里**，所以：
+`/order/**` **不在白名单里**，所以下单必须登录。但也就到此为止了：
 
-```
-  ┌───────────────────────────────────────────────────────────────┐
-  │  防线                     mall 有没有                          │
-  ├───────────────────────────────────────────────────────────────┤
-  │  必须登录才能下单            ✅ 有（JWT，Spring Security 拦截）  │
-  │  接口限流                   ❌ 无（没有 Sentinel / 没有拦截器）  │
-  │  单用户频次限制              ❌ 无                              │
-  │  每人限购校验                ❌ 无（字段有，代码没读）            │
-  │  验证码 / 答题               ❌ 无                              │
-  │  IP 黑名单                  ❌ 无                              │
-  │  下单接口幂等性               ❌ 无（同一批 cartIds 连点两次      │
-  │                                    会生成两张订单）             │
-  │  活动时间校验                 ❌ 无（下单接口不知道有活动这回事）   │
-  │  防重放（nonce / 签名）       ❌ 无                              │
-  └───────────────────────────────────────────────────────────────┘
-```
+| 防线 | mall 有没有 |
+|---|---|
+| 必须登录才能下单 | ✅ 有（JWT，Spring Security 拦截） |
+| 接口限流 | ❌ 无（没有 Sentinel / 没有拦截器） |
+| 单用户频次限制 | ❌ 无 |
+| 每人限购校验 | ❌ 无（字段有，代码没读） |
+| 验证码 / 答题 | ❌ 无 |
+| IP 黑名单 | ❌ 无 |
+| 下单接口幂等性 | ❌ 无（同一批 cartIds 连点两次会生成两张订单） |
+| 活动时间校验 | ❌ 无（下单接口不知道有活动这回事） |
+| 防重放（nonce / 签名） | ❌ 无 |
 
-登录这一层是有的（`UmsMemberServiceImpl` + JWT + `MallSecurityConfig`），
-短信验证码存 Redis 90 秒（`mall:ums:authCode:{telephone}`），这些是完整的。
+登录这一层是有的（`UmsMemberServiceImpl` + JWT + `MallSecurityConfig`），短信验证码存 Redis 90 秒（`mall:ums:authCode:{telephone}`），这些是完整的。
 
 但**从「防黄牛」的角度看，一个登录用户可以：**
+
 - 在 1 秒内调 100 次 `/order/generateOrder`，每次都会创建一张订单、锁一份库存。
 - 把限时购商品加 999 件到购物车，一次下单全买走。
 - 在活动还没开始 / 已经结束的时候照样下单（因为下单链路根本不查活动表）。
 
-小白比喻：**门口有个保安，会检查你有没有会员卡（JWT）。
-但只要你有卡，你可以一秒钟进出闸机 100 次，保安不会拦你。**
+小白比喻：**门口有个保安，会检查你有没有会员卡（JWT）。但只要你有卡，你可以一秒钟进出闸机 100 次，保安不会拦你。**
 
 ---
 
@@ -2140,72 +2075,41 @@ secure:
 
 ### 7.1 优点（真的有，而且不少）
 
-1. **代码极其好读。** 方法名、变量名、注释全是中文语义清晰的，
-   `generateOrder` 从头读到尾不需要跳转到 10 个类里去找。对新人友好度拉满。
-2. **`stock / lock_stock` 双字段的库存模型是对的。**
-   「预占 → 付款转实扣 / 超时释放」这条状态机跟真实电商完全一致，学到就是赚到。
-3. **TTL + 死信队列实现延迟取消，是个非常经典、非常值得学的模式。**
-   这段代码可以直接抄到你自己的项目里。
-4. **`cancelOrder` 里的 `andStatusEqualTo(0)` 是个漂亮的细节** —— 保证不误伤已付款订单，
-   顺带提供幂等性。
+1. **代码极其好读。** 方法名、变量名、注释全是中文语义清晰的，`generateOrder` 从头读到尾不需要跳转到 10 个类里去找。对新人友好度拉满。
+2. **`stock / lock_stock` 双字段的库存模型是对的。** 「预占 → 付款转实扣 / 超时释放」这条状态机跟真实电商完全一致，学到就是赚到。
+3. **TTL + 死信队列实现延迟取消，是个非常经典、非常值得学的模式。** 这段代码可以直接抄到你自己的项目里。
+4. **`cancelOrder` 里的 `andStatusEqualTo(0)` 是个漂亮的细节** —— 保证不误伤已付款订单，顺带提供幂等性。
 5. **依赖简单，能跑起来。** 单体 + MySQL，没有一堆中间件互相依赖。
-6. **模块划分清晰**：`mall-mbg` 放生成代码、`mall-common` 放工具、`mall-security` 放鉴权，
-   `admin` / `portal` / `search` 按业务边界分。这个分法值得学。
+6. **模块划分清晰**：`mall-mbg` 放生成代码、`mall-common` 放工具、`mall-security` 放鉴权，`admin` / `portal` / `search` 按业务边界分。这个分法值得学。
 
 ### 7.2 坑（按严重程度排序）
 
-```
-  ┌────┬────────────────────────────────────────┬──────────┬────────────────┐
-  │ 级别│ 问题                                    │ 位置      │ 后果            │
-  ├────┼────────────────────────────────────────┼──────────┼────────────────┤
-  │ 🔴 │ lockStock 读-算-写非原子，且是绝对值赋值   │OmsPortal │ 高并发超卖       │
-  │    │                                        │OrderSvc  │                │
-  │    │                                        │Impl:727  │                │
-  ├────┼────────────────────────────────────────┼──────────┼────────────────┤
-  │ 🔴 │ paySuccess 不校验订单状态                │同上:253  │ 重复扣库存       │
-  ├────┼────────────────────────────────────────┼──────────┼────────────────┤
-  │ 🟠 │ releaseSkuStockLock 无下限保护           │PortalOrde│ lock_stock 变负 │
-  │    │                                        │rDao.xml  │ → 可用库存虚高   │
-  ├────┼────────────────────────────────────────┼──────────┼────────────────┤
-  │ 🟠 │ 限时购价格/限量/限购全部不生效             │OmsPromot │ 活动形同虚设     │
-  │    │ （promotionType==5 无分支）              │ionSvcImpl│                │
-  ├────┼────────────────────────────────────────┼──────────┼────────────────┤
-  │ 🟠 │ 下单接口无限流、无幂等、无活动时间校验       │全局      │ 可被脚本刷      │
-  ├────┼────────────────────────────────────────┼──────────┼────────────────┤
-  │ 🟡 │ 首页 content() 串行 6~9 次 DB，零缓存     │HomeSvcIm │ 首页 QPS 上不去 │
-  │    │                                        │pl:41     │                │
-  ├────┼────────────────────────────────────────┼──────────┼────────────────┤
-  │ 🟡 │ 一个下单事务里做 8~14 次 DB 往返           │generate  │ 事务长，锁持有久 │
-  │    │ （连接池 max-active 只有 20）             │Order     │                │
-  ├────┼────────────────────────────────────────┼──────────┼────────────────┤
-  │ 🟡 │ TTL 队列队头阻塞（当前配置下不会触发，      │RabbitMq  │ 未来扩展的雷    │
-  │    │ 但一旦区分秒杀/普通超时时间就会踩）         │Config    │                │
-  ├────┼────────────────────────────────────────┼──────────┼────────────────┤
-  │ 🟡 │ 定时任务与 MQ 同时开会重复取消             │OrderTime │ 已被注释规避     │
-  │    │                                        │OutCancel │                │
-  │    │                                        │Task      │                │
-  ├────┼────────────────────────────────────────┼──────────┼────────────────┤
-  │ ⚪ │ sms_flash_promotion_log 表完全没被使用    │—         │ 死代码/死表     │
-  └────┴────────────────────────────────────────┴──────────┴────────────────┘
-```
+| 级别 | 问题 | 位置 | 后果 |
+|---|---|---|---|
+| 🔴 | `lockStock` 读-算-写非原子，且是绝对值赋值 | `OmsPortalOrderServiceImpl:727` | 高并发超卖 |
+| 🔴 | `paySuccess` 不校验订单状态 | 同上 `:253` | 重复扣库存 |
+| 🟠 | `releaseSkuStockLock` 无下限保护 | `PortalOrderDao.xml` | `lock_stock` 变负 → 可用库存虚高 |
+| 🟠 | 限时购价格/限量/限购全部不生效（`promotionType==5` 无分支） | `OmsPromotionServiceImpl` | 活动形同虚设 |
+| 🟠 | 下单接口无限流、无幂等、无活动时间校验 | 全局 | 可被脚本刷 |
+| 🟡 | 首页 `content()` 串行 6~9 次 DB，零缓存 | `HomeServiceImpl:41` | 首页 QPS 上不去 |
+| 🟡 | 一个下单事务里做 8~14 次 DB 往返（连接池 `max-active` 只有 20） | `generateOrder` | 事务长，锁持有久 |
+| 🟡 | TTL 队列队头阻塞（当前配置下不会触发，但一旦区分秒杀/普通超时时间就会踩） | `RabbitMqConfig` | 未来扩展的雷 |
+| 🟡 | 定时任务与 MQ 同时开会重复取消 | `OrderTimeOutCancelTask` | 已被注释规避 |
+| ⚪ | `sms_flash_promotion_log` 表完全没被使用 | — | 死代码/死表 |
 
 ### 7.3 量级总结表
 
-```
-  场景                                        能不能扛住      说明
-  ────────────────────────────────────────────────────────────────────────
-  日常电商，QPS < 200，商品分散                  ✅ 完全 OK     设计的目标场景
-  日常电商，QPS 200~500                        ⚠️ 需调优       扩连接池、加缓存
-  QPS > 1000                                  ❌ 崩            单体 + 20 连接扛不住
-  ────────────────────────────────────────────────────────────────────────
-  10 人抢 5 件（低并发热点）                     ⚠️ 可能超卖      看运气
-  100 人抢 5 件                                ❌ 必然超卖      lockStock 竞态
-  10000 人抢 5 件                              ❌ 超卖 + 崩     两个问题一起来
-  ────────────────────────────────────────────────────────────────────────
-  「限时购价格是否正确应用」                       ❌ 不会应用      promotionType==5 无分支
-  「每人限购是否生效」                            ❌ 不生效        字段没人读
-  「活动结束后还能不能下单」                       ✅ 能下单（bug） 下单链路不查活动表
-```
+| 场景 | 能不能扛住 | 说明 |
+|---|---|---|
+| 日常电商，QPS < 200，商品分散 | ✅ 完全 OK | 设计的目标场景 |
+| 日常电商，QPS 200~500 | ⚠️ 需调优 | 扩连接池、加缓存 |
+| QPS > 1000 | ❌ 崩 | 单体 + 20 连接扛不住 |
+| 10 人抢 5 件（低并发热点） | ⚠️ 可能超卖 | 看运气 |
+| 100 人抢 5 件 | ❌ 必然超卖 | `lockStock` 竞态 |
+| 10000 人抢 5 件 | ❌ 超卖 + 崩 | 两个问题一起来 |
+| 「限时购价格是否正确应用」 | ❌ 不会应用 | `promotionType==5` 无分支 |
+| 「每人限购是否生效」 | ❌ 不生效 | 字段没人读 |
+| 「活动结束后还能不能下单」 | ✅ 能下单（bug） | 下单链路不查活动表 |
 
 ---
 
@@ -2213,28 +2117,23 @@ secure:
 
 按 `mall-portal/src/main/resources/application-dev.yml` 里的配置，你需要：
 
-```
-  ┌─────────────────────────────────────────────────────────────────────┐
-  │  必装                                                                │
-  ├─────────────────────────────────────────────────────────────────────┤
-  │  JDK 17+          （master 分支基于 Spring Boot 3.5 + JDK 17；       │
-  │                    如果你只有 JDK 8，切 dev-v2 分支）                  │
-  │  Maven 3.6+                                                         │
-  │  MySQL 5.7/8.0    localhost:3306，库名 mall，root/root               │
-  │                   建库脚本：document/sql/mall.sql                     │
-  │  Redis            localhost:6379，无密码，db 0                       │
-  │                   （不装的话订单号生成会直接报错）                       │
-  │  RabbitMQ         localhost:5672                                    │
-  │                   virtual-host: /mall，用户名/密码：mall/mall          │
-  │                   （不装的话下单最后一步发延迟消息会失败）                │
-  ├─────────────────────────────────────────────────────────────────────┤
-  │  可选（不影响下单主链路）                                               │
-  ├─────────────────────────────────────────────────────────────────────┤
-  │  MongoDB          localhost:27017，库名 mall-port（会员浏览记录）      │
-  │  Elasticsearch    mall-search 模块用                                 │
-  │  Logstash/Kibana  日志                                              │
-  └─────────────────────────────────────────────────────────────────────┘
-```
+**必装**
+
+| 组件 | 说明 |
+|---|---|
+| JDK 17+ | master 分支基于 Spring Boot 3.5 + JDK 17；如果你只有 JDK 8，切 dev-v2 分支 |
+| Maven 3.6+ | — |
+| MySQL 5.7/8.0 | localhost:3306，库名 mall，root/root；建库脚本 `document/sql/mall.sql` |
+| Redis | localhost:6379，无密码，db 0（不装的话订单号生成会直接报错） |
+| RabbitMQ | localhost:5672，virtual-host: `/mall`，用户名/密码 mall/mall（不装的话下单最后一步发延迟消息会失败） |
+
+**可选（不影响下单主链路）**
+
+| 组件 | 说明 |
+|---|---|
+| MongoDB | localhost:27017，库名 mall-port（会员浏览记录） |
+| Elasticsearch | `mall-search` 模块用 |
+| Logstash/Kibana | 日志 |
 
 RabbitMQ 需要先手动建 vhost 和用户：
 
@@ -2261,8 +2160,7 @@ rabbitmqctl set_permissions -p /mall mall ".*" ".*" ".*"
 3. 用 JMeter / `ab` / 或者两个 curl 加 `&` 后台并发，同时打 `POST /order/generateOrder`。
 4. 看 `oms_order` 表：如果出现两条订单，而 `pms_sku_stock.lock_stock` 只有 1，恭喜你复现了。
 
-（想更容易复现，可以临时在 `lockStock()` 的 SELECT 和 UPDATE 之间加一行 `Thread.sleep(2000)`，
-把那个「时间缝隙」人为放大到 2 秒 —— 那时候超卖几乎必现。）
+（想更容易复现，可以临时在 `lockStock()` 的 SELECT 和 UPDATE 之间加一行 `Thread.sleep(2000)`，把那个「时间缝隙」人为放大到 2 秒 —— 那时候超卖几乎必现。）
 
 ---
 

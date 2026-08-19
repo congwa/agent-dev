@@ -2,7 +2,11 @@
 
 > 基于 `deepseek-ai/deepseek-harness` v0.1.0-rc.5（commit `47f9438`），2026-08-14 核对。
 
-配置这件事只有两种痛苦。一种是启动直接炸，吐出三四层嵌套的报错，看不出到底是 schema 不满意、插件自己抛的，还是依赖压根没就绪。另一种更难受：**没报错，但你配的东西就是没生效。**
+配置这件事只有两种痛苦。
+
+一种是启动直接炸，吐出三四层嵌套的报错，看不出到底是 schema 不满意、插件自己抛的，还是依赖压根没就绪。
+
+另一种更难受：**没报错，但你配的东西就是没生效。**
 
 这章追的是同一条链路：`cordis.yml` 里那个 `config:` 块，怎么变成 `apply(ctx, config)` 的第二个参数——中间经过哪几道手续，每道手续出错时你在终端上看见什么。
 
@@ -41,7 +45,7 @@ flowchart TD
 
 你的插件里有一行 `const TIMEOUT = 30000`。两台机器想要不同的值，于是你开始想"读环境变量吧"。
 
-dsh 的规矩是反过来的：**两个部署可能想设成不同值的东西，一律做成配置字段**。判据只有一句——能不能不改代码、只改 `cordis.yml` 就换掉这个值（`docs/user/develop/basic/config.md:80`、`docs/user/develop/basic/config.md:92`）。
+dsh 的规矩是反过来的：**两个部署可能想设成不同值的东西，一律做成配置字段**。判据只有一句——能不能不改代码、只改 `cordis.yml` 就换掉这个值。出处：`docs/user/develop/basic/config.md:80`、`:92`。
 
 环境变量不是不能用。但它的正确位置在 `cordis.yml` 里（后面 `!!js` 那节会讲），不在你的 `.ts` 文件里。
 
@@ -77,7 +81,21 @@ export function apply(ctx: Context, config: Config) {
 
 `interface Config` 和 `const Config` 同名不是笔误，是故意的：使用方拿走类型，Cordis 拿走运行期校验器（`docs/cordis-tutorial/05-config.md:34`）。TypeScript 的类型空间和值空间互不打架，同名合法。
 
-值得多看一眼的是 Cordis 认的到底是什么。它认的不是 Schemastery，而是 **Standard Schema**——一个跨校验库的最小接口约定，核心就是校验器对象上挂一个 `~standard` 属性。注册表建立插件 runtime 记录时直接读 `plugin.Config` 存进去（`vendor/cordis/src/registry.ts:326`），字段类型写的是 `StandardSchemaV1`（`vendor/cordis/src/registry.ts:104`），到了校验那一刻取的正是 `runtime.Config['~standard'].validate(config)`（`vendor/cordis/src/fiber.ts:53`）。
+### Cordis 认的不是 Schemastery，是 Standard Schema
+
+Standard Schema 是一个跨校验库的最小接口约定，核心就一条：校验器对象上挂一个 `~standard` 属性。
+
+你导出的那个 `Config` 从模块走到校验点，是这么一条链：
+
+```
+// 注册插件时
+runtime.Config = plugin.Config          // 存下来，字段类型写的是 StandardSchemaV1
+
+// 该校验了
+runtime.Config['~standard'].validate(config)
+```
+
+对应 `vendor/cordis/src/registry.ts:326`（注册表建立插件 runtime 记录时直接读 `plugin.Config` 存进去）、`:104`（字段类型 `StandardSchemaV1`）、`vendor/cordis/src/fiber.ts:53`（取 `runtime.Config['~standard'].validate(config)`）。
 
 这里的归属关系值得单独看一眼：你导出的东西先过 loader 的一道取值，才进注册表，最后在 fiber 里被当成校验器用。
 
@@ -129,7 +147,9 @@ flowchart LR
 
 ### 默认值只写在 schema 上
 
-不要在 `apply` 里写 `config.greeting ?? 'Hello'`（`docs/user/develop/basic/config.md:9`）。用户省略 `greeting` 时，校验器会把默认值填进去再交给 `apply`，所以 `apply` 拿到的永远是完整的、已校验的配置（`docs/cordis-tutorial/05-config.md:51`；填充逻辑在 `vendor/schemastery/src/index.ts:474-484`，最后一步 `data = clone(fallback)` 在 `:483`）。
+不要在 `apply` 里写 `config.greeting ?? 'Hello'`（`docs/user/develop/basic/config.md:9`）。用户省略 `greeting` 时，校验器会把默认值填进去再交给 `apply`，所以 `apply` 拿到的永远是完整的、已校验的配置。
+
+出处：`docs/cordis-tutorial/05-config.md:51`；填充逻辑在 `vendor/schemastery/src/index.ts:474-484`，最后一步 `data = clone(fallback)` 在 `:483`。
 
 反向也成立：配置写回文件时，loader 会调 schema 的 `simplify` 把等于默认值的字段删掉（`vendor/loader/src/index.ts:106-108`，`simplify` 定义在 `vendor/schemastery/src/index.ts:193`）。
 
@@ -137,9 +157,22 @@ flowchart LR
 
 这是本章第一个静默失败，也是"我明明配了怎么没生效"最常见的成因。
 
-`Schema.object` 的解析器在非 strict 模式下，会把你没声明的键**原样合并进结果**——`vendor/schemastery/src/index.ts:752-763` 里那句 `if (!strict) merge(result, data)`，`merge` 本体在 `:745-750`。
+`Schema.object` 的解析器在非 strict 模式下，会把你没声明的键**原样合并进结果**：
 
-于是 `cordis.yml` 里把 `greeting` 拼成 `greetng`，加载期零诊断：`greetng` 静静躺在 config 里没人读，`greeting` 用了默认值。先怀疑拼写，别急着怀疑加载顺序。
+```
+result = {}
+for (key, 子schema) in 你声明的字段:
+    result[key] = 子schema.parse(data[key])   // 缺了就填 default
+
+if not strict:
+    merge(result, data)      // 你没声明的键，原样搬进来，一声不吭
+```
+
+关键就是那句 `if (!strict) merge(result, data)`，在 `vendor/schemastery/src/index.ts:752-763`，`merge` 本体在 `:745-750`。
+
+于是 `cordis.yml` 里把 `greeting` 拼成 `greetng`，加载期零诊断：`greetng` 静静躺在 config 里没人读，`greeting` 用了默认值。
+
+先怀疑拼写，别急着怀疑加载顺序。
 
 ## 校验发生在什么时候：先插值，再校验，最后 apply
 
@@ -161,7 +194,9 @@ apply(ctx, config)
 
 挂载点在 `vendor/cordis/src/fiber.ts:641-644`，两步就挤在 `:642` 和 `:643` 两行里，调用点是 `vendor/cordis/src/fiber.ts:655`。
 
-PENDING 的判定在 `vendor/cordis/src/fiber.ts:611-623`：只要 `inject` 里有一个服务缺席，epoch 就是 INACTIVE，`_reload` 根本不跑；对外的状态名由 `:575-578` 推出来（`_error` 有值 → FAILED，epoch 是 INACTIVE → PENDING）。热更新路径 `fiber.update()` 在 `vendor/cordis/src/fiber.ts:736-753` 也遵守同一条纪律：fiber 不处于 ACTIVE 时**推迟**求值，源码注释直说原因是 config 解析可能访问注入的服务（`vendor/cordis/src/fiber.ts:740-741`）。
+PENDING 的判定是：只要 `inject` 里有一个服务缺席，epoch 就是 INACTIVE，`_reload` 根本不跑。对外的那两个状态名也是推出来的——`_error` 有值 → FAILED，epoch 是 INACTIVE → PENDING。见 `vendor/cordis/src/fiber.ts:611-623` 与 `:575-578`。
+
+热更新路径 `fiber.update()` 遵守同一条纪律：fiber 不处于 ACTIVE 时**推迟**求值，源码注释直说原因是 config 解析可能访问注入的服务（`vendor/cordis/src/fiber.ts:736-753`，注释在 `:740-741`）。
 
 没导出 `Config` 的插件呢？`resolveConfig` 第一行 `if (!runtime.Config) return config` 原样放行（`vendor/cordis/src/fiber.ts:51`）。**没有 schema，就没有校验，也没有默认值**——用户写什么你收什么。
 
@@ -247,7 +282,9 @@ ValidationError: invalid config:
   - $.targets expected array but got not-an-array (at targets)
 ```
 
-这一段与官方教程贴出来的输出逐字一致（`docs/cordis-tutorial/05-config.md:63-66`）。有个细节值得记住：Schemastery 的 Standard Schema 适配器一次只产出**一条** issue（`vendor/schemastery/src/index.ts:281-288`，抛出即停）。所以一次改一个错，别指望它一口气给你列全。
+这一段与官方教程贴出来的输出逐字一致（`docs/cordis-tutorial/05-config.md:63-66`）。
+
+有个细节值得记住：Schemastery 的 Standard Schema 适配器一次只产出**一条** issue（`vendor/schemastery/src/index.ts:281-288`，抛出即停）。所以一次改一个错，别指望它一口气给你列全。
 
 **第三层，Loader 的 entry 包装。** 补上是哪一行配置、在哪个阶段炸的（`vendor/loader/src/config/entry.ts:24-27`）：
 
@@ -271,7 +308,11 @@ failed to apply loader entry <id> (<name>): invalid config: ...
 
 失败的插件不会被"跳过"，它是响亮的失败（`docs/cordis-tutorial/01-first-plugin.md:89`）。
 
-你可能在别处读到过一条例外：模块名拼错的报告走 Cordis logger，而启动早期还没有 console 输出器在监听，于是新加的那行看起来"什么都没发生"（`docs/cordis-tutorial/01-first-plugin.md:91`）。注意那说的是 Cordis 教程自带的 launcher（`node --import tsx ../../vendor/cordis/bin.js`，`docs/cordis-tutorial/01-first-plugin.md:36`）。dsh 的 `boot()` 额外压了一道 `assertEntriesLoaded` 专门点名那一行，所以在 dsh 里"完全没反应"不该是预期结果。真遇到了，还是先查拼写。
+你可能在别处读到过一条例外：模块名拼错的报告走 Cordis logger，而启动早期还没有 console 输出器在监听，于是新加的那行看起来"什么都没发生"（`docs/cordis-tutorial/01-first-plugin.md:91`）。
+
+注意那说的是 Cordis 教程自带的 launcher（`node --import tsx ../../vendor/cordis/bin.js`，`docs/cordis-tutorial/01-first-plugin.md:36`）。dsh 的 `boot()` 额外压了一道 `assertEntriesLoaded` 专门点名那一行，所以在 dsh 里"完全没反应"不该是预期结果。
+
+真遇到了，还是先查拼写。
 
 ## Schema 管不了的约束，在 apply 里抛
 
@@ -293,9 +334,11 @@ function validateRefreshInterval(refreshIntervalMs: number | undefined): void {
 }
 ```
 
-它的 schema 只有 `z.object({ timeZone: z.string(), refreshIntervalMs: z.number() })`（`packages/context/time-context/src/index.ts:35-38`，`z` 是这个包给 schemastery 起的别名），真正的语义校验在 `apply` 开头调用上面这个函数（`packages/context/time-context/src/index.ts:148`，`apply` 本身从 `:145` 起）。
+它的 schema 只有 `z.object({ timeZone: z.string(), refreshIntervalMs: z.number() })`（`z` 是这个包给 schemastery 起的别名），真正的语义校验在 `apply` 开头调用上面这个函数。出处：schema 在 `packages/context/time-context/src/index.ts:35-38`，调用点 `:148`，`apply` 本身从 `:145` 起。
 
-从 `apply` 抛出的异常同样让 fiber 进 FAILED（`vendor/cordis/src/fiber.ts:576`），走上一节第四层那条路——所以用户看到的报错形态是一致的，不会因为"这是插件自己抛的"就变成另一种诊断。`packages/session/session-telemetry-otel/src/index.ts:113-118` 的注释把这条规矩写得更直白：schema 只查顶层字段，值检查放构造函数里，这样错误信息能点名具体字段。
+从 `apply` 抛出的异常同样让 fiber 进 FAILED（`vendor/cordis/src/fiber.ts:576`），走上一节第四层那条路——所以用户看到的报错形态是一致的，不会因为"这是插件自己抛的"就变成另一种诊断。
+
+`packages/session/session-telemetry-otel/src/index.ts:113-118` 的注释把这条规矩写得更直白：schema 只查顶层字段，值检查放构造函数里，这样错误信息能点名具体字段。
 
 ## `!!js`：写在 YAML 里的惰性表达式
 
@@ -309,7 +352,24 @@ function validateRefreshInterval(refreshIntervalMs: number | undefined): void {
     root: !!js dshHomePath('sessions')
 ```
 
-机制是三步。**解析**：`cordis-plugin-include` 注册 `tag:yaml.org,2002:js`，把标量构造成 `{ __jsExpr: '<源码>' }`（`vendor/include/src/index.ts:9-15`）——**只能写 `!!js`，写 `!js` 无效**（`AGENTS.md:96`），`!!` 才映射到那个标签。**求值**：`interpolate()` 递归走一遍 config，遇到表达式节点就 `evaluate(ctx, expr)`（`vendor/loader/src/config/utils.ts:12-22`），求值器是 `new Function('ctx', 'expr', 'with (ctx) { return eval(expr) }')`（`vendor/loader/src/config/utils.ts:5-9`）。**接线**：loader 把 `interpolate` 挂在 `internal/config` waterfall 上（`vendor/loader/src/index.ts:92-101`）。
+机制是三步：
+
+| 步骤 | 干了什么 | 出处 |
+|---|---|---|
+| 解析 | `cordis-plugin-include` 注册 `tag:yaml.org,2002:js`，把标量构造成 `{ __jsExpr: '<源码>' }` | `vendor/include/src/index.ts:9-15` |
+| 求值 | `interpolate()` 递归走一遍 config，遇到表达式节点就 `evaluate(ctx, expr)`；求值器是 `new Function('ctx', 'expr', 'with (ctx) { return eval(expr) }')` | `vendor/loader/src/config/utils.ts:12-22`，求值器在 `:5-9` |
+| 接线 | loader 把 `interpolate` 挂在 `internal/config` waterfall 上 | `vendor/loader/src/index.ts:92-101` |
+
+插值那一步的形状：
+
+```
+function interpolate(节点):
+    if 节点 是 { __jsExpr }:   return evaluate(ctx, 节点.__jsExpr)
+    if 节点 是 对象或数组:      每个子节点递归一遍
+    否则:                      原样返回
+```
+
+写法上有个一次性的坑：**只能写 `!!js`，写 `!js` 无效**（`AGENTS.md:96`），`!!` 才映射到那个标签。
 
 因为是 `with (ctx)`，表达式里的作用域同时有三类名字可写：
 
@@ -371,7 +431,9 @@ flowchart TD
     port: !!js ctx.webStartup.port ?? 3080
 ```
 
-`webStartup` 是另一个插件解析完命令行后 provide 出来的服务。Loader 会等这行声明的注入全部激活，再拿这行自己的插件上下文去求值（`packages/boot/cmdline/README.md:53`）；provider 被替换、patch 热重载时会**重新**求值，所以启动 flag 不会被悄悄重置。仓库里有一条回归测试专门钉死这个顺序，而且刻意把消费者行写在提供者行前面，用来证明顺序来自注入就绪、不是来自 YAML 位置（`packages/boot/app-boot/tests/user-patches.spec.ts:145-170`，注释在 `:162-163`）。
+`webStartup` 是另一个插件解析完命令行后 provide 出来的服务。Loader 会等这行声明的注入全部激活，再拿这行自己的插件上下文去求值（`packages/boot/cmdline/README.md:53`）；provider 被替换、patch 热重载时会**重新**求值，所以启动 flag 不会被悄悄重置。
+
+仓库里有一条回归测试专门钉死这个顺序，而且刻意把消费者行写在提供者行前面，用来证明顺序来自注入就绪、不是来自 YAML 位置（`packages/boot/app-boot/tests/user-patches.spec.ts:145-170`，注释在 `:162-163`）。
 
 **`disabled` 是另一套**：按 loader 侧上下文求值，每次挂载决策都算一遍，没有"等服务就绪"这一步。所以那里只该写平台或环境判断：
 
@@ -386,7 +448,9 @@ flowchart TD
   disabled: !!js process.platform !== 'win32'
 ```
 
-这条规则有一段值得知道的历史。`disabled` 原本**不**插值，写在那里的 `!!js` 会留下一个恒为真的对象，于是把整栈文件系统工具在所有模式下禁掉了——而 YAML 语法完全合法，加载期零诊断。这就是复盘 0002（`docs/postmortem/0002-js-expression-disabled-filesystem-tools.zh.md:9`、`:32`）。2026-08-11 的决策把 `disabled` 加进插值范围，并让门禁只在 `disabled` 上放行表达式（`.agents/notes/implemented/architecture/2026-08-11-loader-entry-disabled-interpolation.zh.md:13`；对应提交 `feat(loader): interpolate the entry disabled field`，2026-08-11）。
+这条规则有一段值得知道的历史。`disabled` 原本**不**插值，写在那里的 `!!js` 会留下一个恒为真的对象，于是把整栈文件系统工具在所有模式下禁掉了——而 YAML 语法完全合法，加载期零诊断。这就是复盘 0002（`docs/postmortem/0002-js-expression-disabled-filesystem-tools.zh.md:9`、`:32`）。
+
+2026-08-11 的决策把 `disabled` 加进插值范围，并让门禁只在 `disabled` 上放行表达式（`.agents/notes/implemented/architecture/2026-08-11-loader-entry-disabled-interpolation.zh.md:13`；对应提交 `feat(loader): interpolate the entry disabled field`，2026-08-11）。
 
 所以，**如果你在网上看到"`!!js` 只在 config 里有效"，那是 2026-08-11 之前的事实**——复盘 0002 当时加进 `AGENTS.md` 的措辞正是如此（见 `:39`）。本仓库 HEAD 的 `AGENTS.md:96` 和 `docs/cordis-tutorial/05-config.md:80` 都已经改成"`config` 与 `disabled`"。
 
@@ -458,7 +522,9 @@ flowchart TD
 2. **改完用 `dsh --dump-config` 对一眼。** 它用 include 自己的解析器和 patch 算法离线合成，并把 `!!js` **逐字**渲染出来（`packages/boot/app-boot/README.md:22`，flag 说明见 `apps/cli/README.md:41`，逐条语义见 `apps/cli/reference/README.md:39`）。表达式还在就是还在，变成字面量就是被抹了。四层叠加的完整规则见第 03 章。
 3. **别用 patch 去"微调"一行**，宁可整行 `insert` 一个你自己的插件。
 
-顺带记住另一个静默失败：patch 的 `id` 在树里找不到时，只是一条警告、不是错误。`applyEntryPatches` 把诊断丢给 `warn` sink（`vendor/include/src/index.ts:110-113`），include 再把这个 sink 接到 loader logger 上（`vendor/include/src/index.ts:267-270`）；README 直接称之为 "a stderr warning"（`packages/boot/app-boot/README.md:43`）。所以 patch 的 id 打错了，你也只会在一堆启动日志里看到一行灰扑扑的提示。
+顺带记住另一个静默失败：patch 的 `id` 在树里找不到时，只是一条警告、不是错误。
+
+`applyEntryPatches` 把诊断丢给 `warn` sink（`vendor/include/src/index.ts:110-113`），include 再把这个 sink 接到 loader logger 上（`vendor/include/src/index.ts:267-270`）；README 直接称之为 "a stderr warning"（`packages/boot/app-boot/README.md:43`）。所以 patch 的 id 打错了，你也只会在一堆启动日志里看到一行灰扑扑的提示。
 
 ## 完整示例：一个带配置的心跳插件
 
@@ -527,9 +593,11 @@ pnpm dsh web --patch ./scratch-plugin/cordis.yml
 
 ## 想知道某个内置插件能配什么
 
-不要猜，也不要翻源码找 schema。`docs/config-catalog.md` 是**生成**的全量目录（生成器 `scripts/gen-config-catalog.ts`，`docs/config-catalog.md:1-2`、`:8`），逐包贴出 `apply` 或服务构造函数实际接收的完整配置声明，连 JSDoc 一起，并列出该行必须存在的 `inject` 依赖（`docs/config-catalog.md:6`、`:10`）。
+不要猜，也不要翻源码找 schema。`docs/config-catalog.md` 是**生成**的全量目录，逐包贴出 `apply` 或服务构造函数实际接收的完整配置声明，连 JSDoc 一起，并列出该行必须存在的 `inject` 依赖。出处：生成器 `scripts/gen-config-catalog.ts`，见 `docs/config-catalog.md:1-2`、`:8`、`:6`、`:10`。
 
-它可信的原因在于生成器会拿运行期 schemastery schema 和贴出来的类型做交叉核对：**每个被 schema 校验的键（含嵌套键）都必须能在声明的类型上定位到**，所以这份目录藏不住"loader 收但文档没写"的字段（`docs/config-catalog.md:8`）。每个条目末尾还带 `Source:` 行直接指向源码，例如 `docs/config-catalog.md:369-388` 那条 `@deepseek-ai/dsh-bash-sandbox`。
+它可信的原因在于生成器会拿运行期 schemastery schema 和贴出来的类型做交叉核对：**每个被 schema 校验的键（含嵌套键）都必须能在声明的类型上定位到**，所以这份目录藏不住"loader 收但文档没写"的字段（`docs/config-catalog.md:8`）。
+
+每个条目末尾还带 `Source:` 行直接指向源码，例如 `docs/config-catalog.md:369-388` 那条 `@deepseek-ai/dsh-bash-sandbox`。
 
 ## "我配了但没生效"，按这个顺序查
 
@@ -581,7 +649,10 @@ flowchart TD
 
 ## 本章未确认
 
-- ⚠️ 报错那节的多层信息是**从源码逐段拼装**的（`vendor/schemastery/src/index.ts:225` → `vendor/cordis/src/fiber.ts:28` → `vendor/loader/src/config/entry.ts:26` → `packages/boot/app-boot/src/index.ts:800` 或 `:723`），仓库未装依赖、无法实跑。其中第二层与官方教程贴出的输出逐字一致（`docs/cordis-tutorial/05-config.md:63-66`），第三、四层的**拼接结果**未实测。同一次校验失败究竟由 `boot()` 的 `plugin tree failed to load` 包装报出，还是由启动审计 `did not activate` 报出，取决于该 fiber 失败时是否已过 `_start` 的 `await`（`vendor/loader/src/config/entry.ts:296-297` vs `packages/boot/app-boot/src/index.ts:701-707`），两条路径我都未实跑区分。同理，模块名拼错既可能走 `failed to import loader entry ...`（`vendor/loader/src/config/entry.ts:280-283`）被 `boot()` 包装，也可能走 `assertEntriesLoaded` 的 `plugin(s) failed to load`（`packages/boot/app-boot/src/index.ts:658-663`），我只读到两处代码，没有实跑证明哪条先命中。
+- ⚠️ 报错那节的多层信息是**从源码逐段拼装**的（`vendor/schemastery/src/index.ts:225` → `vendor/cordis/src/fiber.ts:28` → `vendor/loader/src/config/entry.ts:26` → `packages/boot/app-boot/src/index.ts:800` 或 `:723`），仓库未装依赖、无法实跑。
+  - 其中第二层与官方教程贴出的输出逐字一致（`docs/cordis-tutorial/05-config.md:63-66`），第三、四层的**拼接结果**未实测。
+  - 同一次校验失败究竟由 `boot()` 的 `plugin tree failed to load` 包装报出，还是由启动审计 `did not activate` 报出，取决于该 fiber 失败时是否已过 `_start` 的 `await`（`vendor/loader/src/config/entry.ts:296-297` vs `packages/boot/app-boot/src/index.ts:701-707`），两条路径我都未实跑区分。
+  - 同理，模块名拼错既可能走 `failed to import loader entry ...`（`vendor/loader/src/config/entry.ts:280-283`）被 `boot()` 包装，也可能走 `assertEntriesLoaded` 的 `plugin(s) failed to load`（`packages/boot/app-boot/src/index.ts:658-663`），我只读到两处代码，没有实跑证明哪条先命中。
 - ⚠️ 心跳插件是本章按上述文档形状**新写**的，逐个构件都能追溯到仓库（插件形状、`ctx.effect` 清理、Config 声明、`!!js` 写法、`--patch` 挂载），但这个组合本身不在仓库里，未运行验证；四种破坏性实验的预期输出属于按机制推导。
 - ⚠️ `!!js` 表达式里裸写服务名（如 `dshHomePath(...)`）依赖 Context 代理的 `has` trap（`vendor/cordis/src/reflect.ts:199-205`）与 `with (ctx)` 的作用域规则，我是读代码推出来的，未实跑；`packages/bundle/base/cordis.patch.yml:101` 的既有用法是它成立的旁证。稳妥起见，自己写的时候优先用 `ctx.<service>` 显式形式（`packages/boot/cmdline/README.md:45-46` 的官方写法）。
 - ⚠️ Web UI 是否提供图形化编辑插件 config，本章未考证。写回路径（`vendor/loader/src/index.ts:103-109`）拿到的是**已求值**的 config，且 loader 内部重载走的是 `noSave=true`（`vendor/loader/src/config/entry.ts:118-120`）因而不写回——按这两点推断，只有外部主动调 `fiber.update(newConfig)` 才会落盘，届时 `!!js` 是否被换成字面量我未验证。若你用 UI 改过配置，改完请用 `--dump-config` 复核一次表达式还在不在。

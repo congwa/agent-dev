@@ -6,6 +6,8 @@
 
 **一句话**：dsh 默认的压缩后端——它是 `ctx.compaction` 这个 capability seam 的 Service Provider，用 `ctx.tokenMeter` 在每个 step 边界测压，超过阈值就把最老的一段 surface 换成一条带 `<compacted-summary>` 框的检查点消息。
 
+整条链路只有三个动作：**测压 → 超阈值就压 → 把最老那段换成检查点消息**。下面每一节都是在补这三步的细节。
+
 ## 它在树上长什么样
 
 ```yaml
@@ -13,7 +15,9 @@
       name: '@deepseek-ai/dsh-compaction-basic'
 ```
 
-`packages/bundle/base/cordis.patch.yml:284-285`。整行没有 `config`，所以下表全部走默认值；也没有显式 `inject`，依赖由类上的 `static inject = ['llm', 'tokenMeter', 'sessions']` 声明（`packages/compaction/compaction-basic/src/index.ts:104`）。
+整行没有 `config`，所以后面配置表里的字段全部走默认值；也没有显式 `inject`，依赖由类上的 `static inject = ['llm', 'tokenMeter', 'sessions']` 声明。
+
+出处：树上这一行见 `packages/bundle/base/cordis.patch.yml:284-285`，`static inject` 见 `packages/compaction/compaction-basic/src/index.ts:104`。
 
 web profile 把它关掉了：
 
@@ -22,7 +26,9 @@ web profile 把它关掉了：
   disabled: true
 ```
 
-`packages/bundle/web-app/cordis.patch.yml:358-359`。上面那段注释解释了原因："The token METER stays on the host plane; only the compaction backend that reads it moves."（`packages/bundle/web-app/cordis.patch.yml:351-352`）——token-meter 留在 host 平面，压缩后端下沉到按 session 的 preset 平面。
+上面那段注释解释了原因："The token METER stays on the host plane; only the compaction backend that reads it moves."——token-meter 留在 host 平面，压缩后端下沉到按 session 的 preset 平面。
+
+出处：`packages/bundle/web-app/cordis.patch.yml:358-359`（disabled 那两行）、`:351-352`（英文注释）。
 
 ## 它注册了什么
 
@@ -36,7 +42,32 @@ web profile 把它关掉了：
 | 事件监听 | `session/event`（emit） | 见到 `assistant/message` 就重置 overflow 序列（`packages/compaction/compaction-basic/src/index.ts:173`） |
 | 会话事件 | `compaction/start` / `compaction/summary` / `compaction/end` | 三个都是 log-only，不进 surface；替换本身骑在一条带 `surfaceOp: { op: 'replace' }` 的 `user/message` 上（`docs/subsystems/compaction.md:11-19`） |
 
-没有注册工具，也没有 prompt 段。以上监听只在 `auto: true`（默认）时安装（`packages/compaction/compaction-basic/src/index.ts:129`）。两个 waterfall 监听各自守着一条触发路径，压力检查在请求前，溢出恢复在请求后：
+没有注册工具，也没有 prompt 段。
+
+上面四个监听只在 `auto: true`（默认）时安装，装完之后它们的分工是这样的：
+
+```
+on agent/pre-step (waterfall):              # 请求派生之前
+    if 压力 超过 floor(routedContextWindow × thresholdRatio):
+        compactIfNeeded()                   # 先把压缩落地，再让 step 继续
+
+on agent/request-error (waterfall):
+    if error 是 CONTEXT_WINDOW_EXCEEDED:
+        压缩
+        return { kind: 'retry' }            # 把这次请求原样重放
+    else:
+        不处理                              # 交给别的监听者
+
+on agent/status:
+    if status == idle:      overflow 重试计数清零
+
+on session/event:
+    if e 是 assistant/message:  重置 overflow 序列
+```
+
+两个 waterfall 监听各自守着一条触发路径，压力检查在请求前，溢出恢复在请求后；两条路径最后都汇到同一个压缩动作上。
+
+安装条件见 `packages/compaction/compaction-basic/src/index.ts:129`，四个监听分别在 `:147`、`:179`/`:222`、`:167`、`:173`。
 
 ```mermaid
 flowchart TD
@@ -80,17 +111,41 @@ flowchart TD
 | `modelPolicies` | array | `[]` | 精确 `{ provider, model, ...partialPolicy }` 覆盖，匹配不依赖 `listModels()` |
 | `auto` | boolean | `true` | 是否注册 step 压力与溢出恢复监听 |
 
-默认值出处：`packages/compaction/compaction-basic/src/config.ts:20`、`:23`、`:86-95`。未知键、重复目标、互斥的两种保留写法、以及合并后 `retainRatio` 不低于 `thresholdRatio` 都会让插件加载失败。
+有四种写法会直接让插件加载失败，不是运行期才报：未知键、重复目标、互斥的两种保留写法同时出现、以及合并后 `retainRatio` 不低于 `thresholdRatio`。
+
+默认值出处：`packages/compaction/compaction-basic/src/config.ts:20`、`:23`、`:86-95`。
 
 ## 模型看得见什么
 
-压缩成功后，下一次请求里被替换的那一段变成：检查点前言 + 空行 + `<compacted-summary>` + 摘要 + `</compacted-summary>`。前言原文：
+压缩成功后，下一次请求里被替换的那一段长这样：
+
+```
+检查点前言
+（空行）
+<compacted-summary>
+摘要
+</compacted-summary>
+```
+
+前言原文：
 
 ```markdown
 This is an automatically generated checkpoint condensing an earlier span of the conversation to free up context. Treat the captured context as established background and build on it without restating it. Continue the task directly from the messages that follow, without acknowledging this checkpoint.
 ```
 
-摘要请求是一次独立的 `ctx.llm.stream()` 调用（`purpose: 'compaction'`，`packages/compaction/compaction-basic/src/summarizer.ts:161`），它**逐字重放**对话自己的 system prompt、tools 和被影子化区间的消息，只在末尾追加一条固定的压缩指令 user 消息——README 的 KV Cache effect 一节说明这样做是为了复用 provider 的热前缀缓存，只有那条指令和输出是未缓存的。会话模型永远看不到这次私有请求；只有返回的**文本**进检查点，图像输出会以 `UNSUPPORTED_CONTENT` 失败而不是被悄悄丢掉（`packages/compaction/compaction-basic/src/summarizer.ts:220-221`）。这次私有请求里"重放什么、新增什么、只收什么"是三件不同的事：
+摘要是怎么来的？一次独立的 `ctx.llm.stream()` 调用，`purpose: 'compaction'`。这次私有请求里"重放什么、新增什么、只收什么"是三件不同的事：
+
+| 这次私有请求 | 内容 |
+|---|---|
+| 逐字重放 | 对话自己的 system prompt、tools、被影子化区间的消息 |
+| 末尾追加 | 一条固定的压缩指令 user 消息 |
+| 只收 | 文本；图像输出会以 `UNSUPPORTED_CONTENT` 失败，而不是被悄悄丢掉 |
+
+为什么要逐字重放而不是只发要压的那段？README 的 KV Cache effect 一节说明这样做是为了复用 provider 的热前缀缓存，只有那条指令和输出是未缓存的。
+
+会话模型永远看不到这次私有请求，只有返回的**文本**进检查点。
+
+出处：`packages/compaction/compaction-basic/src/summarizer.ts:161`（独立调用与 purpose）、`:220-221`（图像失败）。
 
 ```mermaid
 flowchart TD
@@ -118,7 +173,16 @@ flowchart TD
 
 ## 什么时候你会想换掉它 / 怎么换
 
-- **只想调策略**：patch 那一行的 `config`，例如给小窗口模型单独降阈值：
+四档改法，从只动一行配置到整包替换：
+
+| 你想要的 | 做法 |
+|---|---|
+| 只想调策略 | patch 那一行加 `config` |
+| 只想手动压缩 | `auto: false` |
+| 换摘要方式 | 子类覆盖 `summarize()` |
+| 整包换掉 | 另写 `CompactionEngine` 子类 |
+
+**只想调策略**：例如给小窗口模型单独降阈值。
 
 ```yaml
 - id: compaction-basic
@@ -132,18 +196,37 @@ flowchart TD
         retainTokens: 2048
 ```
 
-- **只想手动压缩**：`auto: false`，自动监听全部不注册，只留 [command-compact](./dsh-command-compact.md) 的 `/compact` 和程序化调用。
-- **换摘要方式**：`summarize()` 是唯一的子类钩子（`packages/compaction/compaction-basic/src/index.ts:236`），模板摘要或远程摘要写个子类覆盖它即可，压力、保留、收敛校验仍走 `ctx.tokenMeter`。
-- **整包换掉**：写一个别的 `CompactionEngine` 子类注册 `ctx.compaction`，`/compact` 是后端无关的，会自动跟着新后端走。
+**只想手动压缩**：`auto: false`，自动监听全部不注册，只留 [command-compact](./dsh-command-compact.md) 的 `/compact` 和程序化调用。
+
+**换摘要方式**：`summarize()` 是唯一的子类钩子，模板摘要或远程摘要写个子类覆盖它即可，压力、保留、收敛校验仍走 `ctx.tokenMeter`。钩子位置见 `packages/compaction/compaction-basic/src/index.ts:236`。
+
+**整包换掉**：写一个别的 `CompactionEngine` 子类注册 `ctx.compaction`，`/compact` 是后端无关的，会自动跟着新后端走。
 
 ## 坑与边界
 
-- 计量走的是固定启发式：拿不到可复用的 provider usage 时退化成字符数加结构开销，不是精确 tokenize。
-- 溢出分类由 adapter 维护，provider 的措辞变了就可能识别不出来；两个 DeepSeek adapter 目前把已知的上下文超限错误归一到 `CONTEXT_WINDOW_EXCEEDED`。
-- 不可分割单元和 envelope 本身超限治不了：恢复不能压缩 system/tools/前缀，不能拆开一个不可分割的非工具节点，也修不了剩余部分仍然超窗的工具单元。
-- `compactRegion` 需要一个 open turn，会话全关时手动调用会抛 "no open turn"。
-- 摘要失败时保留最新的持久 surface：在任何替换落地之前，自动路径只 warn 并带着超预算的完整历史继续；`maxTokens` 截断（可能被隐藏的 reasoning token 吃掉）同样按此处理。
-- 阈值检查里**低于压力线的 step 不会剪枝**——pruner 只在压力或溢出已经合格之后才跑（`packages/compaction/compaction-basic/src/index.ts:308`）。
+计量走的是固定启发式：拿不到可复用的 provider usage 时退化成字符数加结构开销，不是精确 tokenize。
+
+溢出分类由 adapter 维护，provider 的措辞变了就可能识别不出来；两个 DeepSeek adapter 目前把已知的上下文超限错误归一到 `CONTEXT_WINDOW_EXCEEDED`。
+
+有三类东西是治不了的——不可分割单元和 envelope 本身超限：恢复不能压缩 system/tools/前缀，不能拆开一个不可分割的非工具节点，也修不了剩余部分仍然超窗的工具单元。
+
+`compactRegion` 需要一个 open turn，会话全关时手动调用会抛 "no open turn"。
+
+摘要失败时保留最新的持久 surface：在任何替换落地之前，自动路径只 warn 并带着超预算的完整历史继续；`maxTokens` 截断（可能被隐藏的 reasoning token 吃掉）同样按此处理。
+
+最后一条最容易读反：**低于压力线的 step 根本不剪枝**。pruner 不是"顺手每步清一清"，它只在压力或溢出已经合格之后才跑：
+
+```
+if 压力 < 阈值:
+    return                      # step 直接过去，pruner 一次都不跑
+
+...压缩 / 溢出恢复走完...
+
+pruner = ctx.get('toolResultPruner')
+if pruner: 剪枝                 # 软引用，取不到就跳过
+```
+
+阈值检查处见 `packages/compaction/compaction-basic/src/index.ts:308`。
 
 ## 未确认
 

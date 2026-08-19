@@ -13,7 +13,11 @@
       name: '@deepseek-ai/dsh-spill-local'
 ```
 
-`packages/bundle/base/cordis.patch.yml:346-347`。没有 `config`，所以 `root` 取默认的私有临时目录。它紧挨着自己的唯一消费者 [spill-policy](./dsh-spill-policy.md)（第 349 行）。
+条目下面没有 `config`，所以 `root` 取默认的私有临时目录。
+
+它在树上紧挨着自己的唯一消费者 [spill-policy](./dsh-spill-policy.md)——一个写文件，一个决定什么时候写。
+
+出处：`packages/bundle/base/cordis.patch.yml:346-347`，spill-policy 在第 349 行。
 
 ## 它注册了什么
 
@@ -22,7 +26,11 @@
 | service | `ctx.spillStore` | 抽象基类 `SpillStore` 的 `super(ctx, 'spillStore')` 完成注册（`packages/spill/spill/src/index.ts:47`）；本包是它的第一个实现 `LocalSpillStore` |
 | 方法 | `saveText(input)` | seam 的唯一操作：原样持久化 `content`，返回 `{ locator, bytes, retrievalHint }`（`packages/spill/spill-local/src/index.ts:50-62`） |
 
-**没有事件监听、没有工具、没有 prompt 段、没有命令。** 它不认识工具结果，也不决定什么时候该 spill——那是 spill-policy 的事。同一 context 内只能有一个 `spillStore` 实现，加载第二个会抛错（cordis 的重复服务行为）。
+**没有事件监听、没有工具、没有 prompt 段、没有命令。**
+
+它不认识工具结果，也不决定什么时候该 spill——那是 spill-policy 的事。
+
+同一 context 内只能有一个 `spillStore` 实现，加载第二个会抛错（cordis 的重复服务行为）。
 
 ## 配置项
 
@@ -30,15 +38,39 @@
 |---|---|---|---|
 | `root` | string | 私有 0700 临时目录 | spill 文件的根目录；给了就 `resolve()` 成绝对路径（`packages/spill/spill-local/src/index.ts:47`） |
 
-默认根目录是懒创建的 `mkdtempSync(join(tmpdir(), 'dsh-spill-'))`（`packages/spill/spill-local/src/store.ts:27-30`），每进程一个。
+两条分支写出来是这样：
+
+```
+if 配置里给了 root:
+    root = resolve(配置值)          // 转成绝对路径
+else:
+    root = mkdtempSync(join(tmpdir(), 'dsh-spill-'))   // 用到时才建，每进程一个
+```
+
+默认那条是懒创建的，也就是说没发生过 spill 就不会有目录。出处：`packages/spill/spill-local/src/store.ts:27-30`。
 
 ## 存储布局
 
-文件落在 `<root>/session-<hash>/<random>-<safeName>`：
+文件落在 `<root>/session-<hash>/<random>-<safeName>`。三个部分各有各的来历：
 
-- `session-<hash>`：`sha256(sessionId)` 的前 12 位十六进制（`packages/spill/spill-local/src/store.ts:73-76`），同一 session 的 spill 聚在一起，便于将来按 session 清理。
-- `<random>-<safeName>`：6 字节随机十六进制前缀 + 经 `encodeSegment` 消毒成单个安全路径段的 `suggestedName`（`packages/spill/spill-local/src/store.ts:107-111`）。随机前缀是为了让共享 root 下无法预先植入符号链接。
-- 写入是独占 + 仅属主：`open(path, 'wx', 0o600)`（`packages/spill/spill-local/src/store.ts:113`），任何已存在的路径（含符号链接）都会让写入失败，所以植入的目标改不了写入方向。目录以 `mode: 0o700` 创建。
+| 路径段 | 怎么来的 | 为什么 |
+|---|---|---|
+| `session-<hash>` | `sha256(sessionId)` 的前 12 位十六进制 | 同一 session 的 spill 聚在一起，便于将来按 session 清理 |
+| `<random>` | 6 字节随机十六进制前缀 | 让共享 root 下无法预先植入符号链接 |
+| `<safeName>` | `suggestedName` 经 `encodeSegment` 消毒成单个安全路径段 | 名字里的分隔符不能把文件写到别处去 |
+
+出处：hash 见 `packages/spill/spill-local/src/store.ts:73-76`，随机前缀与消毒见同文件 `:107-111`。
+
+写入这一步才是防护的关键：
+
+```
+path = <root>/session-<hash>/<random>-<safeName>
+mkdir(dirname(path), mode = 0o700)        // 目录仅属主可进
+fd = open(path, 'wx', 0o600)              // 'wx' = 独占创建，仅属主可读写
+    // 路径已存在 —— 包括它是个符号链接 —— 就直接失败
+```
+
+`wx` 的意思是"必须是我新建的"，所以就算有人抢先在那个路径上摆了一个指向别处的符号链接，写入也只会失败，不会顺着链接把内容写到目标去。加上随机前缀，抢先摆链接这件事本身也猜不中路径。出处：`packages/spill/spill-local/src/store.ts:113`。
 
 README 把理由写得很直白："A predictable, world-readable root would let other local users read spilled tool output or plant symlinks."这条路径构造与独占写入的防护逻辑串起来看更直接：
 
@@ -67,13 +99,17 @@ flowchart TD
 
 ## 模型看得见什么
 
-**间接可见**。这个包自己不产生任何模型可见文本，它返回的 `locator`（本地路径）和 `retrievalHint` 会被消费者渲染进结果里。本实现的提示语固定为：
+**间接可见**。这个包自己不产生任何模型可见文本，它返回的 `locator`（本地路径）和 `retrievalHint` 会被消费者渲染进结果里。
+
+本实现的提示语是写死的一句话：
 
 ```text
 Use read with offset/limit, or grep this path to search within it.
 ```
 
-（`packages/spill/spill-local/src/index.ts:60`。）KV cache 方面 README 写的是 "No direct invalidation; the named consumer owns any request-prefix changes."
+出处：`packages/spill/spill-local/src/index.ts:60`。
+
+KV cache 方面 README 写的是 "No direct invalidation; the named consumer owns any request-prefix changes."
 
 ## 什么时候你会想换掉它 / 怎么换
 
@@ -83,7 +119,10 @@ Use read with offset/limit, or grep this path to search within it.
 
 ## 坑与边界
 
-- **spill 文件在外部清理之前一直留着**：后端没有会话生命周期删除，也没有按龄retention 策略，因为持久化、恢复、fork 出来的 session 可能还引用着这些路径。
-- **locator 要求消费者与文件系统同机**：跨机部署下这个 locator 对模型毫无意义。
-- `saveText` 在真实存储失败（权限、ENOSPC）时是 **reject**，由调用方决定怎么降级；spill-policy 把 reject 当作 best-effort，保留内联结果（`packages/spill/spill/src/index.ts:41-43`）。
-- fork 出来的 session 会继承种子日志里已有的 locator，这些文件不会被复制也不会重新归属；fork 之后产生的 spill 用子 session id（`docs/subsystems/spill.md:41`）。
+**spill 文件在外部清理之前一直留着。** 后端没有会话生命周期删除，也没有按龄 retention 策略，因为持久化、恢复、fork 出来的 session 可能还引用着这些路径。
+
+**locator 要求消费者与文件系统同机。** 跨机部署下这个 locator 对模型毫无意义。
+
+**真实存储失败时是 reject，不是静默降级。** 权限、ENOSPC 这类失败会让 `saveText` reject，由调用方决定怎么办；spill-policy 把 reject 当作 best-effort，保留内联结果（`packages/spill/spill/src/index.ts:41-43`）。
+
+**fork 出来的 session 会继承种子日志里已有的 locator。** 这些文件不会被复制也不会重新归属；fork 之后产生的 spill 用子 session id（`docs/subsystems/spill.md:41`）。

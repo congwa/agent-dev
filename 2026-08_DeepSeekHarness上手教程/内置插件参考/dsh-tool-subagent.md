@@ -24,7 +24,11 @@
         backgroundMode: one-shot
 ```
 
-`packages/bundle/base/cordis.patch.yml:313-318` 与 `:324-329`。第二行上方那段注释解释了 fork 为什么保持 one-shot：可续子的 `report` 工具与 prompt 段排在「fork 存在就是为了复用的那段继承历史」之前，一次性 fork 子两样都不装，父的请求前缀得以保留。模块导出 `export const inject = ['tools', 'subagents', 'systemPrompt']`（`packages/subagent/tool-subagent/src/index.ts:23`）。
+两份实例的差别只有三个字段：绑哪个 provider、叫什么工具名、后台模式是哪种。
+
+第二行上方那段注释解释了 fork 为什么保持 one-shot：可续子的 `report` 工具与 prompt 段排在「fork 存在就是为了复用的那段继承历史」之前，一次性 fork 子两样都不装，父的请求前缀得以保留。
+
+出处：两段 yaml 见 `packages/bundle/base/cordis.patch.yml:313-318` 与 `:324-329`；模块导出 `export const inject = ['tools', 'subagents', 'systemPrompt']` 见 `packages/subagent/tool-subagent/src/index.ts:23`。
 
 web-app bundle 把这两行都 `disabled: true`（`packages/bundle/web-app/cordis.patch.yml:380-384`）：registry 和后端留在 host plane，preset 自己决定它的 agent 看见哪些委派工具。
 
@@ -37,7 +41,22 @@ web-app bundle 把这两行都 `disabled: true`（`packages/bundle/web-app/cordi
 | 事件（收） | `subagent/provider-added`（emit） | provider 出现即挂载工具，`src/index.ts:440-442` |
 | 事件（收） | `subagent/provider-removed`（emit） | provider 消失即卸载工具，`src/index.ts:443-447` |
 
-两个监听都是 `emit`，**不是 waterfall**，它不拦截任何调用。之所以要跟着 provider 生命周期走，是因为 Cordis 可能并发加载兄弟插件，配置顺序不证明注册顺序；provider 尚未注册时会打一行 `logger.info` 并等待（`src/index.ts:448-454`）。
+工具的生死完全跟着 provider 走：
+
+```
+on subagent/provider-added(name):
+    if name == config.provider:  注册工具
+on subagent/provider-removed(name):
+    if name == config.provider:  卸载工具
+
+apply 时 provider 还不在：
+    logger.info(一行等待日志)
+    什么都不注册，等事件来
+```
+
+两个监听都是 `emit`，**不是 waterfall**，它不拦截任何调用。
+
+之所以要跟着生命周期走而不是 apply 时一次性绑定，是因为 Cordis 可能并发加载兄弟插件，配置顺序不证明注册顺序。等待日志见 `src/index.ts:448-454`。
 
 工具描述文案随 `provider.inheritsParentContext` 变（`src/index.ts:211-236`）：fresh 子的文案是「it does not see this conversation」，fork 子则是「a child agent seeded with all completed turns so far」——对 fork 说前一句是**假的**，所以这段分支是必需的。
 
@@ -49,7 +68,20 @@ web-app bundle 把这两行都 `disabled: true`（`packages/bundle/web-app/cordi
 | 一次性后台 | `backgroundMode: one-shot` 且显式 `true` | `{ kind: 'background', jobId }` | `started background subagent task <id>` |
 | 可续后台 | `backgroundMode: continuable` 且省略或 `true` | `{ kind: 'continuable', subagentId }` | `started subagent <childId>` |
 
-前台路线一定 `await run.dispose()`；非 `completed` 的 stop reason 变成 errored 结果，并把子保住的**部分输出**接在 headline 后面（`withPartialText`，`src/index.ts:149-155`），所以截断的答案既不会被当成成功，也不会被静默丢掉。可续路线在 inbox 接受时就 resolve，此后子自己拥有 turn，这次调用既不等待也不收集结果。
+前台路线的收尾值得单独看一眼：
+
+```
+前台:
+    run = 启动子
+    等它跑完
+    always: await run.dispose()          // 无论成败
+    if stop reason != 'completed':
+        结果 = errored(headline + withPartialText(子已经写出来的部分输出))
+```
+
+截断的答案既不会被当成成功，也不会被静默丢掉。`withPartialText` 在 `src/index.ts:149-155`。
+
+可续路线相反：在 inbox 接受时就 resolve，此后子自己拥有 turn，这次调用既不等待也不收集结果。
 
 `run_in_background` 参数和实例的 `backgroundMode` 配置一起决定走哪条路线、模型能拿到什么：
 
@@ -91,11 +123,24 @@ flowchart TD
 | `toolFilter` | `{ allow?, deny? }` | 省略 | 每子全局工具限制，需要 `toolFilter` 能力 |
 | `maxDepth` | `number \| 'provider-managed'` | `3` | 绝对委派深度上限，`0` 完全禁止委派 |
 
-Schema 在 `src/index.ts:81-99`。三处 fail-loud：`toolFilter` 写了但 `allow`/`deny` 都空 → apply 直接抛（`:272-274`）；数值 `maxDepth` 遇上没有 `depthLimit` 能力的 provider → **mount 时**抛，而不是等第一次委派（`:285-290`）；`continuable` 遇上没有 `prepareContinuable` 的 provider → mount 时抛（`:292-296`）。
+Schema 在 `src/index.ts:81-99`。三处 fail-loud，都不等到第一次委派才发作：
+
+| 配置 | 遇上什么 | 什么时候抛 | 出处 |
+|---|---|---|---|
+| `toolFilter` 写了但 `allow`/`deny` 都空 | —— | apply 直接抛 | `:272-274` |
+| 数值 `maxDepth` | provider 没有 `depthLimit` 能力 | **mount 时**抛 | `:285-290` |
+| `continuable` | provider 没有 `prepareContinuable` | mount 时抛 | `:292-296` |
 
 ## 模型看得见什么
 
-默认 schema 是 `description` + `prompt`，开了后台再加 `run_in_background`。可续实例的描述里明确写着「runs in the background by default」「the runtime sends the parent a notice containing its outcome and any final assistant message」「`send_message` starts a later turn in the same child conversation」；一次性实例则写「This call waits for the result by default」「collect with `job_output` and stop with `job_kill`」。
+默认 schema 是 `description` + `prompt`，开了后台再加 `run_in_background`。
+
+两类实例给模型讲的故事完全不同：
+
+| 实例类型 | 描述里明写的话 |
+|---|---|
+| 可续 | 「runs in the background by default」；「the runtime sends the parent a notice containing its outcome and any final assistant message」；「`send_message` starts a later turn in the same child conversation」 |
+| 一次性 | 「This call waits for the result by default」；「collect with `job_output` and stop with `job_kill`」 |
 
 可续实例还额外贡献一段 `tool:<toolName>` 系统 prompt（order 116.5，`src/index.ts:459-465`），要求模型把独立的委派放在同一条 assistant 消息里一起发起、在它们跑的时候继续干活、只有下一步动作依赖结果时才设 `run_in_background: false`。工具不可见时这段文本为空串，渲染时会被略去。
 
@@ -110,8 +155,12 @@ Schema 在 `src/index.ts:81-99`。三处 fail-loud：`toolFilter` 写了但 `all
 
 ## 坑与边界
 
-- **后台 run 不通过本工具暴露结果**——一次性任务的最终输出要走通用 task 面收集，可续子的输出留在它自己的 session 里，按 subagent id 读。结算通知说明它是怎么结束的、带上最后一条 assistant 消息，但那不是本次调用的返回值，也没法在这里 await。
-- **等待中的一次性实例重名检测太晚**（`TODO(subagent-dup-toolname)`，`src/index.ts:436-439`）——可续实例在 apply 期就抢占 prompt 段名字因而更早失败；两个同名的等待中 one-shot fiber 要等 provider 出现才碰撞，重名抛出会回滚 provider 注册。
-- **子策略按实例固定**——换 model、persona、工具过滤或深度上限，只能再开一个名字不同的工具。
-- 并发是安全的：子在自己的 session 里工作，run 从不改父 session，唯一一次父侧写入（注册 Task）是同步、可交换的插入，所以重叠的后台调用按 dispatch 竞争顺序拿到 job id（`isConcurrencySafe: () => true`，`src/index.ts:368`）。
-- 一次性后台路线需要 `ctx.jobs`，缺了会抛 `background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs`（`src/index.ts:400-403`）。base 里 `jobs` 在 `packages/bundle/base/cordis.patch.yml:69`、`tool-jobs` 在 `:218`。
+**后台 run 不通过本工具暴露结果。** 一次性任务的最终输出要走通用 task 面收集，可续子的输出留在它自己的 session 里，按 subagent id 读。结算通知说明它是怎么结束的、带上最后一条 assistant 消息，但那不是本次调用的返回值，也没法在这里 await。
+
+**等待中的一次性实例重名检测太晚**（`TODO(subagent-dup-toolname)`，`src/index.ts:436-439`）。可续实例在 apply 期就抢占 prompt 段名字因而更早失败；两个同名的等待中 one-shot fiber 要等 provider 出现才碰撞，重名抛出会回滚 provider 注册。
+
+**子策略按实例固定。** 换 model、persona、工具过滤或深度上限，只能再开一个名字不同的工具。
+
+并发是安全的：子在自己的 session 里工作，run 从不改父 session，唯一一次父侧写入（注册 Task）是同步、可交换的插入，所以重叠的后台调用按 dispatch 竞争顺序拿到 job id（`isConcurrencySafe: () => true`，`src/index.ts:368`）。
+
+一次性后台路线需要 `ctx.jobs`，缺了会抛 `background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs`（`src/index.ts:400-403`）。base 里 `jobs` 在 `packages/bundle/base/cordis.patch.yml:69`、`tool-jobs` 在 `:218`。

@@ -15,7 +15,11 @@
         providerName: fork
 ```
 
-`packages/bundle/base/cordis.patch.yml:300-303`。模块导出 `export const inject = ['subagents']`（`packages/subagent/subagent-fork-in-process/src/index.ts:28`），`docs/config-catalog.md:2176` 记为 `Requires: subagents`。和 [spawn](./dsh-subagent-spawn-in-process.md) 一样，`tools` 被刻意排除在 inject 之外，理由写在 `src/index.ts:24-27`：结构化输出的捕获工具自己就用 `tools` 把关，写进来只会改变本后端的 apply 时机，进而挪动委派工具在模型可见工具列表里的位置。
+模块导出 `export const inject = ['subagents']`，`docs/config-catalog.md` 那边记为 `Requires: subagents`。
+
+和 [spawn](./dsh-subagent-spawn-in-process.md) 一样，`tools` 被刻意排除在 inject 之外。理由是结构化输出的捕获工具自己就用 `tools` 把关，再写进来只会改变本后端的 apply 时机，进而挪动委派工具在模型可见工具列表里的位置。
+
+出处：树上那段 `packages/bundle/base/cordis.patch.yml:300-303`；inject 声明 `packages/subagent/subagent-fork-in-process/src/index.ts:28`；catalog 记录 `docs/config-catalog.md:2176`；排除 `tools` 的理由 `src/index.ts:24-27`。
 
 ## 它注册了什么
 
@@ -32,7 +36,24 @@
 
 ### 种子边界（这个包唯一的实质差异）
 
-子 agent 启动时，父那一轮工具调用还开着：日志里有 assistant 的 tool call，却还没有对应的 tool result 和 `turn/end`。原样拷贝会给子一个不平衡的、非法的 session。所以 `completedTurnPrefix()` 用 `events.findLast(e => e.type === 'turn/end')` 取到最后一个 `turn/end`，再 `events.slice(0, lastEnd.seq + 1)`——依赖 append 契约里 `seq === 数组下标`（`src/index.ts:48-54`）。父还没跑完任何一轮时种子为空，直接省略，子等价于一次 fresh spawn（`:70-75`）。这条切片规则画出来是这样：
+一句话：**把父的事件日志切到最后一个 `turn/end`，切口之后的东西一概不给子。**
+
+为什么要切？子 agent 启动的那一刻，父那一轮工具调用还开着：日志里有 assistant 的 tool call，却还没有对应的 tool result 和 `turn/end`。原样拷贝会给子一个不平衡的、非法的 session。
+
+`completedTurnPrefix()` 干的事只有两步：
+
+```
+lastEnd = events.findLast(e => e.type === 'turn/end')
+
+if lastEnd 不存在:            // 父还没跑完任何一轮
+    return 空               // 种子直接省略，子等价于一次 fresh spawn
+else:
+    return events.slice(0, lastEnd.seq + 1)   // 含 lastEnd 自身
+```
+
+注意 `slice` 是拿 `seq` 当下标用的——这依赖 append 契约里那条 `seq === 数组下标`。切片逻辑见 `src/index.ts:48-54`，空种子退化那条见 `:70-75`。
+
+这条切片规则画出来是这样：
 
 ```mermaid
 flowchart LR
@@ -62,7 +83,7 @@ flowchart LR
 
 **种子只搬对话历史。** 子仍然拿到一个全新的扁平注册作用域，不继承父的工具限制或授权。
 
-`prepareContinuable()` 同样取一次 `completedTurnPrefix`（`src/index.ts:83-89`）：fork 前缀**只在创建时捕获一次**，随后成为子自己持久 transcript 的一部分，所以后来的冷恢复回放的是那份前缀，而不是重新 fork 父的新历史。
+`prepareContinuable()` 同样取一次 `completedTurnPrefix`（`src/index.ts:83-89`）。这里的关键词是「一次」：fork 前缀**只在创建时捕获一次**，随后成为子自己持久 transcript 的一部分。所以后来的冷恢复回放的是那份前缀，而不是重新 fork 父的新历史。
 
 ## 配置项
 
@@ -74,9 +95,25 @@ flowchart LR
 
 ## 模型看得见什么
 
-子先收到父那段平衡的已完成 turn surface 前缀，然后是逐字的新任务内容；父当前进行中的 turn 被排除在外。配置的 persona 在子的新作用域里遮蔽 prompt 文本，工具限制过滤它的全局 wire schema、可执行体查找与 Code Mode SDK 绑定，但不动独立的 guidance。父那边只通过 [tool-subagent](./dsh-tool-subagent.md) 拿到子自己的最终输出，看不到继承前缀，也看不到中间过程。
+| 谁 | 看得见 | 看不见 |
+|---|---|---|
+| 子 | 父那段平衡的已完成 turn surface 前缀，之后是逐字的新任务内容 | 父当前进行中的 turn |
+| 父 | 子自己的最终输出，经 [tool-subagent](./dsh-tool-subagent.md) 拿到 | 继承前缀、子的中间过程 |
 
-KV cache 上，子在同 provider、同 model 下可以复用那段逐字节相同的继承前缀——**这正是 fork 存在的理由**。也正因如此，出厂组合把它绑死在 `backgroundMode: one-shot`：可续子会额外带上子作用域的 `report` 工具和它的 prompt 段，这两个 delta 排在继承历史**之前**，会把整段继承历史的复用全部作废。
+配置的 persona 在子的新作用域里遮蔽 prompt 文本；工具限制过滤它的全局 wire schema、可执行体查找与 Code Mode SDK 绑定，但不动独立的 guidance。
+
+KV cache 上，子在同 provider、同 model 下可以复用那段逐字节相同的继承前缀——**这正是 fork 存在的理由**。
+
+也正因如此，出厂组合把它绑死在 `backgroundMode: one-shot`。可续子会额外带上子作用域的 `report` 工具和它的 prompt 段，而这两个 delta 排的位置很致命：
+
+```
+可续子的上下文排布：
+    [report 工具 schema]  ← delta 1
+    [report 的 prompt 段] ← delta 2
+    [继承来的父前缀]       ← 前面一变，这里整段作废
+```
+
+一句话：delta 排在继承历史**之前**，会把整段继承历史的复用全部作废。
 
 ## 什么时候你会想换掉它 / 怎么换
 

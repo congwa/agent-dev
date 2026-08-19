@@ -13,9 +13,11 @@
   name: '@deepseek-ai/dsh-fs-observation-policy'
 ```
 
-没有 `config`，没有 `inject`——包本身也不导出 `inject`（`packages/fs/fs-observation-policy/src/index.ts:100-105` 的注释写明 "No `inject` — this plugin reads no services"）。`docs/config-catalog.md:3069` 把它列在 "Loadable plugins with no config"（章节头在 `:3024`）那一档。
+两行，没有 `config`，也没有 `inject`。不写 `inject` 不是漏了：包本身就不导出它，源码里那句注释写得很直白——"No `inject` — this plugin reads no services"（`packages/fs/fs-observation-policy/src/index.ts:100-105`）。文档那边也归了档，`docs/config-catalog.md:3069` 把它列在 "Loadable plugins with no config" 一档里（章节头在 `:3024`）。
 
-web profile **没有**关掉它（`packages/bundle/web-app/cordis.patch.yml` 里没有这一行）：模型侧工具下沉到 agent preset，而 `ctx.fs` 与这层策略留在 host 平面。它在 bundle 里紧挨在 `tool-fs`（`:224-225`）之前，对应 README 的建议——策略监听器应当是这两个决策槽上最先注册的那个（`packages/fs/fs-observation-policy/README.md:17`）。
+值得单独说一句的是 web profile：它**没有**关掉这个插件——`packages/bundle/web-app/cordis.patch.yml` 里根本没有这一行。原因是模型侧工具下沉到了 agent preset，而 `ctx.fs` 与这层策略留在 host 平面。
+
+位置也有讲究。它在 bundle 里紧挨在 `tool-fs`（`:224-225`）之前，对应 README 的建议：策略监听器应当是这两个决策槽上最先注册的那个（`packages/fs/fs-observation-policy/README.md:17`）。
 
 ## 它注册了什么
 
@@ -25,7 +27,26 @@ web profile **没有**关掉它（`packages/bundle/web-app/cordis.patch.yml` 里
 | 事件监听 | `fs/edit-intent`（**waterfall**） | 未见过 → 抛 `FS_NOT_OBSERVED`；确认缺失 → 抛 `FS_NOT_FOUND`；确认存在 → `{ version }` 作 CAS 基准。同样独占单槽（`src/index.ts:122`，决策体在 `:78-88`） |
 | 事件监听 | `fs/observed`（emit） | 同步记录 `present`/`absent`，实现就是一次 `WeakMap.set`（`src/index.ts:127-129`） |
 
-没有 service，没有工具，没有 prompt 段，没有命令。两个 waterfall 的 listener 都包在 `Promise.resolve().then(...)` 里，好让抛出变成 reject 而不是穿过 waterfall 同步逃逸（`src/index.ts:116-122`）。两个决策槽读的是同一套三态观察状态，但 write 和 edit 对"没见过/确认缺失"的容忍度不一样：
+没有 service，没有工具，没有 prompt 段，没有命令。
+
+两个 waterfall 的 listener 都包在 `Promise.resolve().then(...)` 里，好让抛出变成 reject，而不是穿过 waterfall 同步逃逸（`src/index.ts:116-122`）。
+
+两个决策槽读的是同一套三态观察状态，但 write 和 edit 对"没见过 / 确认缺失"的容忍度不一样——写下来大概是这个样子：
+
+```
+状态 = 查(owner, target.targetKey)   // unseen / absent / present(version)
+
+写意图 fs/write-intent:
+    unseen  或 absent  ->  { kind: 'createIfAbsent' }
+    present            ->  { kind: 'replaceIfVersion', version }
+
+改意图 fs/edit-intent:
+    unseen             ->  抛 FS_NOT_OBSERVED       // 没读过，直接拦
+    absent             ->  抛 FS_NOT_FOUND          // 读过，但读到的是"不存在"
+    present            ->  { version }              // 交给 provider 当 CAS 基准
+```
+
+差别就一处：write 把"没见过"和"确认缺失"合并成同一个宽松出口（创建），edit 则把这两态分开、并且**两态都拒**。
 
 ```mermaid
 flowchart TD
@@ -58,31 +79,58 @@ flowchart TD
     class G,H danger
 ```
 
-派发方有两个：[tool-fs](./dsh-tool-fs.md) 与 [tool-str-replace-editor](./dsh-tool-str-replace-editor.md)；`fs/observed` 这一槽上本插件不是唯一监听者，`skill-filesystem` 也在听（`docs/event-producer-consumer.md:34-36`）。
+派发方有两个：[tool-fs](./dsh-tool-fs.md) 与 [tool-str-replace-editor](./dsh-tool-str-replace-editor.md)。
+
+另外注意 `fs/observed` 这一槽上本插件**不是唯一监听者**，`skill-filesystem` 也在听（`docs/event-producer-consumer.md:34-36`）。
 
 ## 配置项
 
 **无配置项。** 它的行为完全由三件事决定：谁先在这两个槽上注册（先到先得）、事件里那个不透明 `actor` 能否推出 owner、以及这个 owner 曾经观察到什么。
 
-owner 的推导只有一行：`(actor as FsObservationActor | undefined)?.agent?.session`（`src/index.ts:40`）。owner 被当作纯粹的对象身份用作 `WeakMap` 键，插件从不读它的任何字段。
+owner 的推导只有一行：
 
-状态结构是 `WeakMap<object, Map<string, FsObservation>>`（`src/index.ts:28`）——外层键是 owner 对象，内层键是 `target.targetKey`；三种逻辑态：unseen（无条目）、`{ kind: 'absent' }`、`{ kind: 'present', version }`。插件**自己不做任何文件 IO**，只把状态翻译成 provider 守卫；真正的新鲜度检查是 provider 在写锁内做的 CAS。
+```ts
+(actor as FsObservationActor | undefined)?.agent?.session
+```
 
-插件 dispose 时 `ctx.effect` 回调整个换掉 `WeakMap`（`src/index.ts:109-114`、`:57-59`），HMR 重载后从零开始。
+owner 被当作纯粹的对象身份用作 `WeakMap` 键——插件从不读它的任何字段（`src/index.ts:40`）。
+
+状态结构是两层 Map，三种逻辑态：
+
+```
+WeakMap<object, Map<string, FsObservation>>
+   外层键 = owner 对象
+   内层键 = target.targetKey
+
+FsObservation 的三态:
+   无条目                          -> unseen
+   { kind: 'absent' }              -> 确认缺失
+   { kind: 'present', version }    -> 确认存在
+```
+
+出处 `src/index.ts:28`。
+
+插件**自己不做任何文件 IO**，只把状态翻译成 provider 守卫；真正的新鲜度检查是 provider 在写锁内做的 CAS。
+
+插件 dispose 时 `ctx.effect` 回调整个换掉 `WeakMap`（`src/index.ts:109-114`、`:57-59`），所以 HMR 重载后是从零开始。
 
 ## 模型看得见什么
 
-README 的 Model Experience 写得很直白：**这个插件不加任何 prompt 或 schema**。模型只在被拒绝时才会感知到它：
+README 的 Model Experience 写得很直白：**这个插件不加任何 prompt 或 schema**。模型只在被拒绝时才会感知到它。
 
-- 没读过就 `edit` → code `FS_NOT_OBSERVED`，消息逐字为 `edit requires reading "<path>" first`（`src/index.ts:82`）。
-- 刚确认缺失的目标去 `edit` → `FS_NOT_FOUND`，消息 `cannot edit "<path>": not found`（`src/index.ts:85`）。
-- 观察过但版本已陈旧的守卫写 → provider 抛的 `FS_STALE_VERSION` 原样上浮。
+| 触发 | code | 消息（逐字） |
+|---|---|---|
+| 没读过就 `edit` | `FS_NOT_OBSERVED` | `edit requires reading "<path>" first`（`src/index.ts:82`） |
+| 刚确认缺失的目标去 `edit` | `FS_NOT_FOUND` | `cannot edit "<path>": not found`（`src/index.ts:85`） |
+| 观察过但版本已陈旧的守卫写 | `FS_STALE_VERSION` | provider 抛的，原样上浮 |
 
-补救话术不归它：`— read the file, then retry` / `— re-read the file, then retry` 由 tool-fs 的 error wrapper 追加（`packages/fs/tool-fs/src/error.ts:14-17`），code 保持不变。
+补救话术不归它管：`— read the file, then retry` / `— re-read the file, then retry` 是由 tool-fs 的 error wrapper 追加的（`packages/fs/tool-fs/src/error.ts:14-17`），code 保持不变。
 
 ## 什么时候你会想换掉它 / 怎么换
 
-**去掉它是无损的**——这正是用事件门而不是强制方法服务的全部理由。卸掉之后 tool-fs 不会在注入边界上断，只是落回裸 provider：`write` 无条件创建或覆写，`edit` 无条件替换。
+**去掉它是无损的**——这正是用事件门而不是强制方法服务的全部理由。
+
+卸掉之后 tool-fs 不会在注入边界上断，只是落回裸 provider：`write` 无条件创建或覆写，`edit` 无条件替换。
 
 ```yaml
 - id: fs-observation-policy
@@ -91,7 +139,7 @@ README 的 Model Experience 写得很直白：**这个插件不加任何 prompt 
 
 想换成自己的策略：写一个插件，在这两个槽上比它更早注册（或 `prepend`），返回自己的 `FsWriteIntent` / `{ version }`。槽是先到先得，本插件占住它只是默认部署的约定，不是事件层强制的不变量（`docs/subsystems/filesystem.md:185`）。
 
-**不要**把它当成授权链的一环去叠加：README 明确说分层的权限/审计/沙箱拦截属于 `tools/execute`，不属于这两个单槽决策（`README.md:46`）。它与 [fs-sandbox](./dsh-fs-sandbox.md) 的模式围栏是正交的两件事，可以同时生效（`packages/fs/README.md:17`）。
+**不要**把它当成授权链的一环去叠加：README 明确说分层的权限 / 审计 / 沙箱拦截属于 `tools/execute`，不属于这两个单槽决策（`README.md:46`）。它与 [fs-sandbox](./dsh-fs-sandbox.md) 的模式围栏是正交的两件事，可以同时生效（`packages/fs/README.md:17`）。
 
 ## 坑与边界
 

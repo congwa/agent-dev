@@ -2,9 +2,13 @@
 
 > 基于 `deepseek-ai/deepseek-harness` v0.1.0-rc.5（commit `47f9438`），2026-08-14 核对。
 
-一个长任务干了几十轮之后，模型开始"记得"一些从没发生过的事：早期一次失败的尝试、一段被推翻的设计、一句自己安慰自己的"已修复"。原因不是模型笨，是**上下文在累积**——所有中间推理都还留在同一条对话里，错误进去之后会被一遍遍重新发给模型（直到压缩把它盖掉），每一轮还要把这段前缀再付一次钱。
+一个长任务干了几十轮之后，模型开始"记得"一些从没发生过的事：早期一次失败的尝试、一段被推翻的设计、一句自己安慰自己的"已修复"。
 
-[26 章](./26-Goal模式.md)的 goal 选择留在这条对话里，靠驱动器不断塞下一条提示。Ralph 选了相反的那条路：**每一轮换一个全新的 child**。它没有父会话，没有上一轮 child 的会话，只有三样东西——不可变的目标、共享工作区（`cwd` 下的真实文件），以及上一轮留下的一份有大小上限的结构化交接报告。工作区是长期记忆，对话不是。
+原因不是模型笨，是**上下文在累积**。所有中间推理都还留在同一条对话里，错误进去之后会被一遍遍重新发给模型（直到压缩把它盖掉），每一轮还要把这段前缀再付一次钱。
+
+[26 章](./26-Goal模式.md)的 goal 选择留在这条对话里，靠驱动器不断塞下一条提示。Ralph 选了相反的那条路：**每一轮换一个全新的 child**。
+
+它没有父会话，没有上一轮 child 的会话，只有三样东西——不可变的目标、共享工作区（`cwd` 下的真实文件），以及上一轮留下的一份有大小上限的结构化交接报告。工作区是长期记忆，对话不是。
 
 一轮接一轮的形状是这样：目标每轮原样重发，工作区被反复读写并一直留着，而 child 本身用完即弃，只有一份有界报告能跨过轮次边界。
 
@@ -66,28 +70,48 @@ ralph 工具（模型可见）
    └── ctx.subagents     调用前当场校验 provider 能力
 ```
 
-workflow 引擎与 subagent 的通用机制在 [19 章](./19-子agent与workflow.md)，本章只讲 Ralph 这条策略。用 capability seam（能力缝：一个服务接口 + 可替换的实现，[07 章](./07-Service能力从哪来.md)）的语言说，`ctx.workflowEngine` 这条缝上，`tool-workflow`（模型自己写脚本）和 `tool-ralph`（脚本写死）是**两个并列的 Consumer**（`docs/capability-seams.md:465`）；`docs/capability-seams.md:458` 则把 `tool-ralph` 列在 `ctx.subagents` 的 Consumer 里，注明"要求一条 fresh 的结构化输出路由"。
+workflow 引擎与 subagent 的通用机制在 [19 章](./19-子agent与workflow.md)，本章只讲 Ralph 这条策略。
 
-为什么不做进内核？Agent Note 把理由和四条被否掉的方案都写了（`.agents/notes/implemented/feature/2026-07-19-fresh-agent-ralph-workflow-tool.md:11`，被否方案在 53-56 行）。总的理由一句话：把 Ralph 行为塞进 `dsh-agent-loop`、goal driver 或者公开的 workflow 脚本语言，等于**把一条策略焊死在跟它无关的执行机器上**。
+用 capability seam（能力缝：一个服务接口 + 可替换的实现，[07 章](./07-Service能力从哪来.md)）的语言说，`ctx.workflowEngine` 这条缝上，`tool-workflow`（模型自己写脚本）和 `tool-ralph`（脚本写死）是**两个并列的 Consumer**；`ctx.subagents` 的 Consumer 列表里也有 `tool-ralph`，注明"要求一条 fresh 的结构化输出路由"。出处：`docs/capability-seams.md:465` 与 `docs/capability-seams.md:458`。
 
-**放进 same-session goal driver** 被否，因为 goal 的轮次故意保留同一条对话，而 Ralph 的定义性质恰恰是每轮换新上下文，两者一合，goal 的生命周期和 child 编排就再也分不开了。**给通用 `workflow` 工具加一个 `fresh` 开关** 被否，因为模型可写的脚本 API 要保持通用、provider 中立；Ralph 的固定报告协议与停止策略应该有一个可评审的消费者。**用 `subagent_fork` 换取重放方便** 被否，理由最硬：继承来的已完成轮次是隐式的、只会变大的交接状态，直接违反 fresh-context 契约。**从工具里直接调 subagent 缝** 也被否——workflow 引擎已经拥有前台编排、结构化 child、取消传播、worker 终止、事件和静默 dispose，复用它是在演示插件组合，而不是造第二个 loop runtime。
+为什么不做进内核？总的理由一句话：把 Ralph 行为塞进 `dsh-agent-loop`、goal driver 或者公开的 workflow 脚本语言，等于**把一条策略焊死在跟它无关的执行机器上**。
+
+Agent Note 把四条被否掉的方案逐条写了：
+
+| 被否的方案 | 为什么否 |
+|---|---|
+| 放进 same-session goal driver | goal 的轮次故意保留同一条对话，而 Ralph 的定义性质恰恰是每轮换新上下文；两者一合，goal 的生命周期和 child 编排就再也分不开了 |
+| 给通用 `workflow` 工具加一个 `fresh` 开关 | 模型可写的脚本 API 要保持通用、provider 中立；Ralph 的固定报告协议与停止策略应该有一个可评审的消费者 |
+| 用 `subagent_fork` 换取重放方便 | 理由最硬：继承来的已完成轮次是隐式的、只会变大的交接状态，直接违反 fresh-context 契约 |
+| 从工具里直接调 subagent 缝 | workflow 引擎已经拥有前台编排、结构化 child、取消传播、worker 终止、事件和静默 dispose，复用它是在演示插件组合，而不是造第二个 loop runtime |
+
+出处：`.agents/notes/implemented/feature/2026-07-19-fresh-agent-ralph-workflow-tool.md:11`，被否方案在该文件 53-56 行。
 
 代价很实在：`tool-ralph` 自己不拥有任何独立事件流，所以它的 invariant 伴生插件（每个包各自注册的运行时不变量校验器，[25 章](./25-调试手册与常见坑.md)）是空的——run 和 child 的生命周期由 workflow / subagent 的 owner 去校验（`packages/workflow/tool-ralph/src/invariant.ts:18-21`）。这个包薄到几乎只剩策略。
 
 ## 模型只能填两个字段
 
-`ralph({ objective, maxRounds? })` 就是全部调用面（`packages/workflow/tool-ralph/src/index.ts:415-425`，生成的 schema 见 `docs/tool-catalog.md:1188-1205`）：
+`ralph({ objective, maxRounds? })` 就是全部调用面：
 
 | 参数 | 必填 | 含义 |
 |---|---|---|
 | `objective` | 是 | 每一轮 fresh child 共用的不可变完成目标 |
 | `maxRounds` | 否 | 正安全整数轮次上限，被部署天花板压住 |
 
-provider 选择、报告 schema、交接上限、脚本本体、编排行为，**全部是部署方拥有的，不出现在调用 schema 里**（`packages/workflow/tool-ralph/README.md:62`）。调用是同步等整轮跑完的：工具 `execute` 里 `await run.result`（`packages/workflow/tool-ralph/src/index.ts:461`）。
+出处：`packages/workflow/tool-ralph/src/index.ts:415-425`，生成的 schema 见 `docs/tool-catalog.md:1188-1205`。
 
-起跑前有四道前置检查，任何一道不过就直接报错，**不会产生 run**。先要有 `exec.agent`，Ralph 需要一个调用方 agent 当所有 child 的 parent（`:438-441`）；`objective` trim 后必须非空（`:442-443`）；`maxRounds` 必须是正安全整数且 `≤` 部署天花板，填 `1.5`、`0`、`NaN` 或超天花板都直接打回（`:208-217`、`:444`，单测 `packages/workflow/tool-ralph/tests/tool-ralph.spec.ts:303-305`）；最后是 provider 三连校验（`:220-232`）：**已注册** → **支持结构化输出（`capabilities.outputSchema`）** → **`inheritsParentContext === false`**。
+provider 选择、报告 schema、交接上限、脚本本体、编排行为，**全部是部署方拥有的，不出现在调用 schema 里**（`packages/workflow/tool-ralph/README.md:62`）。调用是同步等整轮跑完的：工具 `execute` 里 `await run.result`（`:461`）。
 
-四道闸门是串成一条的，任何一道落下来都在 `engine.start()` 之前，所以失败时连 run 都没有：
+起跑前有四道前置检查，串成一条，任何一道不过就直接报错，**不会产生 run**：
+
+| # | 检查什么 | 不过会怎样 | 出处 |
+|---|---|---|---|
+| 1 | `exec.agent` 必须存在 | Ralph 需要一个调用方 agent 当所有 child 的 parent | `:438-441` |
+| 2 | `objective` trim 后必须非空 | 空目标直接打回 | `:442-443` |
+| 3 | `maxRounds` 是正安全整数且 `≤` 部署天花板 | `1.5`、`0`、`NaN`、超天花板全打回 | `:208-217`、`:444`，单测 `packages/workflow/tool-ralph/tests/tool-ralph.spec.ts:303-305` |
+| 4 | provider 三连：**已注册** → **支持结构化输出（`capabilities.outputSchema`）** → **`inheritsParentContext === false`** | 三条各报各的错 | `:220-232` |
+
+四道闸门都落在 `engine.start()` 之前，所以失败时连 run 都没有：
 
 ```mermaid
 flowchart TD
@@ -121,7 +145,9 @@ flowchart TD
     class TIP note
 ```
 
-第四道的三条错误信息各有各的话，单测逐条钉住（`packages/workflow/tool-ralph/tests/tool-ralph.spec.ts:311-324`）：`is not registered` / `does not support structured output` / `inherits parent context`。哪些 provider 过得了这一关不用猜——`spawn` 天生合格（`packages/subagent/subagent-spawn-in-process/src/index.ts:42,44`），`fork` 天生不合格（`packages/subagent/subagent-fork-in-process/src/index.ts:64`），后者会把父会话已完成轮次 seed 给 child，正是 Ralph 要消灭的东西。
+第四道的三条错误信息各有各的话，单测逐条钉住：`is not registered` / `does not support structured output` / `inherits parent context`（`packages/workflow/tool-ralph/tests/tool-ralph.spec.ts:311-324`）。
+
+哪些 provider 过得了这一关不用猜。`spawn` 天生合格（`packages/subagent/subagent-spawn-in-process/src/index.ts:42,44`），`fork` 天生不合格（`packages/subagent/subagent-fork-in-process/src/index.ts:64`）——后者会把父会话已完成轮次 seed 给 child，正是 Ralph 要消灭的东西。
 
 有个容易被当成低效的细节：**每次调用都重查 provider**，而不是在 `apply()` 时查一次。理由是 provider 注册是 effect 作用域的，插件生命周期和 HMR（热重载，[08 章](./08-effect与生命周期.md)）都可能让它变（`packages/workflow/tool-ralph/README.md:34`）。
 
@@ -139,9 +165,14 @@ flowchart TD
 
 另外两个字段 `script` / `meta` 是固定脚本本体与它的身份块。
 
-`subagentProvider` 与 `maxTotalAgents` 是 seam 上的可选项（`packages/workflow/workflow/src/runtime-types.ts:26-29`），worker-thread 引擎在**发布 run 之前同步**解析它们：provider 名必须规范化且已注册，否则抛 `INVALID_ARGUMENT` / `AGENT_START`（`packages/workflow/workflow-worker-thread/src/index.ts:77-89`，调用点在 `:146-147`）；`maxTotalAgents` 必须是正安全整数且不得超过引擎自己的部署天花板（默认 1000），否则 `INVALID_ARGUMENT`（同文件 `92-104`，`118`）。普通 `workflow` 工具这两个字段都不填，所以它的行为和 provider 策略一点没变（`packages/workflow/workflow-worker-thread/README.md:86`）。
+`subagentProvider` 与 `maxTotalAgents` 是 seam 上的可选项（`packages/workflow/workflow/src/runtime-types.ts:26-29`），worker-thread 引擎在**发布 run 之前同步**解析它们：
 
-单测把这份 start request 整个钉住了（`packages/workflow/tool-ralph/tests/tool-ralph.spec.ts:149-155`）：`meta.name === 'ralph-loop'`、`args` 三件套、`subagentProvider: 'fresh'`、`maxTotalAgents: 4`、`parent` 是调用方本人。
+- provider 名必须规范化且已注册，否则抛 `INVALID_ARGUMENT` / `AGENT_START`（`packages/workflow/workflow-worker-thread/src/index.ts:77-89`，调用点在 `:146-147`）
+- `maxTotalAgents` 必须是正安全整数且不得超过引擎自己的部署天花板（默认 1000），否则 `INVALID_ARGUMENT`（同文件 `92-104`、`118`）
+
+普通 `workflow` 工具这两个字段都不填，所以它的行为和 provider 策略一点没变（`packages/workflow/workflow-worker-thread/README.md:86`）。
+
+单测把这份 start request 整个钉住了：`meta.name === 'ralph-loop'`、`args` 三件套、`subagentProvider: 'fresh'`、`maxTotalAgents: 4`、`parent` 是调用方本人（`packages/workflow/tool-ralph/tests/tool-ralph.spec.ts:149-155`）。
 
 ## 每个 child 到底收到什么
 
@@ -186,13 +217,19 @@ flowchart LR
     class S3 data
 ```
 
-child 自己的 system prompt 照常由它那棵插件树装配（[15 章](./15-系统提示词与上下文装配.md)），但**父会话的内容一个字都不进来**。这一条不是口头承诺，有落盘证据：shipped headless 回放快照跑完后逐条检查磁盘上的会话日志（`examples/headless-agent/tests/headless.snapshot.ts:729-772`）——三份日志，一份 parent（`delegationDepth: 0`）、两份 child（`delegationDepth: 1`，`parentSession` 都是 parent 的 id，`cwd` 与 parent 相同，**`seedLength`**（会话被预置的历史长度，[16 章](./16-会话日志与分叉.md)）**都是 `undefined`**，两个 id 互不相同）。内容上，child 1 的首条 `user/message` 含 `Ralph round: 1 of 2.` 和 `(none — this is the first round)`、**不含** `ROUND_ONE_HANDOFF`；child 2 含 `Ralph round: 2 of 2.` 和 `ROUND_ONE_HANDOFF`；两个 child 的 prompt 都含 `objective` 原文，**都不含人类那句原话**。真实栈的集成测试用同一组断言再验一遍，并额外断言 child 的请求里既没有父会话 prompt 标记也没有父会话历史标记（`packages/workflow/tool-ralph/tests/integration.spec.ts:95-113`）。
+child 自己的 system prompt 照常由它那棵插件树装配（[15 章](./15-系统提示词与上下文装配.md)），但**父会话的内容一个字都不进来**。
+
+这一条不是口头承诺，有落盘证据。shipped headless 回放快照跑完后逐条检查磁盘上的会话日志，一共三份：一份 parent（`delegationDepth: 0`），两份 child（`delegationDepth: 1`，`parentSession` 都是 parent 的 id，`cwd` 与 parent 相同，**`seedLength`**——会话被预置的历史长度，[16 章](./16-会话日志与分叉.md)——**都是 `undefined`**，两个 id 互不相同）。
+
+内容上：child 1 的首条 `user/message` 含 `Ralph round: 1 of 2.` 和 `(none — this is the first round)`、**不含** `ROUND_ONE_HANDOFF`；child 2 含 `Ralph round: 2 of 2.` 和 `ROUND_ONE_HANDOFF`；两个 child 的 prompt 都含 `objective` 原文，**都不含人类那句原话**。出处 `examples/headless-agent/tests/headless.snapshot.ts:729-772`。
+
+真实栈的集成测试用同一组断言再验一遍，并额外断言 child 的请求里既没有父会话 prompt 标记也没有父会话历史标记（`packages/workflow/tool-ralph/tests/integration.spec.ts:95-113`）。
 
 child 侧唯一多出来的东西是结构化输出捕获契约：回放快照断言每个 child 的工具调用**只有一次** `structured_output`（`examples/headless-agent/tests/headless.snapshot.ts:768-772`；该工具名定义在 `packages/subagent/subagent-in-process-driver/src/structured.ts:19`）。
 
 ## 交接报告：五个字段，三种状态，校验两遍
 
-`agent()` 的 `schema` 参数就写在脚本顶部（`packages/workflow/tool-ralph/src/index.ts:91-102`，传入点 `:166`），五个字段全部 `required`、`additionalProperties: false`：
+`agent()` 的 `schema` 参数就写在脚本顶部，五个字段全部 `required`、`additionalProperties: false`（`packages/workflow/tool-ralph/src/index.ts:91-102`，传入点 `:166`）：
 
 | 字段 | 类型 | 要求 |
 |---|---|---|
@@ -202,7 +239,7 @@ child 侧唯一多出来的东西是结构化输出捕获契约：回放快照�
 | `nextSteps` | string[] | 同上 |
 | `blocker` | string | 已规范化（可以是空串） |
 
-三种状态各自还有语义约束（`:125-143`）：
+三种状态各自还有语义约束：
 
 | status | 必须有 | 必须没有 |
 |---|---|---|
@@ -210,9 +247,25 @@ child 侧唯一多出来的东西是结构化输出捕获契约：回放快照�
 | `complete` | 至少一条 `evidence` | `nextSteps` 为空、`blocker` 为空串 |
 | `blocked` | 一条具体的 `blocker` | — |
 
-然后是大小闸门：`JSON.stringify(report).length > args.maxHandoffChars` 直接抛错（`:144-147`）。
+然后是大小闸门。整段校验合起来是这样：
 
-同一套规则会被跑两遍。一遍在 workflow 脚本里，也就是上面这些；另一遍在工具消费端跨过 workflow 缝之后重新解码（`readReport()`，`:247-280`）。消费端还额外要求键集合精确等于 `blocker,evidence,nextSteps,status,summary`，多一个键都算 malformed。源码把这一遍写成"跨 provider 边界的防御性解码"（`:246`），README 则把"脚本内 + 消费端各校验一次"直接定为契约（`packages/workflow/tool-ralph/README.md:11`）。单测把 18 种畸形终值逐个跑了一遍（`packages/workflow/tool-ralph/tests/tool-ralph.spec.ts:333-366`）。
+```
+validate(report):
+    检查五个字段的类型与规范化（summary 非空、数组每项非空且 trim 过）
+
+    if status == continue:  nextSteps 至少一条，且 blocker 必须是空串
+    if status == complete:  evidence 至少一条，nextSteps 必须空，blocker 必须空串
+    if status == blocked:   blocker 必须是一条具体内容
+
+    if JSON.stringify(report).length > args.maxHandoffChars:
+        抛错                                  // 不截断，直接整个失败
+```
+
+语义约束在 `:125-143`，大小闸门在 `:144-147`。
+
+同一套规则会被跑两遍。一遍在 workflow 脚本里，也就是上面这些；另一遍在工具消费端跨过 workflow 缝之后重新解码（`readReport()`，`:247-280`）。消费端还额外要求键集合精确等于 `blocker,evidence,nextSteps,status,summary`，多一个键都算 malformed。
+
+源码把这一遍写成"跨 provider 边界的防御性解码"（`:246`），README 则把"脚本内 + 消费端各校验一次"直接定为契约（`packages/workflow/tool-ralph/README.md:11`）。单测把 18 种畸形终值逐个跑了一遍（`packages/workflow/tool-ralph/tests/tool-ralph.spec.ts:333-366`）。
 
 一份报告从 child 手里到工具返回值，要过两道内容一样的关，中间隔着 provider 边界；任何一道不过，都是整个 workflow 失败：
 
@@ -239,11 +292,35 @@ flowchart LR
     class BAD danger
 ```
 
-超长为什么是让整个 workflow 失败，而不是截断留个尾巴？Agent Note 的原话是：截断可能刚好切掉状态证据或 next steps，而剩下的东西**看起来仍然像一份权威交接**；生产者必须在配额内产出一份合法报告（`.agents/notes/implemented/feature/2026-07-19-fresh-agent-ralph-workflow-tool.md:57`）。同一条逻辑贯穿到底——报告非法、缺失、超长都是**失败**，绝不会被误当成"轮次用光"（`packages/workflow/tool-ralph/README.md:11`）。
+超长为什么是让整个 workflow 失败，而不是截断留个尾巴？
+
+Agent Note 的原话是：截断可能刚好切掉状态证据或 next steps，而剩下的东西**看起来仍然像一份权威交接**；生产者必须在配额内产出一份合法报告（`.agents/notes/implemented/feature/2026-07-19-fresh-agent-ralph-workflow-tool.md:57`）。
+
+同一条逻辑贯穿到底——报告非法、缺失、超长都是**失败**，绝不会被误当成"轮次用光"（`packages/workflow/tool-ralph/README.md:11`）。
 
 ## 终态、返回值，以及"worker reported"这几个字
 
-脚本有三个成功出口（`packages/workflow/tool-ralph/src/index.ts:172-176`）：
+固定脚本的主循环写出来就这么长：
+
+```
+last_handoff = none
+for round in 1..maxRounds:
+    report = agent(拼好的六段提示词, schema, label="Ralph round <round>")
+
+    if report is null:                  // child 失败，还没轮到校验
+        return round-failed(last_handoff)   // 不重试这一轮
+
+    validate(report)                    // 不过就整个 workflow 失败
+
+    if report.status == complete:  return complete(report)
+    if report.status == blocked:   return blocked(report)
+
+    last_handoff = report               // continue，带着它进下一轮
+
+return budget-limited(last_handoff)     // 循环走完，最后一份还是 continue
+```
+
+三个成功出口（`:172-176`）：
 
 | 终态 | 触发 | `report` 是哪一份 |
 |---|---|---|
@@ -293,7 +370,9 @@ flowchart TD
 
 "**worker reported**"是设计要求，不是行文习惯。完成和阻塞都是 worker 的自我声明，不是独立认证——**dsh 里没有任何独立评估者去判定目标是否真的完成**，这一项被明确列为已推迟工作（`packages/workflow/tool-ralph/README.md:13,88`）。
 
-`maxResultChars` **只裁这段渲染文本**，包含信封和截断标记 `\n… [truncated]` 在内，不动 `result` 里那份已校验的权威值，也不动跨轮交接（`:351-358`，README 第 13 行）。单测钉得很死：`maxResultChars: 160` 时文本长度**恰好** 160 且以 `… [truncated]` 结尾（`tests/tool-ralph.spec.ts:206-208`）；上限比标记本身（14 字符）还短、比如给 `5` 时，输出就是 `'\n… [t'`（同文件 `218`）。
+`maxResultChars` **只裁这段渲染文本**，包含信封和截断标记 `\n… [truncated]` 在内，不动 `result` 里那份已校验的权威值，也不动跨轮交接（`:351-358`，README 第 13 行）。
+
+单测钉得很死：`maxResultChars: 160` 时文本长度**恰好** 160 且以 `… [truncated]` 结尾；上限比标记本身（14 字符）还短、比如给 `5` 时，输出就是 `'\n… [t'`（`tests/tool-ralph.spec.ts:206-208`、同文件 `218`）。
 
 父会话里最终落下的是什么？shipped headless 快照的 `tool/result` 事件原文（`examples/headless-agent/tests/snapshots/ralph-loop/stream-json.expected.jsonl:16`）：
 
@@ -315,13 +394,40 @@ Final report:
 
 ## 失败与取消：没有一种半成品算成功
 
-普通 child 失败——模型跑到 token 上限，或者 child 正常结束但状态不是 completed——在 workflow 语言里映射成 `agent()` 返回 `null`（`packages/workflow/workflow/README.md:43`）。固定脚本在校验报告**之前**就拦下它，返回 `round-failed` 和最后一次成功交接（`packages/workflow/tool-ralph/src/index.ts:168-170`），工具再把它变成一个错误结果（`:465`，渲染见 `:386-392`；真实栈复现见 `tests/integration.spec.ts:126-129,146-148`）。第 1 轮就挂是 `Ralph round 1 child failed before producing a structured report.` 加一句 `No previous handoff was available.`；第 N 轮挂则是同样的抬头，后面接 `Last successful handoff:` 和上一份报告。**Ralph 不重试那一轮**（README 第 15 行）。
+普通 child 失败——模型跑到 token 上限，或者 child 正常结束但状态不是 completed——在 workflow 语言里映射成 `agent()` 返回 `null`（`packages/workflow/workflow/README.md:43`）。
 
-致命失败与取消永远不算成功，`stopReasonError()` 三行判完（`:336-349`）：`completed` 才继续解码终值，`cancelled` 报 `Ralph workflow was cancelled (<reason>)`，`error` 报 `Ralph workflow failed: <error>`。provider 启动、传输、worker、workflow 层的致命故障仍然是普通 workflow 错误，而且**可能在固定脚本来得及返回交接之前就结算**（README 第 15 行）。
+固定脚本在校验报告**之前**就拦下它，返回 `round-failed` 和最后一次成功交接（`packages/workflow/tool-ralph/src/index.ts:168-170`），工具再把它变成一个错误结果（`:465`，渲染见 `:386-392`；真实栈复现见 `tests/integration.spec.ts:126-129,146-148`）。
 
-取消走两条通道，是刻意的冗余（`:454-458`）：`exec.signal` 既作为 `WorkflowStartRequest.signal` 进引擎，又通过 `addEventListener('abort', …)` 桥接到 `run.cancel('parent step aborted')`。挂完监听之后还**显式检查一次 `exec.signal.aborted`**——如果 abort 恰好落在 `start()` 执行期间，那个监听器不会再触发，只能靠这一次补查。README 说这么写是为了"实现独立性"，不依赖某个引擎一定接 signal（第 19 行）。两个单测分别覆盖飞行中取消和 start 期间取消，都断言 `engine.cancels === ['parent step aborted']` 且 `disposed === 1`（`tests/tool-ralph.spec.ts:269-297`）。至于"调用之前信号就已经 abort"，根本到不了 `execute`：工具运行时先返回 `TOOL_ABORTED_BEFORE_DISPATCH`（同文件 `277-281`）。
+第 1 轮就挂是 `Ralph round 1 child failed before producing a structured report.` 加一句 `No previous handoff was available.`；第 N 轮挂则是同样的抬头，后面接 `Last successful handoff:` 和上一份报告。**Ralph 不重试那一轮**（README 第 15 行）。
 
-`finally` 里无条件 `await run.dispose()`（`:471-474`）。这不是礼貌，是必需：run 是 holder 拥有的，持有者必须在每条路径上 dispose（`packages/workflow/workflow/README.md:15`）。worker-thread 引擎的 `dispose()` 幂等，会取消 run、在 `disposeGraceMs`（默认 5000ms）内等结果与 child 静默、然后无条件终止 worker 并做一次幸存者清扫（`packages/workflow/workflow-worker-thread/README.md:65,84`）。所以一次被取消的父步骤会**等到引擎有界终止、child 静默之后才返回**——它不会立刻甩手就走。
+致命失败与取消永远不算成功，`stopReasonError()` 三行判完（`:336-349`）：
+
+```
+if stopReason == completed:  继续解码终值
+if stopReason == cancelled:  报 "Ralph workflow was cancelled (<reason>)"
+if stopReason == error:      报 "Ralph workflow failed: <error>"
+```
+
+provider 启动、传输、worker、workflow 层的致命故障仍然是普通 workflow 错误，而且**可能在固定脚本来得及返回交接之前就结算**（README 第 15 行）。
+
+取消走两条通道，是刻意的冗余（`:454-458`）：
+
+```
+start 请求里带上 signal = exec.signal              // 通道一：交给引擎
+exec.signal.addEventListener('abort', () =>       // 通道二：自己桥接
+    run.cancel('parent step aborted'))
+
+if exec.signal.aborted:                            // 补查一次
+    run.cancel('parent step aborted')
+```
+
+那句补查不是多余的：如果 abort 恰好落在 `start()` 执行期间，上面那个监听器不会再触发，只能靠这一次兜住。README 说这么写是为了"实现独立性"，不依赖某个引擎一定接 signal（第 19 行）。
+
+两个单测分别覆盖飞行中取消和 start 期间取消，都断言 `engine.cancels === ['parent step aborted']` 且 `disposed === 1`（`tests/tool-ralph.spec.ts:269-297`）。至于"调用之前信号就已经 abort"，根本到不了 `execute`：工具运行时先返回 `TOOL_ABORTED_BEFORE_DISPATCH`（同文件 `277-281`）。
+
+`finally` 里无条件 `await run.dispose()`（`:471-474`）。这不是礼貌，是必需：run 是 holder 拥有的，持有者必须在每条路径上 dispose（`packages/workflow/workflow/README.md:15`）。
+
+worker-thread 引擎的 `dispose()` 幂等，会取消 run、在 `disposeGraceMs`（默认 5000ms）内等结果与 child 静默、然后无条件终止 worker 并做一次幸存者清扫（`packages/workflow/workflow-worker-thread/README.md:65,84`）。所以一次被取消的父步骤会**等到引擎有界终止、child 静默之后才返回**——它不会立刻甩手就走。
 
 ## 配置与实操
 
@@ -336,7 +442,18 @@ Final report:
 
 这四个值在插件 `apply()` 时就规范化并校验，**包括绕过 Loader schema 直接调用 apply 的情况**（`resolveConfig()`，`:187-205`；单测 `tests/tool-ralph.spec.ts:326-331`）。
 
-它已经装在这些地方：base bundle（`packages/bundle/base/cordis.patch.yml:378-382`，`subagentProvider: spawn`、`maxRounds: 64`）；`standard` agent preset（`apps/cli/config/agent-presets/standard/agent.cordis.yml:229-233`，配置与 base 相同，`code` 的 `230-234`、`cordis` 的 `217-221` 一模一样，`minimal` 不装）；web-app 层则是 `packages/bundle/web-app/cordis.patch.yml:398-399` 的一行 `disabled: true`——host plane 关掉，由 agent preset 决定自己的 agent 看得见哪些委派工具（同文件 `372` 的说明）。两个 example（`examples/headless-agent/cordis.yml:145-146`、`examples/acp-agent/cordis.yml:147-148`）都不带 config，走全部默认值。
+它已经装在这些地方：
+
+| 位置 | 配置 | 出处 |
+|---|---|---|
+| base bundle | `subagentProvider: spawn`、`maxRounds: 64` | `packages/bundle/base/cordis.patch.yml:378-382` |
+| `standard` agent preset | 与 base 相同 | `apps/cli/config/agent-presets/standard/agent.cordis.yml:229-233` |
+| `code` / `cordis` agent preset | 与 standard 一模一样 | `code` 的 `230-234`、`cordis` 的 `217-221` |
+| `minimal` agent preset | 不装 | — |
+| web-app 层 | 一行 `disabled: true` | `packages/bundle/web-app/cordis.patch.yml:398-399` |
+| 两个 example | 不带 config，走全部默认值 | `examples/headless-agent/cordis.yml:145-146`、`examples/acp-agent/cordis.yml:147-148` |
+
+web-app 那一行是 host plane 关掉，由 agent preset 决定自己的 agent 看得见哪些委派工具（同文件 `372` 的说明）。
 
 `apps/web/tests/shipped-composition.e2e.ts:35-59` 是出厂 Web 组合"模型可见工具清单"的断言表，`ralph` 在第 `47` 行（断言在 `:91`），所以默认组合里模型是**看得见**它的。
 
@@ -355,7 +472,9 @@ Final report:
 
 ### 怎么发起一次
 
-模型被明确要求：**只在直接的人类明确要求 Ralph loop 或 fresh-agent 迭代时才调用它**（system prompt section `tool:ralph`，order 116，`packages/workflow/tool-ralph/src/index.ts:407-411`）。所以你得把话说明白。shipped 快照里的那句人话长这样（`examples/headless-agent/tests/snapshots/ralph-loop/input.json:5`）：
+模型被明确要求：**只在直接的人类明确要求 Ralph loop 或 fresh-agent 迭代时才调用它**（system prompt section `tool:ralph`，order 116，`packages/workflow/tool-ralph/src/index.ts:407-411`）。所以你得把话说明白。
+
+shipped 快照里的那句人话长这样（`examples/headless-agent/tests/snapshots/ralph-loop/input.json:5`）：
 
 ```
 Run a two-round fresh-agent Ralph loop to prove the shipped headless integration.
@@ -371,7 +490,11 @@ Run a two-round fresh-agent Ralph loop to prove the shipped headless integration
 
 ### 怎么逐轮跟踪
 
-运行时看 `workflow/*` 事件。它们是只读的，只带 `WorkflowRunInfo`（id + meta），拿不到 run 控制权（`packages/workflow/workflow/README.md:23`）。Ralph 只用一个 phase，叫 `Fresh-agent rounds`（`packages/workflow/tool-ralph/src/index.ts:83,152`），每轮的 `agent()` 带 `label: 'Ralph round <N>'`（`:164`）。下面这个监听插件改编自集成测试的写法（`packages/workflow/tool-ralph/tests/integration.spec.ts:78-83,251`），事件签名见 `packages/workflow/workflow/src/index.ts:51,68,79`，payload 字段见 `packages/workflow/workflow/src/types.ts:98-116`。存成 `plugins/ralph-tracer.ts`：
+运行时看 `workflow/*` 事件。它们是只读的，只带 `WorkflowRunInfo`（id + meta），拿不到 run 控制权（`packages/workflow/workflow/README.md:23`）。
+
+Ralph 只用一个 phase，叫 `Fresh-agent rounds`（`packages/workflow/tool-ralph/src/index.ts:83,152`），每轮的 `agent()` 带 `label: 'Ralph round <N>'`（`:164`）。
+
+下面这个监听插件改编自集成测试的写法（`packages/workflow/tool-ralph/tests/integration.spec.ts:78-83,251`），事件签名见 `packages/workflow/workflow/src/index.ts:51,68,79`，payload 字段见 `packages/workflow/workflow/src/types.ts:98-116`。存成 `plugins/ralph-tracer.ts`：
 
 ```ts
 import type { Context } from '@deepseek-ai/cordis'
@@ -392,7 +515,9 @@ export function apply(ctx: Context): void {
 }
 ```
 
-那个空的 `import type {}` 不是笔误，它只为把 `@deepseek-ai/dsh-workflow` 的事件声明合并进 `Context`，仓库自己也这么写（`packages/workflow/tool-ralph/src/index.ts:17`）。`ctx.logger` 是 Cordis 自带服务，不用 inject（`vendor/cordis/src/context.ts:28`）。挂载就在 `cordis.yml` 里加一行，本地插件用相对路径引用（形状同 `examples/acp-agent/child-question.cordis.yml:13-14`）：
+那个空的 `import type {}` 不是笔误，它只为把 `@deepseek-ai/dsh-workflow` 的事件声明合并进 `Context`，仓库自己也这么写（`packages/workflow/tool-ralph/src/index.ts:17`）。`ctx.logger` 是 Cordis 自带服务，不用 inject（`vendor/cordis/src/context.ts:28`）。
+
+挂载就在 `cordis.yml` 里加一行，本地插件用相对路径引用（形状同 `examples/acp-agent/child-question.cordis.yml:13-14`）：
 
 ```yaml
 - id: ralph-tracer
@@ -445,7 +570,13 @@ flowchart LR
 | 终态权威 | 模型侧策略判定证据是否充分（goal-round-driver README 第 60 行） | 同样是自我声明，**没有独立评估者**（tool-ralph README 第 88 行） |
 | 预算 | 轮次上限（不是资源预算，同上第 63 行） | 只有轮次数；token / 金额 / 时长预算都推迟（tool-ralph README 第 93 行） |
 
-落到选型上：任务需要积累判断、要跟人来回确认、中途会被追加新要求，选 goal；任务能被"读工作区 → 干一小块 → 验证 → 写报告"完整描述，且每一步的成果都落在文件里，选 Ralph；已经吃过"模型记得自己没做过的事"的亏，选 Ralph。需要暂停、恢复、后台跑、重启后接着跑的，两个都不选——Ralph 是前台限定，goal 那套 resume 也不是后台调度。只是要有界委派或扇出，用普通 subagent 或 `workflow` 就够了，这也是 system prompt 里写给模型的路由建议（`packages/workflow/tool-ralph/src/index.ts:410`）。
+落到选型上：
+
+- 任务需要积累判断、要跟人来回确认、中途会被追加新要求 → 选 goal
+- 任务能被"读工作区 → 干一小块 → 验证 → 写报告"完整描述，且每一步的成果都落在文件里 → 选 Ralph
+- 已经吃过"模型记得自己没做过的事"的亏 → 选 Ralph
+- 需要暂停、恢复、后台跑、重启后接着跑 → 两个都不选：Ralph 是前台限定，goal 那套 resume 也不是后台调度
+- 只是要有界委派或扇出 → 用普通 subagent 或 `workflow` 就够了，这也是 system prompt 里写给模型的路由建议（`packages/workflow/tool-ralph/src/index.ts:410`）
 
 最后一条是踩坑重灾区：**Ralph 的成功不等于目标达成**。返回值里那句 "worker reported" 是字面意思——完成与阻塞都是干活的那个 child 自己说的，dsh 没有任何一方去核实（README 第 88 行）。要认证就得自己在外面加一层评估，而那正是被推迟的工作。
 
@@ -453,7 +584,9 @@ flowchart LR
 
 **goal 把状态留在对话里，Ralph 把状态留在文件里；前者靠上下文续跑，后者靠一份有上限的报告续跑。**
 
-停止判据也跟着分岔：goal 由驱动器在同一条会话里判，Ralph 由每一轮 child 自己在报告里声明 `continue` / `complete` / `blocked`，脚本只负责照做。[28 章](./28-自己写一个续跑插件.md)自己写续跑插件时，这两个选择就是你要先想清楚的那两个。想知道 Pi / Codex / LangChain 在同一道题上怎么选，见[五个 agent 系统源码解剖](../2026-08_五个agent系统源码解剖/00-总览与阅读指南.md)。
+停止判据也跟着分岔：goal 由驱动器在同一条会话里判，Ralph 由每一轮 child 自己在报告里声明 `continue` / `complete` / `blocked`，脚本只负责照做。
+
+[28 章](./28-自己写一个续跑插件.md)自己写续跑插件时，这两个选择就是你要先想清楚的那两个。想知道 Pi / Codex / LangChain 在同一道题上怎么选，见[五个 agent 系统源码解剖](../2026-08_五个agent系统源码解剖/00-总览与阅读指南.md)。
 
 ## 本章未确认
 

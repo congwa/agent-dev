@@ -10,10 +10,9 @@
 
 ## 0. 读之前：先搞懂「秒杀」到底难在哪
 
-你已经看过一篇入门文了，所以这一节我们不重复「什么是秒杀」，而是换个角度：
-**为什么一个「减库存 + 写订单」这么简单的事，值得 26.6k 个人来点星？**
+入门文已经讲过「什么是秒杀」，这里换个角度问一句：**为什么一个「减库存 + 写订单」这么简单的事，值得 26.6k 个人来点星？**
 
-先把场景摆出来：
+先把场景摆出来。
 
 ```
               iPhone 秒杀，库存 10 台，开抢时间 10:00:00
@@ -40,7 +39,7 @@
                      🔥 全都挂了
 ```
 
-**「秒杀」这个词里其实藏着三个完全不同的难题**，很多入门文只讲了第一个：
+「秒杀」这个词里其实藏着三个完全不同的难题，很多入门文只讲了第一个。
 
 | 难题 | 说人话 | 不解决会怎样 |
 | --- | --- | --- |
@@ -49,9 +48,10 @@
 | ③ 机会要公平 | 不能让写脚本的黄牛 0.1 秒抢完 | 真实用户抢不到，活动白做，被骂上热搜 |
 
 `qiurunze123/miaosha` 这个项目的价值在于：**它三个都做了**，而且每一层都留下了可读的代码。
+
 入门版秒杀通常只做了 ①（数据库 `where stock > 0`），这个项目在 ① 的基础上还做了 ② 的「三级漏斗」和 ③ 的「地址隐藏 + 验证码 + 限流」。
 
-我们这篇文章的主线就是：**沿着一次点击，看这三层保护是怎么一层层套上去的。**
+本文的主线就是：**沿着一次点击，看这三层保护是怎么一层层套上去的。**
 
 > 📌 一个提前打的预防针：这个项目是**教学项目**，作者自己在 README 里也说「文章还有许多不足，我仍在不断改进」。
 > 所以代码里既有很漂亮的设计，也有明显的 bug 和半成品。本文会**如实标出来**——看懂别人的坑，比看懂别人的优点更值钱。
@@ -70,18 +70,18 @@
 - 系统告诉你「排队中…」，过一会儿变成「秒杀成功，订单号 xxx」或者「商品已经秒杀完毕」
 
 它不是一个可以直接上生产的框架，而是一本**「秒杀该怎么写」的活教材**。
-作者把同一套业务写了两遍：
 
-- **miaosha-v1**：单体版。所有代码在一个 Spring Boot 工程里，一个 `main` 方法启动，最容易读。
-- **miaosha-v2 + miaosha-order**：拆分版。把「商品/库存」这块业务拆出去变成一个独立服务，用 **Dubbo + ZooKeeper** 做远程调用。
+同一套业务，作者写了两遍，另外还带两个配角模块：
+
+| 模块 | 角色 | 说明 |
+| --- | --- | --- |
+| **miaosha-v1** | ★主线 | 单体版。所有代码在一个 Spring Boot 工程里，一个 `main` 方法启动，最容易读 |
+| **miaosha-v2 + miaosha-order** | ★主线 | 拆分版。把「商品/库存」这块业务拆出去变成一个独立服务，用 **Dubbo + ZooKeeper** 做远程调用 |
+| **miaosha-admin** | 配角 | 后台管理（登录/账户/字典表），和秒杀主链路基本无关 |
+| **miaosha-rpc** | 配角 | Dubbo + TCC 分布式事务的独立小 Demo，用来演示「跨服务的事务怎么补偿」，也不在秒杀主链路上 |
 
 > **Dubbo 是什么？** 就是「让 A 服务器上的 Java 代码，能像调用本地方法一样调用 B 服务器上的方法」的一套工具。
 > **ZooKeeper 是什么？** 就是一个「服务电话簿」。B 服务器启动时去电话簿上登记「我提供减库存服务，我的地址是 192.168.1.5:20880」，A 服务器要调用时先翻电话簿查地址。
-
-另外还有两个配角模块：
-
-- **miaosha-admin**：后台管理（登录/账户/字典表），和秒杀主链路基本无关。
-- **miaosha-rpc**：Dubbo + TCC 分布式事务的独立小 Demo，用来演示「跨服务的事务怎么补偿」，也不在秒杀主链路上。
 
 **所以本文的主线是 miaosha-v1 和 miaosha-v2，配角模块只在第 1.3 节和第 7 节点到为止。**
 
@@ -148,19 +148,25 @@ miaosha/
 
 **读代码的建议顺序**（师兄经验）：
 
-```
-  1. sql/miaosha1.sql                 ← 先知道数据长什么样
-  2. MiaoshaController.afterPropertiesSet()   ← 启动时干了什么（缓存预热）
-  3. MiaoshaController.miaosha()      ← 主战场，20 行代码藏了 5 道关卡
-  4. MQReceiver.receive()             ← 请求出队后发生了什么
-  5. MiaoshaService.miaosha() → GoodsService.reduceStock()  ← 真正扣库存
-  6. MiaoshaController.miaoshaResult()← 前端怎么知道抢没抢到
-  7. AccessInterceptor                ← 回过头看限流和登录态
-```
+| 顺序 | 看哪里 | 看什么 |
+| --- | --- | --- |
+| 1 | `sql/miaosha1.sql` | 先知道数据长什么样 |
+| 2 | `MiaoshaController.afterPropertiesSet()` | 启动时干了什么（缓存预热） |
+| 3 | `MiaoshaController.miaosha()` | 主战场，20 行代码藏了 5 道关卡 |
+| 4 | `MQReceiver.receive()` | 请求出队后发生了什么 |
+| 5 | `MiaoshaService.miaosha()` → `GoodsService.reduceStock()` | 真正扣库存 |
+| 6 | `MiaoshaController.miaoshaResult()` | 前端怎么知道抢没抢到 |
+| 7 | `AccessInterceptor` | 回过头看限流和登录态 |
 
 ---
 
 ## 2. 【主线】一次秒杀请求，从点击到下单的完整链路
+
+先给一张地图，免得读到一半忘了自己在哪：
+
+> 启动预热 → 登录换 token → 商品页走缓存 → 答验证码 → 换一条随机 path → 连过五道关卡 → 入队后立即返回 → 后台慢慢落库 → 前端轮询结果。
+
+十三个小节里，真正决定这套系统成败的是总图上打 ★★★ 的三处——内存标记（2.7）、Redis 预减库存（2.8）、MQ 异步下单（2.9）。其余的要么是护栏（验证码、path、限流），要么是铺垫（预热、session、页面缓存），第一遍可以读得快一点。
 
 ### 2.0 先看总图
 
@@ -279,19 +285,13 @@ miaosha/
                 └───────────── 轮询读到 Redis 里的订单 ───┘
 ```
 
-下面我们一步一步拆。
-
 ---
 
 ### 2.1 第一步：系统启动时的「缓存预热」
 
-**发生了什么**
-
 服务器刚启动、还没有任何用户来访问的时候，程序主动把数据库里每个秒杀商品的库存数**抄一份到 Redis**，同时把一个叫 `localOverMap` 的内存开关全部置为 `false`（表示"还没卖完"）。
 
-**对应代码在哪**
-
-`miaosha-v1/src/main/java/com/geekq/miaosha/controller/MiaoshaController.java`（v2 同名文件内容一致）：
+代码在 `miaosha-v1/src/main/java/com/geekq/miaosha/controller/MiaoshaController.java`（v2 同名文件内容一致）：
 
 ```java
 @Controller
@@ -314,10 +314,7 @@ public class MiaoshaController implements InitializingBean {
 }
 ```
 
-**为什么这么设计**
-
-`InitializingBean` 是 Spring 的一个接口，意思是「这个 Bean 造好之后，请帮我调一次 `afterPropertiesSet()`」。
-所以这段代码 = **在服务对外提供访问之前，先把货搬到收银台**。
+`InitializingBean` 是 Spring 的一个接口，意思是「这个 Bean 造好之后，请帮我调一次 `afterPropertiesSet()`」。所以这段代码 = **在服务对外提供访问之前，先把货搬到收银台**。
 
 > **小白比喻**：演唱会开票前，工作人员先把 10 张票从仓库搬到售票窗口的抽屉里。
 > 不这么做的话，第一个观众来了才去仓库翻箱倒柜找票，后面 999 个人就在窗口前挤成一团了。
@@ -330,6 +327,7 @@ public class MiaoshaController implements InitializingBean {
 | 高并发瞬间 | 大量请求同时发现「Redis 里没有」，一起去查数据库 → **缓存击穿**，数据库瞬间被打爆 | Redis 里一直有值，数据库毫无压力 |
 
 **⚠️ 这里有个真实的坑**：`afterPropertiesSet()` 只在**启动时**跑一次。
+
 如果运营在后台新加了一个秒杀商品，`localOverMap` 里没有这个 `goodsId`，那么后面这行：
 
 ```java
@@ -337,21 +335,18 @@ boolean over = localOverMap.get(goodsId);   // 返回 Boolean，可能是 null
 ```
 
 `null` 自动拆箱成 `boolean` 会直接抛 `NullPointerException`。
+
 另外 `HashMap` 本身不是线程安全的，多线程同时 `put` 理论上可能出问题（生产代码应该用 `ConcurrentHashMap`）。这是这个教学项目的已知瑕疵。
 
 ---
 
 ### 2.2 第二步：登录 —— 分布式 session
 
-**发生了什么**
-
 用户提交用户名密码 → 服务端校验 → 生成一个随机的 UUID 当作 `token` → **把「token → 用户对象」这条记录写进 Redis** → 把 token 塞进浏览器 Cookie。
 
 以后每次请求，浏览器都会带上这个 Cookie，服务端拿 token 去 Redis 里换回用户对象。
 
-**对应代码在哪**
-
-`miaosha-v1/src/main/java/com/geekq/miaosha/service/MiaoShaUserService.java`：
+代码在 `miaosha-v1/src/main/java/com/geekq/miaosha/service/MiaoShaUserService.java`：
 
 ```java
 public boolean login(HttpServletResponse response, LoginVo loginVo) {
@@ -371,21 +366,15 @@ private void addCookie(HttpServletResponse response, String token, MiaoshaUser u
 }
 ```
 
-取回用户的三段接力：
+从 Cookie 到「Controller 方法参数里的 `MiaoshaUser user` 自动有值」，中间是三段接力：
 
-```
-① miaosha-v1/.../access/AccessInterceptor.java      preHandle() 里 getUser(request, response)
-       ↓  拿到 MiaoshaUser
-② miaosha-v1/.../access/UserContext.java            UserContext.setUser(user)   ← 存进 ThreadLocal
-       ↓
-③ miaosha-v1/.../config/UserArgumentResolver.java   resolveArgument() 返回 UserContext.getUser()
-       ↓
-   Controller 方法参数里的 MiaoshaUser user 就自动有值了
-```
+| 棒次 | 文件 | 干了什么 |
+| --- | --- | --- |
+| ① | `miaosha-v1/.../access/AccessInterceptor.java` | `preHandle()` 里 `getUser(request, response)`，拿到 `MiaoshaUser` |
+| ② | `miaosha-v1/.../access/UserContext.java` | `UserContext.setUser(user)`，存进 ThreadLocal |
+| ③ | `miaosha-v1/.../config/UserArgumentResolver.java` | `resolveArgument()` 返回 `UserContext.getUser()` |
 
-**为什么这么设计**
-
-传统的 `HttpSession` 是存在**单台 Tomcat 的内存里**的。
+传统的 `HttpSession` 是存在**单台 Tomcat 的内存里**的，一换机器就不认人了：
 
 ```
       传统 session（会出事）                    分布式 session（这个项目的做法）
@@ -420,13 +409,9 @@ private static ThreadLocal<MiaoshaUser> userHolder = new ThreadLocal<MiaoshaUser
 
 ### 2.3 第三步：商品页 —— 页面级缓存
 
-**发生了什么**
-
 商品列表页 `/goods/to_list` 不是每次都重新渲染 HTML，而是**把渲染好的整段 HTML 字符串缓存进 Redis 60 秒**。
 
-**对应代码在哪**
-
-`miaosha-v1/src/main/java/com/geekq/miaosha/controller/BaseController.java`：
+代码在 `miaosha-v1/src/main/java/com/geekq/miaosha/controller/BaseController.java`：
 
 ```java
 @Value("#{'${pageCache.enbale}'}")     // 注意：配置项名字拼错了，是 enbale 不是 enable
@@ -463,9 +448,7 @@ return render(request, response, model, "goods_list", GoodsKey.getGoodsList, "")
 
 `GoodsKey.getGoodsList` 的过期时间是 60 秒（见 `redis/GoodsKey.java`）。
 
-**为什么这么设计**
-
-作者在 `GoodsController` 的注释里直接写了压测数字：
+值不值得？作者在 `GoodsController` 的注释里直接写了压测数字：
 
 ```java
 /**
@@ -484,13 +467,23 @@ return render(request, response, model, "goods_list", GoodsKey.getGoodsList, "")
 
 ### 2.4 第四步：图形验证码 —— 把黄牛的脚本挡在门外
 
-**发生了什么**
-
 用户点「立即秒杀」之前，得先看一张图，图上是一道**数学题**（比如 `3+5*2`），把答案填进去。
 
-**对应代码在哪**
+生成验证码的机制一句话说完：
 
-`miaosha-v1/src/main/java/com/geekq/miaosha/service/MiaoshaService.java`：
+```
+随机三个 0~9 的数字 + 两个随机运算符（只在 + - * 里选）拼成算式
+    ↓
+借 JS 引擎把算式算出答案
+    ↓
+答案（不是算式）以 "昵称,商品id" 为 key 存进 Redis，300 秒有效
+    ↓
+算式画成图片返给浏览器，让人肉眼去算
+```
+
+校验时反过来：拿用户填的数字和 Redis 里的答案比，**比中之后立刻 delete**，所以一张验证码只能用一次。
+
+代码在 `miaosha-v1/src/main/java/com/geekq/miaosha/service/MiaoshaService.java`：
 
 ```java
 private static char[] ops = new char[]{'+', '-', '*'};
@@ -580,15 +573,28 @@ public boolean checkVerifyCode(MiaoshaUser user, long goodsId, int verifyCode) {
 
 这是整个项目里**最有代表性的防黄牛设计**。
 
-**发生了什么**
-
 秒杀接口的 URL 不是固定的 `/miaosha/do_miaosha`，而是 `/miaosha/{path}/do_miaosha`——中间那个 `{path}` 是一段**随机的 MD5 字符串，每个用户、每个商品、每次点击都不一样，而且 60 秒后失效**。
 
 想拿到这个 path，必须先通过验证码。
 
-**对应代码在哪**
+发和验的两个动作，机制是对称的：
 
-`MiaoshaController.getMiaoshaPath()`：
+```
+发 path（GET /miaosha/path）：
+    验证码对不上          → 直接返回「请求非法」
+    验证码对上了          → path = md5(uuid + "123456")
+                            以 "昵称_商品id" 为 key 写进 Redis，60 秒过期
+                            把 path 返给浏览器
+
+用 path（POST /miaosha/{path}/do_miaosha）：
+    读 Redis 里 "昵称_商品id" 的那条
+    URL 里的 path 和它相等   → 放行
+    不等 / 已过期 / 没有     → 拒绝
+```
+
+注意 key 里拼了 `nickname`，所以 A 用户拿到的 path，B 用户拿去用是过不了的。
+
+代码在 `MiaoshaController.getMiaoshaPath()`：
 
 ```java
 @AccessLimit(seconds = 5, maxCount = 5, needLogin = true)
@@ -697,28 +703,43 @@ public boolean checkPath(MiaoshaUser user, long goodsId, String path) {
 ```
 
 **⚠️ 一个必须说的现状**：这个仓库里 `miaosha-v1/src/main/resources/templates/goods_detail.html` 的前端代码**还是老版本**——它直接 `action="/miaosha/do_miaosha"` 提交表单，既没有请求验证码，也没有先去换 path，更没有轮询结果。而 v2 里干脆连 `goods_detail.html` 都没有。
+
 也就是说：**后端的安全设计是完整的，但仓库里的前端页面没跟上**，你直接跑起来点按钮会 404。这是读这个项目时最容易困惑的地方，别怀疑自己。
 
 ---
 
 ### 2.6 第六步：限流拦截器 —— @AccessLimit 注解怎么工作
 
-**发生了什么**
-
-在方法上贴一行注解，这个接口就自动获得了「同一个用户，5 秒内最多访问 5 次」的能力。
+在方法上贴一行注解，这个接口就自动获得了「同一个用户，5 秒内最多访问 5 次」的能力：
 
 ```java
 @AccessLimit(seconds = 5, maxCount = 5, needLogin = true)
 @RequestMapping(value = "/{path}/do_miaosha", method = RequestMethod.POST)
 ```
 
-**对应代码在哪（三个文件配合）**
+拦截器里真正跑的是这么一段：
 
 ```
-① miaosha-v1/.../access/AccessLimit.java        ← 注解本身，只是个「标签」
-② miaosha-v1/.../access/AccessInterceptor.java  ← 拦截器，真正干活的
-③ miaosha-v1/.../config/WebConfig.java          ← 把拦截器注册进 Spring MVC
+key = 请求 URI
+if 注解要求登录:
+    没登录 → 直接返回 SESSION_ERROR，不进 Controller
+    key = key + "_" + 用户昵称        // 按人 + 按接口分开计数
+
+count = redis.get(key)
+if count 不存在:   redis.set(key, 1, 过期时间 = 注解里的 seconds)
+elif count < maxCount:  redis.incr(key)
+else:              返回 ACCESS_LIMIT_REACHED，不进 Controller
 ```
+
+计数器靠 key 自己过期来滚动窗口——**没有人去清零，时间到了 key 直接消失**。
+
+三个文件配合完成这件事：
+
+| 文件 | 角色 |
+| --- | --- |
+| `miaosha-v1/.../access/AccessLimit.java` | 注解本身，只是个「标签」 |
+| `miaosha-v1/.../access/AccessInterceptor.java` | 拦截器，真正干活的 |
+| `miaosha-v1/.../config/WebConfig.java` | 把拦截器注册进 Spring MVC |
 
 注解定义（`AccessLimit.java`）就 3 个字段：
 
@@ -815,13 +836,9 @@ REQUEST_ILLEGAL(30004, "访问太频繁!"),
 
 ### 2.7 第七步：内存标记 localOverMap —— 连 Redis 都懒得访问
 
-**发生了什么**
-
 一旦某个商品被判定「卖完了」，Controller 就在 **JVM 自己的内存**里插一面小旗子。后续同商品的请求走到这里，看见旗子直接返回，**连一次 Redis 网络请求都不发**。
 
-**对应代码在哪**
-
-`MiaoshaController.miaosha()` 中间那几行：
+代码是 `MiaoshaController.miaosha()` 中间那几行：
 
 ```java
 //内存标记，减少redis访问
@@ -839,7 +856,7 @@ if (stock < 0) {
 }
 ```
 
-**为什么这么设计**
+差距有多大：
 
 ```
                     请求成本对比
@@ -876,11 +893,7 @@ if (stock < 0) {
 
 ### 2.8 第八步：Redis 预减库存 —— 全链路最关键的一刀
 
-**发生了什么**
-
 一行 `decr`，把绝大部分请求挡在数据库外面。
-
-**对应代码在哪**
 
 ```java
 //预见库存
@@ -907,8 +920,6 @@ public <T> Long decr(KeyPrefix prefix, String key) {
     }
 }
 ```
-
-**为什么这么设计**
 
 关键在于 Redis 的 `DECR` 是**原子操作**——Redis 是单线程处理命令的，1000 个客户端同时对同一个 key 做 `DECR`，Redis 会排成一队一个一个执行，**绝不会出现「两个人都读到 5，都减成 4」的情况**。
 
@@ -952,13 +963,9 @@ public <T> Long decr(KeyPrefix prefix, String key) {
 
 ### 2.9 第九步：RabbitMQ 异步下单 —— 先发号，后做单
 
-**发生了什么**
-
 通过前面所有关卡的请求，**并不会立刻写数据库**。它只是把「谁 + 抢哪个商品」打包成一条消息扔进队列，然后接口立刻返回。
 
-**对应代码在哪**
-
-发送端 `MiaoshaController.miaosha()` 最后三行：
+发送端是 `MiaoshaController.miaosha()` 最后三行：
 
 ```java
 MiaoshaMessage mm = new MiaoshaMessage();
@@ -978,7 +985,20 @@ public void sendMiaoshaMessage(MiaoshaMessage mm) {
 }
 ```
 
-消费端 `miaosha-v1/.../rabbitmq/MQReceiver.java`：
+消费端做的事是「两道二次校验 + 一次真扣」：
+
+```
+收到一条消息 → 反序列化出 user、goodsId
+    查 DB 里这个商品的 stock_count
+        <= 0  → 直接丢弃这条消息，不再往下走
+    查 Redis 订单缓存，这个人是不是已经有单了
+        有    → 直接丢弃
+    都过了 → miaoshaService.miaosha(user, goods)   // 减库存 + 下单
+```
+
+两次「丢弃」都是静默的，不给用户任何反馈——用户那边靠轮询接口自己看结果。
+
+`miaosha-v1/.../rabbitmq/MQReceiver.java`：
 
 ```java
 @RabbitListener(queues = MQConfig.MIAOSHA_QUEUE)
@@ -1066,11 +1086,7 @@ spring.rabbitmq.listener.simple.acknowledge-mode=manual
 
 ### 2.10 第十步：真正扣库存 + 落库 —— 最后一道防线
 
-**发生了什么**
-
 消费者线程调用 `MiaoshaService.miaosha()`，这里才是「减库存 + 写订单」的真身，而且套了数据库事务。
-
-**对应代码在哪**
 
 `miaosha-v1/.../service/MiaoshaService.java`：
 
@@ -1148,6 +1164,7 @@ public OrderInfo createOrder(MiaoshaUser user, GoodsVo goods) {
 **为什么还要写一份 Redis 订单缓存（③）？**
 
 因为「查这个人抢到没有」这个动作，在链路里要执行 **3 次**（Controller 关卡 C、MQ 消费者、轮询接口），如果每次都查数据库，QPS 又上去了。
+
 注意 `OrderService.getMiaoshaOrderByUserIdGoodsId()` **只读 Redis，压根没查数据库**：
 
 ```java
@@ -1177,6 +1194,18 @@ try {
     result.withError(EXCEPTION.getCode(), REPEATE_MIAOSHA.getMessage());
     return result;
 }
+```
+
+脚本本身做的事是「读—判—写」三步打包：
+
+```
+key = "ip:" + 当前秒
+current = GET key（没有就当 0）
+if current + 1 > limit:   return 0        // 这一秒的额度用完了
+else:
+    INCRBY key 1
+    EXPIRE key 2                           // 两秒后自动消失，不用清理
+    return 1
 ```
 
 `miaosha-v2/miaosha-service/.../redis/redismanager/RedisLimitRateWithLUA.java`：
@@ -1227,9 +1256,11 @@ public static boolean accquire() throws IOException, URISyntaxException {
 
 **⚠️ 三个必须指出的问题**（这段代码是半成品）：
 
-1. **返回值被丢弃了**。Controller 里只写了 `RedisLimitRateWithLUA.accquire();`，没有 `if (!accquire()) return 拒绝;`。所以这个限流器**实际上什么都没拦**，只是白白多跑了一趟 Redis。
-2. **Redis 地址和密码硬编码**在类里（`new Jedis("39.107.245.253")` + `jedis.auth("youxin11")`），而且是作者当年的测试服务器，你本地跑必须改。
-3. **key 是 `"ip:" + 当前秒`，跟 IP 一点关系都没有**——它是全局的每秒 3 次，而不是每个 IP 每秒 3 次。而且每次调用都 `new Jedis(...)` 新建连接、`scriptLoad` 重新加载脚本，没有走连接池，性能反而是负优化。
+| # | 问题 | 后果 |
+| --- | --- | --- |
+| 1 | 返回值被丢弃了。Controller 里只写了 `RedisLimitRateWithLUA.accquire();`，没有 `if (!accquire()) return 拒绝;` | 这个限流器**实际上什么都没拦**，只是白白多跑了一趟 Redis |
+| 2 | Redis 地址和密码硬编码在类里（`new Jedis("39.107.245.253")` + `jedis.auth("youxin11")`），而且是作者当年的测试服务器 | 你本地跑必须改 |
+| 3 | key 是 `"ip:" + 当前秒`，跟 IP 一点关系都没有；每次调用都 `new Jedis(...)` 新建连接、`scriptLoad` 重新加载脚本，没有走连接池 | 它是全局的每秒 3 次，而不是每个 IP 每秒 3 次；性能反而是负优化 |
 
 **这不是要否定作者**——恰恰相反，`docs/redis-good.md` 里把「lua + redis 取代 nginx + lua 做分布式限流」的思路讲得很清楚，代码只是没写完。**思路值得学，代码别照抄。**
 
@@ -1237,11 +1268,17 @@ public static boolean accquire() throws IOException, URISyntaxException {
 
 ### 2.12 第十二步：轮询秒杀结果
 
-**发生了什么**
+前端每隔一小段时间问一次「我抢到了吗」，直到拿到明确答案。返回值只有三种，判定规则两行就写完：
 
-前端每隔一小段时间问一次「我抢到了吗」，直到拿到明确答案。
+```
+if Redis 订单缓存里有这个人的单:   return 订单号     // > 0，成功
+elif Redis 里有 isGoodsOver 标记:  return -1        // 失败，别再问了
+else:                              return 0         // 还在排队，过会儿再问
+```
 
-**对应代码在哪**
+注意这两个判断读的都是 Redis，一次数据库都不查。
+
+接口本身：
 
 ```java
 /**
@@ -1398,7 +1435,19 @@ sequenceDiagram
 
 ## 3. 关键代码逐行拆解
 
-我们把 `MiaoshaController.miaosha()` 这个方法**逐行**过一遍，它只有 30 行，但每一行都有讲究。
+`MiaoshaController.miaosha()` 只有 30 行，但每一行都有讲究。它的骨架就是一串「不过就返回」：
+
+```
+过不了拦截器（限流 / 未登录）  → 根本进不来这个方法
+user == null                  → SESSION_ERROR
+path 和 Redis 里的对不上       → REQUEST_ILLEGAL
+Redis 订单缓存里已有单         → REPEATE_MIAOSHA
+localOverMap 旗子是 true       → MIAO_SHA_OVER
+DECR 之后 stock < 0            → 插旗子 + MIAO_SHA_OVER
+全过了                         → 打包一条消息扔进 MQ，返回
+```
+
+**注意最后一行之前，一次数据库写都没有发生。**
 
 ```java
 @AccessLimit(seconds = 5, maxCount = 5, needLogin = true)          // ①
@@ -1498,6 +1547,8 @@ public ResultGeekQ<Integer> miaosha(Model model, MiaoshaUser user,  // ③
 ---
 
 ## 4. 数据长什么样：Redis、MySQL、MQ 里各存了啥
+
+三种存储各管一摊：MySQL 是最终真理（7 张表），Redis 是全链路的加速层（一套 key 前缀类管着），RabbitMQ 里只有一种消息。
 
 ### 4.1 MySQL：7 张表（`sql/miaosha1.sql`）
 
@@ -1742,6 +1793,8 @@ if (goods.getStockCount() > 0) {                          // 再判断
 }
 ```
 
+「查—判—改」分成三步，两个线程就能同时挤进来：
+
 ```
    时刻    线程A                        线程B                  库存实际值
    ─────────────────────────────────────────────────────────────────────
@@ -1879,6 +1932,7 @@ return ret > 0;
 ```
 
 **诚实地说**：这个项目挡得住「一个人狂刷」，挡不住「一个人开 1000 个号」。
+
 真实的电商还有：实名认证、设备指纹、行为风控模型、历史订单画像、预约制、验证码升级为滑块/点选……这些超出教学项目的范围了。
 
 ---
@@ -2069,6 +2123,8 @@ public OrderInfo miaosha(MiaoshaUser user, GoodsVoOrder goods) {
 
 ## 8. 自己跑起来需要什么
 
+要跑起来，麻烦分三块：装齐五个组件、把作者测试服务器的地址全改掉（配置文件里改了还不够，代码里还有硬编码）、手动建一个队列。真想点通整条秒杀链路，前端还得你自己补。
+
 ### 8.1 环境清单
 
 ```
@@ -2113,13 +2169,13 @@ spring.rabbitmq.password=mqadmin            ← 改
 
 **还要额外改代码里的硬编码**（这个很坑，配置文件里改了没用）：
 
-```
-   miaosha-v2/.../redis/redismanager/RedisLimitRateWithLUA.java  → new Jedis("39.107.245.253")
-   miaosha-v2/.../redis/redismanager/RedisLua.java               → jedis.auth("youxin11")
-   miaosha-v1/.../redis/redismanager/RedisLua.java               → 同上
-   miaosha-v2/miaosha-web/src/main/resources/consumer.xml        → zookeeper 地址
-   miaosha-order/.../resources/provider.xml                      → zookeeper 地址
-```
+| 文件 | 里面写死了什么 |
+| --- | --- |
+| `miaosha-v2/.../redis/redismanager/RedisLimitRateWithLUA.java` | `new Jedis("39.107.245.253")` |
+| `miaosha-v2/.../redis/redismanager/RedisLua.java` | `jedis.auth("youxin11")` |
+| `miaosha-v1/.../redis/redismanager/RedisLua.java` | 同上 |
+| `miaosha-v2/miaosha-web/src/main/resources/consumer.xml` | zookeeper 地址 |
+| `miaosha-order/.../resources/provider.xml` | zookeeper 地址 |
 
 ### 8.3 启动步骤
 

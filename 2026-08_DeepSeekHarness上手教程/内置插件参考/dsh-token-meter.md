@@ -6,16 +6,21 @@
 
 ## 它在树上长什么样
 
-`packages/bundle/base/cordis.patch.yml:281`：
+bundle 里只有两行，无 `config`、无 `inject`：
 
 ```yaml
 - id: token-meter
   name: '@deepseek-ai/dsh-token-meter'
 ```
 
-无 `config`、无 `inject`（包里没有 `static inject` / `export const inject`；`sessionProjections` 是可选子 fiber，不是硬依赖）。`web-app` 和 `headless` 都没有覆盖这一行。
+包里既没有 `static inject` 也没有 `export const inject`；`sessionProjections` 是可选子 fiber，不是硬依赖。`web-app` 和 `headless` 都没有覆盖这一行。出处：`packages/bundle/base/cordis.patch.yml:281`。
 
-它是 base 里两行的硬依赖，也是全仓库仅有的两个 `tokenMeter` 注入方：`compaction-basic`（`static inject = ['llm', 'tokenMeter', 'sessions']`，`packages/compaction/compaction-basic/src/index.ts:104`，bundle 行在 `:284`）和 `tool-result-pruner`（`static inject = ['tokenMeter']`，`packages/compaction/compaction-tool-result-pruner/src/index.ts:47`，bundle 行在 `:360`）。
+反过来，它是 base 里另外两行的硬依赖，也是全仓库仅有的两个 `tokenMeter` 注入方：
+
+| 消费者 | inject 声明 | 声明位置 | bundle 行 |
+|---|---|---|---|
+| `compaction-basic` | `['llm', 'tokenMeter', 'sessions']` | `packages/compaction/compaction-basic/src/index.ts:104` | `:284` |
+| `tool-result-pruner` | `['tokenMeter']` | `packages/compaction/compaction-tool-result-pruner/src/index.ts:47` | `:360` |
 
 这条 inject 链一旦断掉会连带两行一起失活，画出来比对照三处代码行号更直接：
 
@@ -56,13 +61,23 @@ flowchart TD
 | session projection | `contextBreakdown` | `src/breakdown-projection.ts:44` |
 | 子入口 | `@deepseek-ai/dsh-token-meter/client` | 只导出浏览器安全的 projection 类型（`src/client.ts:7`） |
 
+监听那一行值得单独看一眼，它是"懒"的：
+
+```
+on session/event:
+    if not states.has(session): return   // 没人读过的 session，一个字节都不占
+    sync(session)                        // 有状态的才跟着日志往前推
+```
+
 三个 projection 通过可选子 fiber 注册：`ctx.inject(['sessionProjections'], …)`（`src/index.ts:87`–`:91`）。没有这个注册表的组合里，计量服务本身照常工作，只是不产出 projection——README（`README.md:36`）：
 
 ```text
 A composition without the projection seam keeps the measurement service's existing behavior.
 ```
 
-卸载 token-meter 会一并移除这三个 key（同行）。服务面只有两个操作（`README.md:15`–`:16`）：
+卸载 token-meter 会一并移除这三个 key（同行）。
+
+服务面只有两个操作（`README.md:15`–`:16`）：
 
 | 方法 | 语义 |
 |---|---|
@@ -73,9 +88,21 @@ A composition without the projection seam keeps the measurement service's existi
 
 ## 配置项
 
-**无配置项**，而且是强制的：`TokenMeterConfig = Record<string, never>`（`packages/llm/token-meter/src/types.ts:12`，`docs/config-catalog.md` 里也只有这一行），构造时逐个 key 检查，任何 key 都抛 `TokenMeterConfig: unknown key "<key>" (no settings are supported)`（`src/index.ts:61`–`:65`，throw 在 `:63`）。
+**无配置项**，而且是强制的——不是"留空即可"，是给了就炸：
 
-它的行为由一条写死的启发式决定：`four characters per token plus structural overhead for roles, blocks, and request-envelope fields`（`README.md:9`）。模型容量不归它管——那属于拥有具体 provider/model 路由的 adapter，从 `ctx.llm.resolveModelInfo().context` 读（同行）。
+```
+TokenMeterConfig = Record<string, never>
+
+constructor(config):
+    for key in config:
+        throw `TokenMeterConfig: unknown key "${key}" (no settings are supported)`
+```
+
+类型在 `packages/llm/token-meter/src/types.ts:12`（`docs/config-catalog.md` 里也只有这一行），逐 key 检查在 `src/index.ts:61`–`:65`，throw 在 `:63`。
+
+它的行为由一条写死的启发式决定：`four characters per token plus structural overhead for roles, blocks, and request-envelope fields`（`README.md:9`）。
+
+模型容量不归它管——那属于拥有具体 provider/model 路由的 adapter，从 `ctx.llm.resolveModelInfo().context` 读（同行）。
 
 三个 projection 的口径值得记住（`README.md:28`–`:34`）：
 
@@ -106,9 +133,21 @@ KV cache 也没有直接影响，请求前缀的变化归那个具名消费者�
 - **固定启发式是近似的**——没有可复用 provider usage 的内容按字符数加结构开销定价，不是 provider 的真实 tokenizer 或请求序列化器。
 - **每次测量都克隆当前表面**——为了保证快照一致且不可变，读操作是 O(surface)，连"低于阈值"的压力检查也一样。
 - **provider usage 只在请求信封逐字一致时可复用**——prompt、prefix、工具、provider、model 或 call config 任一变化都刻意回退到完整启发式估算。
+
+也就是说，复用判定没有任何"差不多就算"的余地：
+
+```
+if 请求信封 与上次逐字一致（prompt / prefix / tools / provider / model / call config 全同）:
+    复用 provider 报的 usage
+else:
+    整份重新走启发式估算      // 只要有一项变了就整体回退
+```
+
 - **缺失的 legacy source seq 按保守处理**——没有 `sourceEventSeqs` 的 assistant 消息分不清 provider 输出和监听器改写，折叠时不会声称自己知道那是空流还是精确的 chunk 流。
 
-另外 README 单独用一节强调（`README.md:40`–`:42`）：占用率字段是各自独立的 last-wins 记录，**不是**对同一次请求的原子观测——切换模型时新容量会和上一条路由的样本配对，直到下一次请求报告 usage 为止。这被明确设计成"用户可见的参考数字，不是计费记录也不是门控输入"，harness 里没有任何决策读它，compaction 读的是 `measure()`。
+另外 README 单独用一节强调（`README.md:40`–`:42`）：占用率字段是各自独立的 last-wins 记录，**不是**对同一次请求的原子观测。
+
+具体的表现是，切换模型时新容量会和上一条路由的样本配对，直到下一次请求报告 usage 为止。这被明确设计成"用户可见的参考数字，不是计费记录也不是门控输入"，harness 里没有任何决策读它，compaction 读的是 `measure()`。
 
 ## 未确认
 

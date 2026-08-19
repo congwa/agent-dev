@@ -10,6 +10,8 @@ README 首段原文（`packages/core/agent/README.md:5`）：
 Every plugin (UI, hooks, orchestrators) programs against the `Agent` handle defined here — it has zero loop dependency, so the loop is swappable.
 ```
 
+这个包最容易读错的地方是它的角色：它把话全说了，事一件没干。词表在这里、拦截点在这里、注册表在这里，真正派发事件、真正跑 step 的是 agent-loop。下面几节基本都在反复确认这一条边界。
+
 ## 它在树上长什么样
 
 `packages/bundle/base/cordis.patch.yml:58`：
@@ -19,7 +21,11 @@ Every plugin (UI, hooks, orchestrators) programs against the `Agent` handle defi
   name: '@deepseek-ai/dsh-agent'
 ```
 
-无 `config`、无 `inject`（包里既没有 `static inject` 也没有 `export const inject`）——它是被别人 inject 的那一端（agent-loop 的 `static inject` 第一项就是 `agents`，`packages/core/agent-loop/src/index.ts:297`）。`web-app` 与 `headless` 两个 bundle 都没有覆盖这一行。
+无 `config`、无 `inject`——包里既没有 `static inject` 也没有 `export const inject`。
+
+它是被别人 inject 的那一端：agent-loop 的 `static inject` 第一项就是 `agents`（`packages/core/agent-loop/src/index.ts:297`）。
+
+`web-app` 与 `headless` 两个 bundle 都没有覆盖这一行。
 
 ## 它注册了什么
 
@@ -59,7 +65,40 @@ flowchart TD
 - `agent/request`：`await next()` 拿到机器本来要用的 config，返回替换值即改路由。当前唯一监听方是本包自己（`docs/event-producer-consumer.md:19`）。
 - `agent/request-error`：不调 `next()` 直接返回 `{ kind: 'retry' }` 就是接管恢复；`dsh-llm-retry` 走的是这条（`docs/event-producer-consumer.md:20`）。
 
-`agent/turn-stopping` 是 serial（`@mode serial`，`src/runtime-types.ts:276`）。README 那段以 `Most interception points are cooperative waterfalls.` 开头并把它列在同一段里（`README.md:53`），但它确实不是 waterfall：监听者反对的方式是 `agent.steer(...)`，机器重读 inbox 决定是否再走一步。源码注释原文（`src/runtime-types.ts:262`–`:266`）：
+后两条的写法差别，用示意代码看更省事：
+
+```
+// 改路由：先让机器算出它本来要用的 config，再替换
+on('agent/request', async next => {
+    const config = await next()          // 拿到默认值
+    return { ...config, model: '别的' }   // 返回值即生效值
+})
+
+// 接管恢复：根本不调 next()，直接给出裁决
+on('agent/request-error', async next => {
+    return { kind: 'retry' }             // llm-retry 走的就是这条
+})
+```
+
+`agent/turn-stopping` 是 serial（`@mode serial`，`src/runtime-types.ts:276`）。README 那段以 `Most interception points are cooperative waterfalls.` 开头并把它列在同一段里（`README.md:53`），但它确实不是 waterfall。
+
+监听者反对的方式不是返回值，而是 `agent.steer(...)`：
+
+```
+// turn 快关了：模型不欠回复（没有在跑的工具调用，没有新的 steering）
+await emit('agent/turn-stopping')        // 所有监听器跑完才提交边界
+
+// 监听器想反对，就往 inbox 里塞东西
+//     agent.steer(...)
+
+// 机器重读 inbox
+if (inbox 有新的 steering) 再走一步
+else                       关掉这个 turn
+
+// 决定权在数据，不在监听器顺序 —— 谁先跑谁后跑结果一样
+```
+
+源码注释原文（`src/runtime-types.ts:262`–`:266`）：
 
 ```text
 The turn is about to close: the model owes no response (no live tool calls, no fresh steering). Awaited before the boundary commits — a listener that objects steers (`agent.steer(...)`) and the machine re-reads its inbox: fresh steering runs another step, none closes the turn. Data decides, so listener order cannot change the outcome.
@@ -75,21 +114,29 @@ The turn is about to close: the model owes no response (no live tool calls, no f
 | 装配 | `agentEvents(ctx, agent)`、`assembleContextFor(agent)`、`installModelSelection(agentCtx, selection)`（`README.md:15`） |
 | 日志回读 | `foldConsumedWork(events)`：回答"日志消费掉的那份工作最后怎么样了"（`README.md:61`） |
 
-`AgentHandle = { agent: Agent; dispose(): Promise<void> }`，disposer 是**消费者能力**——只拿到注册表条目的旁观者拆不掉这个 agent（`README.md:45`）。
+`AgentHandle = { agent: Agent; dispose(): Promise<void> }`。
+
+disposer 是**消费者能力**——只拿到注册表条目的旁观者拆不掉这个 agent（`README.md:45`）。
 
 ## 配置项
 
-无配置项（`docs/config-catalog.md` 里没有本包条目）。它的行为完全由调用方（谁 register、谁 setFactory、谁开 initiator 边界）决定。可选伴生插件 `@deepseek-ai/dsh-agent/invariant` 监听 `agent/status` 查重复转换（`src/invariant.ts:17`–`:23`）并注册进 `ctx.invariants`（`src/invariant.ts:32`），**base bundle 没有挂它**。
+无配置项（`docs/config-catalog.md` 里没有本包条目）。它的行为完全由调用方决定：谁 register、谁 setFactory、谁开 initiator 边界。
+
+可选伴生插件 `@deepseek-ai/dsh-agent/invariant` 监听 `agent/status` 查重复转换（`src/invariant.ts:17`–`:23`）并注册进 `ctx.invariants`（`src/invariant.ts:32`），**base bundle 没有挂它**。
 
 ## 模型看得见什么
 
-README `Model Experience` 明确：`this interface contributes no fixed prose itself`（`README.md:89`）；`The package adds zero tokens itself`（`README.md:107`）。它只是把 `send`/`steer`/`inject` 的内容喂进 session；被接受的内容成为保留历史或重复的 session prefix，被拦下的内容不产生任何 request token。
+README `Model Experience` 明确两句：`this interface contributes no fixed prose itself`（`README.md:89`）、`The package adds zero tokens itself`（`README.md:107`）。
+
+它只是把 `send`/`steer`/`inject` 的内容喂进 session；被接受的内容成为保留历史或重复的 session prefix，被拦下的内容不产生任何 request token。
 
 KV Cache 方面：接受的历史与 steering 是 append-only；agent scope 内的注册（prompt 段、工具定义、request 监听器）不变时前缀稳定，setup 或 reload 改动它们则从第一个受影响的 token 起失效（`README.md:97`、`:111`）。
 
 ## 什么时候你会想换掉它 / 怎么换
 
-基本不换——它是接口层，`ctx.agents` 被一大票插件硬 inject：agent-loop（`packages/core/agent-loop/src/index.ts:297`）、llm-retry（`packages/llm/llm-retry/src/index.ts:21`）、goal（`packages/goal/goal/src/index.ts:184`）、tool-skill（`packages/skill/tool-skill/src/index.ts:25`）、acp（`packages/acp/acp/src/index.ts:44`）等。真要换循环实现，README 给的路子是（`README.md:79`）：
+基本不换——它是接口层，`ctx.agents` 被一大票插件硬 inject：agent-loop（`packages/core/agent-loop/src/index.ts:297`）、llm-retry（`packages/llm/llm-retry/src/index.ts:21`）、goal（`packages/goal/goal/src/index.ts:184`）、tool-skill（`packages/skill/tool-skill/src/index.ts:25`）、acp（`packages/acp/acp/src/index.ts:44`）等。
+
+真要换循环实现，README 给的路子是（`README.md:79`）：
 
 ```text
 Replace the loop by implementing `Agent` and registering via `ctx.agents.register()`.
@@ -109,4 +156,14 @@ Replace the loop by implementing `Agent` and registering via `ctx.agents.registe
 - **一条 `UserMessage` 只带一个 `MessageSource`**——多个插件合并到同一次工具调用上的贡献会塌缩成一个来源。
 - **`SessionStartSource` 预留了 `'clear'`/`'compact'` 但没有发射方**——当前只会出现 `'startup'`/`'resume'`。
 
-读源码补充：`agent/created` 的同步监听器抛错会**否决发布**（`src/runtime-types.ts:152`–`:154`），而返回的 Promise 拒绝只是被上报——这两种失败模式不一样，写创建期监听器时要当心。
+读源码补充一条 README 没写的：`agent/created` 的监听器有两种失败模式，长得像但后果完全不同。
+
+```
+// 同步抛错 —— 否决发布
+on('agent/created', () => { throw err })      // 这个 agent 不会被发布出去
+
+// 返回的 Promise 拒绝 —— 只被上报
+on('agent/created', async () => { throw err }) // 发布照常，错误进日志
+```
+
+出处 `src/runtime-types.ts:152`–`:154`。写创建期监听器时要当心：想拦住发布就必须同步抛，写成 `async` 拦不住。

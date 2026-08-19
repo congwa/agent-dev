@@ -1,18 +1,21 @@
 # 《Lilishop》秒杀链路全解（小白版）
 
-> **一句话简介**：Lilishop（PickMall）是一套完整的 B2B2C 多商户开源商城，"秒杀"在它里面不是一个孤零零的接口，而是一条从「平台建场次 → 商家报名 → 上架 → 展示 → 加购 → 下单 → 支付扣库存 → 超时回滚」的完整业务流水线。
->
-> - **仓库地址**：<https://github.com/lilishop/lilishop>（Gitee 镜像：<https://gitee.com/beijing_hongye_huicheng/lilishop>）
-> - **Star 数**：约 4.2k
-> - **本文分析的版本**：2026-07-31 clone 的 `master` 分支，HEAD 提交 `4e6d563a4f0fa53880dd1420ce0904fc6e29f9e9`，提交日期 2026-05-17
-> - **技术栈**：Spring Boot 3.5.6 + MyBatis-Plus 3.5.8 + MySQL 8.3 + Redis（Lettuce / Redisson）+ RocketMQ + Elasticsearch + ShardingSphere 4.0.0 + XXL-Job 2.3.0 + Spring Security + JWT
-> - **本文定位**：「电商促销体系篇」。我们不只讲「怎么扣一个库存」，而是讲**一件秒杀商品的一生**。
+Lilishop（PickMall）是一套完整的 B2B2C 多商户开源商城。"秒杀"在它里面不是一个孤零零的接口，而是一条完整的业务流水线：平台建场次 → 商家报名 → 上架 → 展示 → 加购 → 下单 → 支付扣库存 → 超时回滚。
+
+| 项 | 值 |
+|---|---|
+| 仓库地址 | <https://github.com/lilishop/lilishop> |
+| Gitee 镜像 | <https://gitee.com/beijing_hongye_huicheng/lilishop> |
+| Star 数 | 约 4.2k |
+| 本文分析的版本 | 2026-07-31 clone 的 `master` 分支，HEAD 提交 `4e6d563a4f0fa53880dd1420ce0904fc6e29f9e9`，提交日期 2026-05-17 |
+| 技术栈 | Spring Boot 3.5.6 + MyBatis-Plus 3.5.8 + MySQL 8.3 + Redis（Lettuce / Redisson）+ RocketMQ + Elasticsearch + ShardingSphere 4.0.0 + XXL-Job 2.3.0 + Spring Security + JWT |
+| 本文定位 | 「电商促销体系篇」。不只讲「怎么扣一个库存」，而是讲**一件秒杀商品的一生** |
 
 ---
 
 ## 0. 读之前：先搞懂「秒杀」到底难在哪
 
-先别急着看代码。我们先把问题说清楚，不然看代码就是看天书。
+先别急着看代码。把问题说清楚，不然看代码就是看天书。
 
 ### 0.1 秒杀 = 100 个人抢 5 张演唱会门票
 
@@ -34,7 +37,7 @@
                       └────────────────────┘
 ```
 
-100 个人同时冲过来，但货只有 5 件。系统要保证：
+100 个人同时冲过来，但货只有 5 件。系统要保证三件事：
 
 1. **最多只能卖出 5 件**（多卖了叫「超卖」，售票员要被开除）；
 2. **别把数据库搞挂**（100 个人同时查数据库还好，100 万个人就完蛋了）；
@@ -73,16 +76,20 @@
 | 数据库行锁 / 乐观锁 | 账本上写"必须库存>0才允许改" | 靠谱，但数据库扛不住高并发 |
 | Redis + Lua 原子脚本 | 给收银台递一张纸条："一口气把这几件事做完，中间不许插队" | **Lilishop 用的就是这个** |
 
-先剧透结论：**Lilishop 靠的是「Redis + Lua 脚本原子扣减」，而且扣库存的时机放在了"支付成功之后"，不是"下单的那一刻"。** 这个设计选择非常关键，后面第 5 章会专门展开讲。
+先剧透结论：**Lilishop 靠的是「Redis + Lua 脚本原子扣减」，而且扣库存的时机放在了"支付成功之后"，不是"下单的那一刻"。**
+
+这个设计选择非常关键，第 5 章会专门展开讲。
 
 ### 0.3 几个必须先认识的名词（先混个脸熟，第 9 章有完整词典）
 
-- **Redis**：收银台旁边的小白板。写字、擦字都比翻账本快 100 倍，但停电（宕机）就没了。
-- **MySQL**：仓库里那本厚厚的手写账本。准确、持久，但翻页慢。
-- **RocketMQ（消息队列）**：奶茶店的取号小票机。先给你一张号码，后厨慢慢做，不用你站在柜台前干等。
-- **Elasticsearch（ES）**：图书馆的检索卡片柜。专门用来"搜"，比在账本里一页页翻快得多。
-- **Lua 脚本**：交给 Redis 的一张纸条，上面写着"这几件事一口气做完，中间不许插队"。
-- **SKU**：具体到"颜色+尺码"的那一个最小商品单位。比如"iPhone 12 / 蓝色 / 128G"就是一个 SKU。
+| 名词 | 大白话 |
+|---|---|
+| **Redis** | 收银台旁边的小白板。写字、擦字都比翻账本快 100 倍，但停电（宕机）就没了 |
+| **MySQL** | 仓库里那本厚厚的手写账本。准确、持久，但翻页慢 |
+| **RocketMQ（消息队列）** | 奶茶店的取号小票机。先给你一张号码，后厨慢慢做，不用你站在柜台前干等 |
+| **Elasticsearch（ES）** | 图书馆的检索卡片柜。专门用来"搜"，比在账本里一页页翻快得多 |
+| **Lua 脚本** | 交给 Redis 的一张纸条，上面写着"这几件事一口气做完，中间不许插队" |
+| **SKU** | 具体到"颜色+尺码"的那一个最小商品单位。比如"iPhone 12 / 蓝色 / 128G"就是一个 SKU |
 
 ---
 
@@ -202,13 +209,19 @@ lilishop/
 └── order/CancelOrderTaskExecute.java          每分钟扫描超时未支付订单
 ```
 
-看到这里你可能已经发现一个信号：**"扣库存"的代码不在 promotion 模块里，而在 order 链路的 consumer 里。** 这正是本文要讲清楚的核心。
+看到这里你可能已经发现一个信号：**"扣库存"的代码不在 promotion 模块里，而在 order 链路的 consumer 里。**
+
+这正是本文要讲清楚的核心。
 
 ---
 
 ## 2. 【主线】一次秒杀请求，从点击到下单的完整链路
 
 ### 2.0 先看总图
+
+一句话：平台排档期 → 商家报名 → MQ 写 ES 上架 → 前台按时段展示 → 加购取秒杀价 → 结算只是"看一眼" → 下单不扣库存 → 支付成功后 Lua 原子扣减 → 失败就整单取消退款。
+
+下面四张图分别是业务视角、技术链路、时序、状态分叉，看懂任意一张就能往下读。
 
 #### 图 1：一件秒杀商品的一生（业务视角）
 
@@ -468,7 +481,7 @@ flowchart TD
     style R fill:#f8cecc
 ```
 
-下面我们一步一步拆开讲。
+下面一步一步拆开讲。
 
 ---
 
@@ -477,6 +490,16 @@ flowchart TD
 #### 发生了什么
 
 秒杀不是"商家想开就开"，而是**平台先把"档期"排好**。就像商场先定好"每周六下午 2 点是特卖时间"，然后招商家来摆摊。
+
+定时任务干的事画成伪代码就三行：
+
+```
+读系统设置 SECKILL_SETTING，拿到 hours（如 "10,14,20"）和 seckillRule
+for i in 1..PRE_CREATION:                # PRE_CREATION = 7
+    场次 = new Seckill(第 i 天, hours, rule)
+    if 这个时间段还没有同类型活动:        # PromotionTools.checkActiveTime 查重
+        savePromotions(场次)              # 写 li_seckill
+```
 
 #### 对应代码在哪
 
@@ -561,7 +584,9 @@ public void addSeckill() {
 }
 ```
 
-但 `SeckillServiceImpl.init()` 实际循环的是 `PRE_CREATION`，也就是 **7 天**，不是 30 天。另外这个 `init()` 方法开头会 `this.remove(new QueryWrapper<>())` —— **把所有秒杀活动清空**，属于"演示数据重置"用途，生产环境千万别点。
+但 `SeckillServiceImpl.init()` 实际循环的是 `PRE_CREATION`，也就是 **7 天**，不是 30 天。
+
+更要命的是，这个 `init()` 方法开头会 `this.remove(new QueryWrapper<>())` —— **把所有秒杀活动清空**。它属于"演示数据重置"用途，生产环境千万别点。
 
 #### 场次数据长什么样
 
@@ -623,6 +648,20 @@ public ResultMessage<String> addSeckillApply(@PathVariable String seckillId,
 核心逻辑：`framework/.../promotion/serviceimpl/SeckillApplyServiceImpl.java` 的 `addSeckillApply()`。
 
 #### 报名要过的四道关
+
+先看整体形状，注意第二道关是 `continue`，不是抛异常：
+
+```
+checkSeckillApplyList(hours, 报名单列表)      # 关卡① 整批一起校验，任一条不合格 → 整批失败
+for 每条报名单:
+    goodsSku = 查 SKU
+    if goodsSku.storeId != 当前店铺:  continue      # 关卡② 静默跳过，不报错
+    checkSeckillGoodsSku(...)                       # 关卡③ 库存/活动冲突
+    getCanPromotionGoodsSkuByIdFromCache(skuId)     # 关卡④ 批发商品不能参加促销
+    落库 li_seckill_apply + li_promotion_goods
+```
+
+画成关卡图：
 
 ```
                     商家提交报名单
@@ -752,7 +791,16 @@ public ResultMessage<IPage<SeckillApply>> getSeckillApply(SeckillSearchParams pa
 public ResultMessage<String> deleteSeckillApply(@PathVariable String seckillId, @PathVariable String id) { ... }
 ```
 
-**结论：Lilishop 的秒杀报名是"报了即通过"，平台只能事后"看"和"删"，没有"审核通过 / 驳回"的接口。`REFUSE` 和 `failReason` 这两个字段在整个仓库里没有任何一处赋值。**
+摊开成一张对照表：
+
+| 本该有的东西 | 仓库里的实际情况 |
+|---|---|
+| 报名后置为 `APPLY` 待审 | 直接写死 `PASS` |
+| 平台"审核通过 / 驳回"接口 | 没有，只有"看列表"和"删报名" |
+| `REFUSE` 状态 | 全仓库无任何一处赋值 |
+| `failReason` 驳回原因 | 全仓库无任何一处赋值 |
+
+**结论：Lilishop 的秒杀报名是"报了即通过"，平台只能事后"看"和"删"。**
 
 全仓库搜索 `PromotionsApplyStatusEnum.REFUSE`，只在单元测试 `manager-api/src/test/java/cn/lili/test/promotion/SeckillTest.java` 里出现过 `APPLY` 的赋值（而且那个赋值也会被 service 覆盖成 PASS）。
 
@@ -906,7 +954,7 @@ if (goodsIndex != null && (PromotionTypeEnum.SECKILL.name().equals(promotionGood
 
 #### 缓存预热做了吗？
 
-这是个好问题，答案是"做了一半"：
+做了一半：
 
 | 数据 | 是否预热 | 在哪 |
 |---|---|---|
@@ -915,7 +963,18 @@ if (goodsIndex != null && (PromotionTypeEnum.SECKILL.name().equals(promotionGood
 | 秒杀活动 + 秒杀价（ES） | ✅ 报名时通过 MQ 异步写入 | 见上文 |
 | 前台时间轴（Redis） | ❌ 没有缓存 | 每次请求直接查 MySQL，详见 2.5 |
 
-秒杀库存的"懒加载"在 `PromotionGoodsServiceImpl.getPromotionGoodsStock()`：
+秒杀库存的"懒加载"逻辑，三句话就能背下来：
+
+```
+v = redis.get(促销库存key)
+if v 存在:            return v
+promotionGoods = 查 li_promotion_goods(活动类型, 活动id, skuId)
+if promotionGoods 为空:  return 0      # 注意：返回 0，不是报错
+redis.set(促销库存key, promotionGoods.quantity)
+return promotionGoods.quantity
+```
+
+实现在 `PromotionGoodsServiceImpl.getPromotionGoodsStock()`：
 
 ```java
 @Override
@@ -962,7 +1021,9 @@ if (!seckillApplies.isEmpty()) {
 }
 ```
 
-`setSeckillApplyTime()` 每次都在修改**同一个** `seckill` 对象的 `startTime/endTime`，循环结束后只剩最后一条报名单的时段。好在下游 `updateEsGoodsIndexByList()` 对 `Seckill` 类型做了兜底 —— 它会用每条 `PromotionGoods` 自己的 `startTime/endTime` 覆盖回去，所以最终结果是对的。但这段代码读起来确实很绕。
+`setSeckillApplyTime()` 每次都在修改**同一个** `seckill` 对象的 `startTime/endTime`，循环结束后只剩最后一条报名单的时段。
+
+好在下游 `updateEsGoodsIndexByList()` 对 `Seckill` 类型做了兜底 —— 它会用每条 `PromotionGoods` 自己的 `startTime/endTime` 覆盖回去，所以最终结果是对的。但这段代码读起来确实很绕。
 
 ---
 
@@ -1014,7 +1075,19 @@ public class SeckillBuyerController {
 }
 ```
 
-真正干活的是 `SeckillApplyServiceImpl.getSeckillTimelineInfo()`：
+真正干活的是 `SeckillApplyServiceImpl.getSeckillTimelineInfo()`，它的骨架是"两层循环 + 一个筛选条件"：
+
+```
+查当天的 li_seckill 列表
+for 每个场次 seckill:
+    hour = 系统当前小时
+    hoursSored = seckill.hours 拆开并排序      # 如 [10,14,20]
+    for i in 0..len(hoursSored)-1:
+        if 该时段该展示(i, hour):               # 判断规则见下方
+            倒计时 = max(该时段时间戳 - 当前时间戳, 0)
+            该时段.商品列表 = wrapperSeckillGoods(hoursSored[i], seckill.id)
+            加入结果
+```
 
 ```java
 private List<SeckillTimelineVO> getSeckillTimelineInfo() {
@@ -1122,21 +1195,30 @@ private List<SeckillGoodsVO> wrapperSeckillGoods(Integer startTimeline, String s
 
 #### 这里必须如实指出的三点
 
-1. **前台时间轴接口完全没有缓存。** 方法开头有一句注释 `//秒杀活动缓存key`，但下面并没有任何 `cache.get / cache.put`。每一次买家刷新秒杀页，都会：
-   - 查一次 `li_seckill` 表；
-   - 对每个场次的每个时段，再查一次全量的 `li_seckill_apply` 表（`wrapperSeckillGoods` 里是 `eq(seckillId)` 不带时段条件，捞出来再用 Java Stream 过滤）；
-   - 再对每个 SKU 走一次 `goodsSkuService.getCanPromotionGoodsSkuByIdFromCache`（这个走 Redis）。
+**1. 前台时间轴接口完全没有缓存。**
 
-   如果一场秒杀有 3 个时段、每个时段 50 个商品，那么**一次页面刷新会打 3 次全表扫描 + 150 次 Redis 查询**。高并发下这是最先倒下的地方。
+方法开头有一句注释 `//秒杀活动缓存key`，但下面并没有任何 `cache.get / cache.put`。每一次买家刷新秒杀页，都要付出这么多次查询：
 
-2. **`SeckillGoodsVO` 里的 `quantity` 是"报名总量"，不是"实时剩余"。** 它由 `BeanUtil.copyProperties(seckillApply, goodsVO)` 从 `li_seckill_apply.quantity` 拷来。实时剩余要靠 `quantity - salesNum` 算，而 `salesNum` 只有在**订单支付成功、库存同步回 MySQL** 的时候才更新（见 2.9）。所以前台看到的"已抢 X 件"是有延迟的。
+| 动作 | 查什么 | 次数 |
+|---|---|---|
+| 查场次 | `li_seckill` 表 | 1 次 |
+| 查报名单 | `li_seckill_apply` 表（`wrapperSeckillGoods` 里是 `eq(seckillId)` 不带时段条件，捞出来再用 Java Stream 过滤） | 每个场次的每个时段各 1 次全量查询 |
+| 查 SKU | `goodsSkuService.getCanPromotionGoodsSkuByIdFromCache`（走 Redis） | 每个 SKU 1 次 |
 
-3. **有一个缓存前缀 `CachePrefix.STORE_ID_SECKILL` 定义了，但全仓库只有"删除"没有"写入"**：
-   ```java
-   // SeckillApplyServiceImpl.addSeckillApply() 结尾
-   cache.vagueDel(CachePrefix.STORE_ID_SECKILL);
-   ```
-   搜遍整个仓库，`STORE_ID_SECKILL` 只出现在 `CachePrefix.java` 的定义处和上面这一行删除处。这是历史遗留的死代码。
+如果一场秒杀有 3 个时段、每个时段 50 个商品，那么**一次页面刷新会打 3 次全表扫描 + 150 次 Redis 查询**。高并发下这是最先倒下的地方。
+
+**2. `SeckillGoodsVO` 里的 `quantity` 是"报名总量"，不是"实时剩余"。**
+
+它由 `BeanUtil.copyProperties(seckillApply, goodsVO)` 从 `li_seckill_apply.quantity` 拷来。实时剩余要靠 `quantity - salesNum` 算，而 `salesNum` 只有在**订单支付成功、库存同步回 MySQL** 的时候才更新（见 2.9）。所以前台看到的"已抢 X 件"是有延迟的。
+
+**3. 有一个缓存前缀 `CachePrefix.STORE_ID_SECKILL` 定义了，但全仓库只有"删除"没有"写入"。**
+
+```java
+// SeckillApplyServiceImpl.addSeckillApply() 结尾
+cache.vagueDel(CachePrefix.STORE_ID_SECKILL);
+```
+
+搜遍整个仓库，`STORE_ID_SECKILL` 只出现在 `CachePrefix.java` 的定义处和上面这一行删除处。这是历史遗留的死代码。
 
 ---
 
@@ -1145,6 +1227,19 @@ private List<SeckillGoodsVO> wrapperSeckillGoods(Integer startTimeline, String s
 #### 发生了什么
 
 买家点"立即购买"，系统要回答一个关键问题：**这个商品现在到底卖多少钱？**
+
+答案分两步取：ES 告诉你"有没有秒杀"，MySQL 告诉你"秒杀价是多少"。
+
+```
+promotionMap = ES 索引里这个 sku 的促销集合
+if promotionMap 为空:
+    sku.promotionFlag = false; sku.promotionPrice = null; return null
+if 有任意 key 含 "SECKILL" 或 "PINTUAN":
+    取第一条命中的促销 → 查 li_promotion_goods(skuId, promotionId)
+    if 查到且 price 非空: sku.promotionFlag = true;  sku.promotionPrice = 促销价
+    else:                 sku.promotionFlag = false; sku.promotionPrice = null
+return promotionMap
+```
 
 #### 对应代码在哪
 
@@ -1248,8 +1343,10 @@ private void setGoodsPromotionInfo(GoodsSku dataSku, Map.Entry<String, Object> p
 
 #### 为什么秒杀价要在 ES 和 MySQL 各存一份
 
-- ES 里存的是"**有没有**促销"这个事实（带时间范围），用于搜索列表页快速打标签、排序、过滤；
-- MySQL `li_promotion_goods` 存的是"**多少钱、多少库存**"这些必须准确的数字。
+| 存储 | 存的是 | 用途 |
+|---|---|---|
+| ES | "**有没有**促销"这个事实（带时间范围） | 搜索列表页快速打标签、排序、过滤 |
+| MySQL `li_promotion_goods` | "**多少钱、多少库存**"这些必须准确的数字 | 加购/结算时取真实价格与库存 |
 
 > 小白比喻：ES 是"商场入口的活动海报"（告诉你哪家店在搞活动），MySQL 是"店里那张真实的价签"（告诉你到底多少钱）。海报可以晚一点更新，价签必须准。
 
@@ -1268,7 +1365,9 @@ public enum CartTypeEnum {
 }
 ```
 
-**没有 `SECKILL`。** 秒杀商品走的就是普通的 `CART` 或 `BUY_NOW` 通道，只是价格被促销信息覆盖了。同理 `OrderPromotionTypeEnum` 里也只有 `NORMAL / GIFT / PINTUAN / POINTS / KANJIA`，**秒杀订单在订单表上就是一个 NORMAL 普通订单**，秒杀的痕迹只留在子订单 `li_order_item` 的两个字段上：
+**没有 `SECKILL`。** 秒杀商品走的就是普通的 `CART` 或 `BUY_NOW` 通道，只是价格被促销信息覆盖了。
+
+同理 `OrderPromotionTypeEnum` 里也只有 `NORMAL / GIFT / PINTUAN / POINTS / KANJIA`，**秒杀订单在订单表上就是一个 NORMAL 普通订单**，秒杀的痕迹只留在子订单 `li_order_item` 的两个字段上：
 
 ```java
 // OrderItem 构造函数
@@ -1345,6 +1444,8 @@ private void renderCartBySteps(TradeDTO tradeDTO, RenderStepEnums[] defaultRende
 }
 ```
 
+注意异常处理的分岔：`ServiceException` 会往外抛（中断整个结算），其它异常只写一条 error 日志、继续跑下一步。
+
 画成流水线图：
 
 ```
@@ -1388,6 +1489,16 @@ private void renderCartBySteps(TradeDTO tradeDTO, RenderStepEnums[] defaultRende
 ```
 
 #### 秒杀库存校验的具体代码
+
+第 ③ 步的核心判断，写成伪代码只有五行：
+
+```
+for 每个勾选的 sku:
+  for 它参加的每个促销:
+      qty = redis.get({SKU_STOCK}_<促销类型>_<活动id>_<skuId>)
+      if qty 为空:      qty = 按促销类型回源查库存（SECKILL/PINTUAN 走懒加载，KANJIA/POINTS_GOODS 各查各的，其它类型直接 return）
+      if 要买的数量 > qty:  该行 checked = false，errorMessage = "促销商品库存不足,现有库存数量[qty]"
+```
 
 `framework/.../order/cart/render/impl/SkuPromotionRender.java`：
 
@@ -1464,7 +1575,9 @@ private void checkPromotionGoodsQuantity(CartSkuVO cartSkuVO, PromotionSkuVO pro
 
 这意味着：**1000 个人同时看到"还剩 5 件"，1000 个人都能顺利下单。** 真正的淘汰发生在支付那一刻。这个设计的利弊，第 5 章和第 7 章会详细分析。
 
-还有一个细节值得注意：库存不足时它 **不抛异常**，只是 `setChecked(false)` + 写一条 `errorMessage`。也就是说，在结算页上这个商品会自动变成"未勾选"状态，用户会看到红字提示，但整个页面还能正常打开。
+还有一个细节值得注意：库存不足时它 **不抛异常**，只是 `setChecked(false)` + 写一条 `errorMessage`。
+
+也就是说，在结算页上这个商品会自动变成"未勾选"状态，用户会看到红字提示，但整个页面还能正常打开。
 
 ---
 
@@ -1586,7 +1699,13 @@ public @interface PreventDuplicateSubmissions {
 }
 ```
 
-拦截器 `PreventDuplicateSubmissionsInterceptor.getParams()` 的逻辑是：
+拦截器 `PreventDuplicateSubmissionsInterceptor.getParams()` 拼 key 的规则是这样的：
+
+```
+key = 请求 URI
+if 有 query 参数:   key += JSON(parameterMap)
+if userIsolation:  key += 当前用户 id        # 默认 false，这一段不会执行
+```
 
 ```java
 private String getParams(Boolean userIsolation) {
@@ -1605,13 +1724,21 @@ private String getParams(Boolean userIsolation) {
 }
 ```
 
-`crateTrade()` 上写的是**不带参数**的 `@PreventDuplicateSubmissions`，也就是 `userIsolation = false`。而下单请求的参数在 **Request Body**（`@RequestBody TradeParams`）里，不在 `parameterMap` 里。所以生成的 Redis key 就是固定的一个字符串：
+三个事实凑在一起，结果就变味了：
+
+| 事实 | 后果 |
+|---|---|
+| `crateTrade()` 上写的是**不带参数**的 `@PreventDuplicateSubmissions` | `userIsolation = false`，key 里不含用户 id |
+| 下单请求的参数在 **Request Body**（`@RequestBody TradeParams`）里，不在 `parameterMap` 里 | key 里也不含任何业务参数 |
+| `cache.incr(redisKey, 3)`：第一次 `getAndIncrement()` 返回 0 放行，之后返回 ≥1 就拒绝，3 秒后 key 过期 | 同一个 key 三秒内只放行一次 |
+
+于是生成的 Redis key 就是固定的一个字符串：
 
 ```
 "/buyer/cart/create/trade"
 ```
 
-配合 `cache.incr(redisKey, 3)` 的语义（第一次 `getAndIncrement()` 返回 0 放行，之后返回 ≥1 就拒绝，3 秒后 key 过期），**这个注解在当前写法下会变成"全站 3 秒内只允许创建一笔订单"**，而不是"每个用户 3 秒一次"。
+**这个注解在当前写法下会变成"全站 3 秒内只允许创建一笔订单"**，而不是"每个用户 3 秒一次"。
 
 秒杀场景下这反而"意外地"起到了极强的限流作用，但显然不是设计本意 —— 正常做法应该写成 `@PreventDuplicateSubmissions(userIsolation = true)`。这是阅读源码时必须注意的地方。
 
@@ -1670,6 +1797,21 @@ public void payOrder(String orderSn, String paymentMethod, String receivableNo) 
 
 #### 扣库存的主流程
 
+PAID 分支干的事，抽象成六步：
+
+```
+order = 查订单详情
+keys, values = [], []
+for 每个子订单 orderItem:
+    keys.push(普通库存key(skuId));  values.push(-数量)
+    setPromotionStock(...)                 # 有促销库存的活动再追加一对
+stocks = redis.mget(keys)
+checkStocks(stocks, order)                 # 缓存缺失就补一遍，防击穿
+ok = redis.eval(quantity.lua, keys, values)
+if ok:  afterOrderConfirm(sn); synchroDB(order)      # 回写 MySQL
+else:   errorOrder(sn)                                # 取消订单并退款
+```
+
 `consumer/src/main/java/cn/lili/event/impl/StockUpdateExecute.java`：
 
 ```java
@@ -1719,7 +1861,15 @@ public void orderChange(OrderMessage orderMessage) {
 
 #### 秒杀库存 key 是怎么拼出来的
 
-`setPromotionStock()` 负责把促销库存 key 也加进去：
+`setPromotionStock()` 负责把促销库存 key 也加进去。它的规则是"按下标一一对应"：
+
+```
+promotionType 和 promotionId 都是逗号分隔的字符串，按位置配对
+for i, 类型 in enumerate(promotionType.split(",")):
+    if 类型 in haveStockPromotion:                  # PINTUAN/SECKILL/KANJIA/POINTS_GOODS
+        keys.push(促销库存key(类型, promotionId.split(",")[i], skuId))
+        values.push(deduction ? -数量 : +数量)      # 同一个方法既管扣也管还
+```
 
 ```java
 private void setPromotionStock(List<String> keys, List<String> values, OrderItem sku, boolean deduction) {
@@ -1943,7 +2093,13 @@ public void systemCancel(String orderSn, String reason, Boolean refundMoney) {
 }
 ```
 
-因为 `refundMoney = true`，会再发一条 MQ（`CANCELLED`）。但注意 `StockUpdateExecute` 的 `CANCELLED` 分支有个精妙的判断：
+因为 `refundMoney = true`，会再发一条 MQ（`CANCELLED`）。但 `StockUpdateExecute` 的 `CANCELLED` 分支有个精妙的判断：
+
+```
+if 订单已支付 且 取消原因 != "库存不足，出库失败":
+        回滚库存
+else:   什么都不做
+```
 
 ```java
 case CANCELLED: {
@@ -2047,7 +2203,25 @@ Boolean skuResult = stringRedisTemplate.execute(quantityScript, keys, values.toA
 
 ### 3.1 `quantity.lua` —— 防超卖的心脏
 
-文件位置：`framework/src/main/resources/script/quantity.lua`。全文只有 62 行，我们逐段读。
+文件位置：`framework/src/main/resources/script/quantity.lua`。全文只有 62 行。
+
+整段脚本干的事，用伪代码写出来是这样：
+
+```
+已改过的 = []                       # id_list / quantity_list 两条平行数组
+for i, 变更量 in enumerate(ARGV):
+    key = KEYS[i]
+    v = get(key) or 0               # 拿不到值当 0
+    v = v + 变更量                   # 扣减时变更量是负数
+    if v < 0:                       # 不够扣 → 整体失败
+        把 已改过的 逐条原路加回去
+        return false
+    set(key, v)
+    已改过的.append((key, 变更量))
+return true
+```
+
+下面逐段对照真实源码。
 
 ```lua
 -- 可能回滚的列表，一个记录要回滚的skuid一个记录库存
@@ -2222,8 +2396,10 @@ public RedisTemplate<Object, Object> redisTemplate(LettuceConnectionFactory lett
 }
 ```
 
-- **key 用 `StringRedisSerializer`** → 和 `StringRedisTemplate` 完全一致，key 能对上；
-- **value 用 FastJSON** → 一个 `Integer 5` 序列化后就是字符串 `5`（数字类型 JSON 不带引号），Lua 的 `get` 拿到 `"5"` 能直接参与算术运算。
+| 部位 | 序列化方式 | 为什么能对上 |
+|---|---|---|
+| key | `StringRedisSerializer` | 和 `StringRedisTemplate` 完全一致，key 能对上 |
+| value | FastJSON | 一个 `Integer 5` 序列化后就是字符串 `5`（数字类型 JSON 不带引号），Lua 的 `get` 拿到 `"5"` 能直接参与算术运算 |
 
 所以能对上，但这是**踩着边界过的**：一旦有人把库存值存成别的类型（比如 `Long` 也没问题，但如果存成了带引号的字符串就会出问题），脚本就会炸。属于"能跑但脆弱"的设计。
 
@@ -2359,7 +2535,9 @@ public class PromotionTimeTriggerExecutor implements TimeTriggerExecutor {
 }
 ```
 
-**它只处理拼团。秒杀没有走延时队列。** 秒杀活动的"开始"和"结束"，完全靠 3.5 节讲的"时间比较"实现，外加每天一次的 `PromotionEverydayExecute` 清理 ES 里过期的促销信息：
+**它只处理拼团。秒杀没有走延时队列。**
+
+秒杀活动的"开始"和"结束"，完全靠 3.5 节讲的"时间比较"实现，外加每天一次的 `PromotionEverydayExecute` 清理 ES 里过期的促销信息：
 
 ```java
 //清除所有商品索引的无效促销活动
@@ -2520,6 +2698,8 @@ switch (PromotionTypeEnum.valueOf(promotionGoods.getPromotionType())) {
 
 ### 5.2 完整的防线示意图
 
+六道防线里，只有防线 0 和防线 4 是硬的，其余四道全是软的。
+
 ```
 ════════════════════════════════════════════════════════════════════════
                        Lilishop 的库存防线
@@ -2637,7 +2817,9 @@ Lilishop 选了 B。把它的实际效果画出来：
 
 好消息是：由于 `synchroDB()` 在每一单支付成功后都会把 Redis 的最新值写回 MySQL，MySQL 里的 `quantity` 基本是准的，Redis 丢了能自愈。
 
-坏消息是：`StockUpdateExecute.orderChange()` 上标了 `@Transactional`，但 **Redis 的操作是不受数据库事务保护的**。如果 Lua 扣减成功了、但后面的 `synchroDB()` 抛异常导致事务回滚，Redis 里的库存已经减掉、MySQL 却没更新 —— 这时候会少卖（不会超卖）。项目里没有专门的库存对账定时任务来修正这种偏差。
+坏消息是：`StockUpdateExecute.orderChange()` 上标了 `@Transactional`，但 **Redis 的操作是不受数据库事务保护的**。
+
+如果 Lua 扣减成功了、但后面的 `synchroDB()` 抛异常导致事务回滚，Redis 里的库存已经减掉、MySQL 却没更新 —— 这时候会少卖（不会超卖）。项目里没有专门的库存对账定时任务来修正这种偏差。
 
 ---
 
@@ -2718,7 +2900,9 @@ if (tradeDTO.getSkuList().get(0).getPromotionMap() != null && ...) {
 }
 ```
 
-**结论：一个用户可以把 50 件秒杀商品全部买走，系统不会拦。** 想加限购，需要自己在 `SkuPromotionRender` 或 `CheckDataRender` 里加一段"查这个用户在这个活动下已下单数量"的逻辑。
+**结论：一个用户可以把 50 件秒杀商品全部买走，系统不会拦。**
+
+想加限购，需要自己在 `SkuPromotionRender` 或 `CheckDataRender` 里加一段"查这个用户在这个活动下已下单数量"的逻辑。
 
 ### 6.3 没有的东西清单（诚实版）
 
@@ -2747,7 +2931,9 @@ if (order.getPayStatus().equals(PayStatusEnum.PAID.name())) {
 }
 ```
 
-这一条很重要 —— 它保证了同一个订单不会触发两次 `STATUS_CHANGE(PAID)` 消息，也就不会被扣两次库存。但要注意：**RocketMQ 本身可能重复投递消息**，而 `StockUpdateExecute.orderChange()` 里**没有幂等判断**（比如"这个订单是不是已经扣过库存了"）。如果 MQ 重投，理论上会重复扣减。这是一个值得关注的隐患。
+这一条很重要 —— 它保证了同一个订单不会触发两次 `STATUS_CHANGE(PAID)` 消息，也就不会被扣两次库存。
+
+但要注意：**RocketMQ 本身可能重复投递消息**，而 `StockUpdateExecute.orderChange()` 里**没有幂等判断**（比如"这个订单是不是已经扣过库存了"）。如果 MQ 重投，理论上会重复扣减。这是一个值得关注的隐患。
 
 ---
 
@@ -2947,10 +3133,12 @@ README 里推荐用官方提供的 `docker-compose` 一键把 MySQL / Redis / ES
 
 ### 8.4 调试小技巧
 
-- **日志关键字**：`库存扣减成功` / `库存扣件失败`（原文就是错别字）/ `订单确认，库存同步` / `更新商品索引促销信息`。
-- **Redis 查 key**：`KEYS "{SKU_STOCK}*"`（生产环境别用 KEYS，用 SCAN）。
-- **秒杀价没生效？** 99% 是 ES 索引没更新。检查 consumer 是否启动、`goods-topic` 配置是否一致、ES 里的 `promotionMapJson` 有没有 SECKILL。
-- **时间轴是空的？** 检查 `li_seckill` 里当天那条记录的 `start_time` 是不是在今天之内、`end_time` 是不是 >= 今天 23:59:59（`getSeckillTimelineInfo` 的查询条件很严格）。
+| 场景 | 怎么查 |
+|---|---|
+| 想看扣库存有没有跑 | 日志关键字：`库存扣减成功` / `库存扣件失败`（原文就是错别字）/ `订单确认，库存同步` / `更新商品索引促销信息` |
+| 想看 Redis 里的库存 key | `KEYS "{SKU_STOCK}*"`（生产环境别用 KEYS，用 SCAN） |
+| 秒杀价没生效 | 99% 是 ES 索引没更新。检查 consumer 是否启动、`goods-topic` 配置是否一致、ES 里的 `promotionMapJson` 有没有 SECKILL |
+| 时间轴是空的 | 检查 `li_seckill` 里当天那条记录的 `start_time` 是不是在今天之内、`end_time` 是不是 >= 今天 23:59:59（`getSeckillTimelineInfo` 的查询条件很严格） |
 
 ---
 

@@ -6,8 +6,6 @@
 
 ## 它在树上长什么样
 
-`packages/bundle/web-app/cordis.patch.yml:76`：
-
 ```yaml
 - id: session-projection-cache
   name: '@deepseek-ai/dsh-session-projection-cache'
@@ -16,7 +14,11 @@
     writeIntervalMs: 5000
 ```
 
-**只在 web-app bundle 里**，base 和 headless 都没有这一行。两个字段都**必填无默认**（`src/index.ts:49`–`52` 里两个 `.required()`）：刷写节奏是部署选择，没有普适正确值，所以由组合层显式写出（`packages/session/session-projection-cache/README.md:26`）。
+出处 `packages/bundle/web-app/cordis.patch.yml:76`。
+
+注意这行**只在 web-app bundle 里**，base 和 headless 都没有。
+
+还有一处反直觉的：两个字段都**必填无默认**（`src/index.ts:49`–`52` 里两个 `.required()`）。理由是刷写节奏属于部署选择，没有普适正确值，所以强制由组合层显式写出来（`packages/session/session-projection-cache/README.md:26`）。
 
 ## 它注册了什么
 
@@ -36,9 +38,30 @@
 | `writeEveryEvents` | `number`（自然数，≥1） | 无默认，web-app 给 `200` | 两个强制写点之间，每会话提交多少条事件就强制一次耐久检查点 |
 | `writeIntervalMs` | `number`（自然数，≥1） | 无默认，web-app 给 `5000` | 一个脏检查点最长能不写多久（毫秒） |
 
-写策略共四个触发点（`README.md:19`–`24`）：`turn/end`（强制，冷读最想要的就是回合终值）、会话摘离（强制）、计数阈值（可配节流）、间隔阈值（可配节流）。前两个是**策略不是旋钮**，永远会触发。
+写策略一共四个触发点（`README.md:19`–`24`），关键区别是前两个**是策略不是旋钮**，永远会触发：
 
-四个触发点收拢到同一次写盘动作：
+| 触发点 | 性质 | 为什么 |
+|---|---|---|
+| `turn/end` | 强制，不可关 | 冷读最想要的就是回合终值 |
+| 会话摘离 | 强制，不可关 | live→cold 的那一刻 |
+| 计数阈值 | 可配节流 | `writeEveryEvents` |
+| 间隔阈值 | 可配节流 | `writeIntervalMs` |
+
+`session/event` 那条监听里的取舍写成伪代码是这样：
+
+```
+on session/event(e):
+    if e is turn/end:
+        写盘()                       // 强制，配置管不着
+        return
+    脏计数 += 1
+    if 脏计数 >= writeEveryEvents:
+        写盘()                       // 撞阈值，立即写
+    else:
+        起一个定时器(writeIntervalMs)  // 兜底，最长不写这么久
+```
+
+四个触发点最后都收拢到同一次写盘动作：
 
 ```mermaid
 flowchart TD
@@ -67,19 +90,61 @@ flowchart TD
 
 ## 四条不可动摇的性质
 
-- **一行缓存是折叠捷径，永远不是权威**：可能陈旧（`seq` 精确说明陈旧多少），但绝不会错（`README.md:7`）。
-- **`ver` 与活单元的 `stateVersion` 不匹配就丢弃、绝不迁移**，该 key 从日志重折（`README.md:10`）。
-- **日志领先，缓存跟随**：`write()` 先取注册表切面，再 `ctx.sessions.flush(session)`，最后才落缓存行（`src/index.ts:141`–`151`）。所以崩溃可能让缓存落后于日志（多重放一段尾巴），但绝不会领先（凭空折出没有日志支撑的值）。
-- **记录绑定日志生命周期而非仅 id**：每条记录存下它折自的 header 身份（`createdAt`、`cwd`），读时校验；删了又重建的同名 id、或在缓存存活期间被换掉的持久化 store，都会让整条记录被丢弃（`src/spec.ts:30`–`42`、`src/index.ts:291`–`298`）。
+**一行缓存是折叠捷径，永远不是权威。** 它可能陈旧——`seq` 会精确说明陈旧了多少——但绝不会错（`README.md:7`）。
 
-所有后台写都是 fail-soft：失败只打一条 warning、缓存保持陈旧，下一次写或冷读自愈（`src/index.ts:246`–`252`）。
+**`ver` 与活单元的 `stateVersion` 不匹配就丢弃、绝不迁移**，该 key 从日志重折（`README.md:10`）。
+
+**日志领先，缓存跟随。** `write()` 的顺序是先取注册表切面，再 `ctx.sessions.flush(session)`，最后才落缓存行：
+
+```
+write():
+    切面 = 取注册表切面()
+    ctx.sessions.flush(session)   // 日志先落地
+    落缓存行(切面)                 // 缓存才跟上
+```
+
+所以崩溃可能让缓存落后于日志（代价是多重放一段尾巴），但绝不会领先（凭空折出没有日志支撑的值）。实现在 `src/index.ts:141`–`151`。
+
+**记录绑定日志生命周期，而非仅绑 id。** 每条记录会存下它折自的 header 身份（`createdAt`、`cwd`），读的时候校验。于是删了又重建的同名 id、或者在缓存存活期间被换掉的持久化 store，都会让整条记录被丢弃（`src/spec.ts:30`–`42`、`src/index.ts:291`–`298`）。
+
+另外，所有后台写都是 fail-soft：失败只打一条 warning、缓存保持陈旧，下一次写或冷读自愈（`src/index.ts:246`–`252`）。
 
 ## 两条读路径
 
-- `cachedSnapshot(meta)`（`src/index.ts:119`）——**零 I/O 那一级**：直接从身份匹配的记录里 view 出整值（只取版本匹配的 key），`asOfSeq` 取所供给行里**最低**的水位（`src/index.ts:128`），这样客户端按 higher-seq-wins 播种时，陈旧的列表块永远盖不掉更新的 push 帧。没有可用记录就返回 `undefined`。
-- `coldSnapshot(id, signal?)`（`src/index.ts:166`）——冷读梯子，顺路是零全量日志加载：缓存行 → `sessionProjections.restoreFloor` → 持久化 `readFrom(id, floor)` → `sessionProjections.restore` → fail-soft 写回。地板锚在最低可用水位下方一条（`packages/session/session-projection/src/index.ts:309`），使得"日志被崩溃修复截短"变得可证：越界的行会触发**恰好一次**从 seq 0 的全量重读，而不是供出幽灵值（`src/index.ts:184`–`194`）。没有持久化日志的会话按 seam 的 `not found` 拒绝。
+一条零 I/O，一条走完整梯子。
 
-两条路径一个零 I/O、一个走完整的冷读梯子，并排看更清楚谁快谁慢：
+**`cachedSnapshot(meta)`——零 I/O 那一级。** 直接从身份匹配的记录里 view 出整值，只取版本匹配的 key。没有可用记录就返回 `undefined`。
+
+这里唯一需要停下来想的是 `asOfSeq` 的取法：
+
+```
+asOfSeq = min(所供给的每一行的水位)   // 取最低，不是最高
+```
+
+取最低是为了让客户端按 higher-seq-wins 播种时，陈旧的列表块永远盖不掉更新的 push 帧。函数在 `src/index.ts:119`，`asOfSeq` 那步在 `:128`。
+
+**`coldSnapshot(id, signal?)`——冷读梯子**，顺路的好处是零全量日志加载。梯子五级：
+
+```
+缓存行
+  → sessionProjections.restoreFloor
+  → 持久化 readFrom(id, floor)
+  → sessionProjections.restore
+  → fail-soft 写回
+```
+
+地板锚在最低可用水位**下方一条**（`packages/session/session-projection/src/index.ts:309`）。这一条之差是有意的，它让"日志被崩溃修复截短"变得可证：
+
+```
+if 地板越界:
+    从 seq 0 全量重读一次     // 恰好一次，不是每次
+else:
+    正常按 floor 往后读
+```
+
+也就是说越界会触发**恰好一次**从 seq 0 的全量重读，而不是供出幽灵值（`src/index.ts:184`–`194`）。没有持久化日志的会话，按 seam 的 `not found` 拒绝。函数在 `src/index.ts:166`。
+
+并排看更清楚谁快谁慢：
 
 ```mermaid
 flowchart LR
@@ -105,13 +170,19 @@ flowchart LR
 
 ## 模型看得见什么
 
-**什么都看不见。** README 原文：`None, as the cache only persists and restores host-side read models of already-logged session state and touches no prompt, message, schema, stream, or tool result.`（`README.md:52`）KV Cache 同为 None。
+**什么都看不见。**
+
+README 原文：`None, as the cache only persists and restores host-side read models of already-logged session state and touches no prompt, message, schema, stream, or tool result.`（`README.md:52`）KV Cache 同为 None。
 
 ## 什么时候你会想换掉它 / 怎么换
 
-没有替代实现。可做的是三件事：
+没有替代实现。可做的是三件事。
 
-1. **加到别的 profile 上**——base/headless 没有这一行。往 profile 的 `cordis.patch.yml` 加行只有 `insert` 一条路（`vendor/include/src/index.ts:80`–`95`）；顶层裸写 `- id: … name: …` 会被当成针对既有行的 patch，报 `patch: entry not found` 后跳过（同文件 `:110`–`113`）。所以要这么写：
+### 1. 加到别的 profile 上
+
+base/headless 没有这一行。往 profile 的 `cordis.patch.yml` 加行只有 `insert` 一条路（`vendor/include/src/index.ts:80`–`95`）。
+
+这里有个坑：顶层裸写 `- id: … name: …` 会被当成针对**既有行**的 patch，报 `patch: entry not found` 之后跳过（同文件 `:110`–`113`）——不报错、不生效，很难发现。所以必须这么写：
 
 ```yaml
 - insert:
@@ -122,9 +193,15 @@ flowchart LR
         writeIntervalMs: 5000
 ```
 
-   注意它硬性 inject `storageDomain`，而 `storage` / `storage-json` / `storage-domain` 三行同样只在 web-app（`packages/bundle/web-app/cordis.patch.yml:51`–`62`），得一起补。
-2. **调节流**：会话很长又想让列表更新，就调小 `writeEveryEvents`；写盘吃紧就调大两者。两个强制写点不受影响。
-3. **禁用它**（`disabled: true`）：投影系统退化成 live-only（水位缓存），冷读只能回落到 carrier 各自实现的全量日志加载（`README.md:48`）。
+还要注意它硬性 inject `storageDomain`，而 `storage` / `storage-json` / `storage-domain` 三行同样只在 web-app（`packages/bundle/web-app/cordis.patch.yml:51`–`62`），得一起补。
+
+### 2. 调节流
+
+会话很长又想让列表更新，就调小 `writeEveryEvents`；写盘吃紧就调大两者。两个强制写点不受影响。
+
+### 3. 禁用它（`disabled: true`）
+
+投影系统退化成 live-only（水位缓存），冷读只能回落到 carrier 各自实现的全量日志加载（`README.md:48`）。
 
 ## 坑与边界
 

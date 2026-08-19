@@ -6,7 +6,9 @@
 
 ## 〇、一句话结论
 
-**没有一个项目靠"更长的上下文窗口"解决问题。** 所有活跃项目都在做同一件事：**把上下文当成一种需要主动分配、回收、外置的稀缺资源**。具体收敛成七种手法，几乎所有项目都是这七种的不同组合与参数取值：
+**没有一个项目靠"更长的上下文窗口"解决问题。**
+
+所有活跃项目都在做同一件事：**把上下文当成一种需要主动分配、回收、外置的稀缺资源**。具体收敛成七种手法，几乎所有项目都是这七种的不同组合与参数取值：
 
 | # | 手法 | 本质 |
 |---|---|---|
@@ -91,7 +93,7 @@ flowchart TD
 
 ## 二、手法 1：Compaction（摘要压缩）
 
-这是最普遍的一招。差异全在**三个参数**：**何时触发、丢多少、摘成什么格式**。
+这是最普遍的一招。差异全在**三个参数**：**何时触发、丢多少、摘成什么格式**。下面三小节就按这三个参数走，最后再补一节安全性细节。
 
 ### 2.1 触发阈值：从 50% 到 98%，跨度极大
 
@@ -110,10 +112,34 @@ flowchart TD
 | Claude Code | 到 limit / Sonnet 5 **~967K** | 可用 `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` 调低（只能降不能升） |
 | **crewAI** | **无阈值** | **报错之后才摘要**（反应式，见下） |
 
-**两个设计分歧点：**
+这张表里有两个设计分歧点，值得单独看。
 
-1. **比例 vs 剩余量。** crush 是唯一按"剩余绝对量"触发的：`contextWindow > 200_000` 时固定剩 20k 才压。理由很实在——1M 窗口用 80% 触发意味着白白浪费 200k 可用空间。
-2. **主动 vs 被动。** crewAI 是唯一的被动派：`is_context_length_exceeded()` 捕获 LLM 报错后才 `handle_context_length()`，否则直接 `SystemExit`。没有任何提前量。生产环境这意味着每次压缩前都先浪费一次失败请求。
+**分歧一：比例 vs 剩余量。** crush 是唯一按"剩余绝对量"触发的：
+
+```
+# 绝大多数项目
+if used > window * ratio:              compact()
+
+# crush
+if window > 200_000:
+    if window - used < 20_000:         compact()   # 1M 窗口相当于 98% 才触发
+else:
+    按 20% 比例判断                                # 小窗口才退回比例制
+```
+
+理由很实在——1M 窗口用 80% 触发意味着白白浪费 200k 可用空间。
+
+**分歧二：主动 vs 被动。** crewAI 是唯一的被动派：
+
+```
+try:
+    call_llm(messages)
+except e:
+    if is_context_length_exceeded(e):  handle_context_length()   # 到这一刻才摘要
+    else:                              SystemExit                # 其余错误直接退出
+```
+
+没有任何提前量。生产环境这意味着每次压缩前都先浪费一次失败请求。
 
 两条分歧点摆在一起看：
 
@@ -138,7 +164,7 @@ flowchart LR
 
 ### 2.2 保留多少尾部：三种流派
 
-三种流派放在一起对比：
+压完之后尾部留不留，分成三派：留一段、一点不留、以及一个折中——不留尾部但把原始文件重新读回来。
 
 ```mermaid
 flowchart LR
@@ -176,7 +202,21 @@ flowchart LR
 
 **C. 不留尾部，但把原始文件重新读回来（最巧妙）**
 
-qwen-code 的 `postCompactAttachments.ts`：既然摘要必然丢细节，那就干脆丢光尾部，然后按预算把**原始文件内容**重新注入：
+qwen-code 的 `postCompactAttachments.ts` 的逻辑是：既然摘要必然丢细节，那就干脆丢光尾部，然后按预算把**原始文件内容**重新注入。
+
+```
+丢光尾部，一条不留
+
+budget = POST_COMPACT_TOKEN_BUDGET        # 50_000
+for f in 待恢复文件:                       # 最多 POST_COMPACT_MAX_FILES_TO_RESTORE 个
+    inject(f, 上限 POST_COMPACT_MAX_TOKENS_PER_FILE)
+    budget -= cost(f)
+    if budget 用尽: break
+
+append(RESUME_TRAILER)                    # 由代码追加，不让模型每次自己生成
+```
+
+对应的常量：
 
 ```
 POST_COMPACT_MAX_FILES_TO_RESTORE   = 5
@@ -186,7 +226,7 @@ POST_COMPACT_MAX_IMAGES_TO_RESTORE  = 3
 MAX_SUBAGENT_SNAPSHOT_COUNT         = 30
 ```
 
-外加固定的 `RESUME_TRAILER`（由代码追加而非让模型每次生成）：*"Resume the prior task using the summary above. Continue from the last in-flight step; do not acknowledge the summary, do not re-introduce, do not greet the user again."*
+固定的 `RESUME_TRAILER` 原文是：*"Resume the prior task using the summary above. Continue from the last in-flight step; do not acknowledge the summary, do not re-introduce, do not greet the user again."*
 
 ### 2.3 摘要格式：全都是强结构化，字段高度趋同
 
@@ -214,26 +254,49 @@ MAX_SUBAGENT_SNAPSHOT_COUNT         = 30
 
 **① gemini-cli 的二次自校验轮.** 第一次生成 `<state_snapshot>` 后，再发一轮："Critically evaluate the `<state_snapshot>` you just generated… generate a FINAL, improved"。用一次廉价调用换摘要质量。其他项目都没有。
 
-**② opencode 的 Anchored Summary（增量摘要）.** 不是每次重新总结，而是把上一份 `<previous-summary>` 传回去做**增量更新** —— *"preserving still-true details, removing stale details, and merging in new facts"*。天然避免多次压缩导致的信息衰减。Cline / Continue / Kilo 也有类似的增量逻辑（只 fold 上次摘要之后的新消息）。
+**② opencode 的 Anchored Summary（增量摘要）.** 不是每次重新总结，而是把上一份 `<previous-summary>` 传回去做**增量更新** —— *"preserving still-true details, removing stale details, and merging in new facts"*。
+
+这样天然避免多次压缩导致的信息衰减。Cline / Continue / Kilo 也有类似的增量逻辑（只 fold 上次摘要之后的新消息）。
 
 **③ codex 的"不摘要，直接开新窗口".** `compact_token_budget.rs` 完全跳过 LLM 摘要，直接 `start_new_context_window()`。靠外置的 WorldState + memories 文件承接状态。前提是外置记忆足够可靠。
 
 ### 2.5 安全性细节：别切断 tool_call / tool_result 配对
 
-这是个所有成熟项目都踩过的坑，处理方式各异：
+这是个所有成熟项目都踩过的坑：切点如果正好落在 tool_result 上，前面那条 tool_call 就没了对家，API 直接报错。处理方式各异。
 
-- **LangChain** `_find_safe_cutoff_point`：切点落在 ToolMessage 上时**向前回溯**找发出对应 tool_calls 的 AIMessage，把切点移到它之前
-- **OpenHands** 的 View property 体系（最完备）：`tool_call_matching` / `tool_loop_atomicity` / `batch_atomicity` / `observation_uniqueness` 四条不变式，事件日志 append-only，压缩只写 tombstone 式 `Condensation` 事件
-- **agent-framework**：`annotate_message_groups()` 先把消息划分为原子 group，压缩只对 group 整体 include/exclude，**永不拆开 tool-call group**
-- **crewAI**：只按消息边界切，**没有配对保护**
+**LangChain** 的 `_find_safe_cutoff_point` 是回溯法：
 
-OpenHands 的 `ObservationUniquenessProperty` 还顺手解决了一个隐蔽 bug：崩溃恢复时同一个 `tool_call_id` 会同时存在 `AgentErrorEvent` 和迟到的真实 `ObservationEvent`，需要去重。
+```
+if messages[cut] is ToolMessage:
+    ai  = 往前回溯，找发出对应 tool_calls 的 AIMessage
+    cut = ai 之前            # 切点整体前移，配对不被劈开
+```
+
+**OpenHands** 的 View property 体系最完备：`tool_call_matching` / `tool_loop_atomicity` / `batch_atomicity` / `observation_uniqueness` 四条不变式，事件日志 append-only，压缩只写 tombstone 式 `Condensation` 事件。
+
+**agent-framework** 走原子分组：`annotate_message_groups()` 先把消息划分为原子 group，压缩只对 group 整体 include/exclude，**永不拆开 tool-call group**。
+
+**crewAI** 则只按消息边界切，**没有配对保护**。
+
+顺带一提，OpenHands 的 `ObservationUniquenessProperty` 还解决了一个隐蔽 bug：崩溃恢复时同一个 `tool_call_id` 会同时存在 `AgentErrorEvent` 和迟到的真实 `ObservationEvent`，需要去重。
 
 ---
 
 ## 三、手法 2：分层清理（在 LLM 摘要之前的廉价一层）
 
-**核心洞察：tool 输出占了上下文的绝大部分，而且过期得最快。** 与其等到 90% 做一次昂贵的全量摘要，不如提前用规则持续回收。Claude Code 官方文档的表述最直白：*"It **clears older tool outputs first**, then summarizes the conversation if needed."*
+**核心洞察：tool 输出占了上下文的绝大部分，而且过期得最快。** 与其等到 90% 做一次昂贵的全量摘要，不如提前用规则持续回收。
+
+两层的先后关系，Claude Code 官方文档的表述最直白：*"It **clears older tool outputs first**, then summarizes the conversation if needed."*
+
+```
+每轮结束:
+    if 有够老够多的 tool 输出:
+        规则擦除              # 便宜的一层，一次 LLM 调用都不花
+    if 仍然逼近阈值:
+        LLM 全量摘要          # 昂贵的一层，能推迟就推迟
+```
+
+各家的机制与参数：
 
 | 项目 | 机制 | 参数 |
 |---|---|---|
@@ -254,6 +317,8 @@ OpenHands 的 `ObservationUniquenessProperty` 还顺手解决了一个隐蔽 bug
 
 ## 四、手法 3：Offload 到文件系统
 
+上下文塞不下的东西写磁盘，窗口里只留一条路径。这一节分四块：大 tool 输出、指令文件与长期记忆的字节预算、按需加载、以及外置的任务状态。
+
 ### 4.1 大 tool 输出写盘换引用
 
 **deepagents 是最彻底的**（`middleware/filesystem.py`）：
@@ -265,7 +330,9 @@ human_message_token_limit_before_evict = 50_000
 grep_max_count                         = 1_000
 ```
 
-超限的 tool result 写到 `{root}/large_tool_results/{tool_call_id}`，消息体换成提示 + 路径；agent 用 `read_file(path, offset, limit)` 分页回读或 `grep` 该目录（工具描述里写死了这条指引）。sandbox 场景还支持 **capture-at-source**：`execute_with_offload(max_inline_bytes = 4 × 20000)`，超限内容压根不进程序内存。逐出时用 `_create_content_preview(head_lines=5, tail_lines=5)` 保留头尾预览。
+超限的 tool result 写到 `{root}/large_tool_results/{tool_call_id}`，消息体换成提示 + 路径；agent 用 `read_file(path, offset, limit)` 分页回读或 `grep` 该目录（工具描述里写死了这条指引）。
+
+sandbox 场景还支持 **capture-at-source**：`execute_with_offload(max_inline_bytes = 4 × 20000)`，超限内容压根不进程序内存。逐出时用 `_create_content_preview(head_lines=5, tail_lines=5)` 保留头尾预览。
 
 deepagents 这条链路的每一步：
 
@@ -303,10 +370,12 @@ camel 的 `tool_log_dir` 是残缺版：完整输出落盘，但**模型读不�
 | **letta-code** | MemFS 树 | 500 行 / 20,000 字符 / 每目录 50 个子项 |
 
 **Claude Code 的两个细节值得抄**：
+
 - `MEMORY.md` 超限时**返回错误让模型自己精简重写索引**，而不是框架静默截断——保证信息丢失是模型知情的。
 - CLAUDE.md 里的**块级 HTML 注释 `<!-- -->` 在注入前被剥离**，省 token。
 
 **codex 的 memories 子系统最完整**（`~/.codex/memories/`）：
+
 - `memory_summary.md`（开局注入）/ `MEMORY.md`（可检索索引）/ `skills/<name>/SKILL.md` / `rollout_summaries/*.jsonl`
 - 工具：`list` / `read` / `search` / `add_ad_hoc_note`
 - **强制引用格式** `<oai-mem-citation>`，含行号区间 + rollout_ids
@@ -339,7 +408,7 @@ Claude Code 的 `.claude/rules/` + `paths:` frontmatter 是目前最精细的按
 
 ## 五、手法 4：Sub-agent 上下文隔离
 
-**核心问题：handoff 时传全量历史还是摘要？** 调研发现一个清晰的分野：
+**核心问题：handoff 时传全量历史还是摘要？** 调研发现一个清晰的分野，而且这个分野和后面 §5.4 那场争论收敛出的判据完全吻合。
 
 ### 5.1 传全量派（接力型 / handoff）
 
@@ -355,9 +424,12 @@ _EXCLUDED_STATE_KEYS = {"messages", "todos", "structured_response"}
 subagent_state["messages"] = [HumanMessage(content=description)]
 ```
 
-父 → 子：**完全不传历史**，只传 `task(description=...)` 那一段文字。子 → 父：只回最后一条 message 内容。工具描述原文：*"Each invocation is stateless… The calling agent only sees your final assistant message, not your intermediate work."*
+父 → 子：**完全不传历史**，只传 `task(description=...)` 那一段文字。子 → 父：只回最后一条 message 内容。
+
+工具描述原文：*"Each invocation is stateless… The calling agent only sees your final assistant message, not your intermediate work."*
 
 其余隔离派：
+
 - **Cline** `spawn_agent`：入参只有 `{systemPrompt, task}`，独立 conversationId，只回 `{text, iterations, finishReason, usage}`；compaction telemetry 带 `agentId/parentAgentId`，即**每个 agent 独立走一遍压缩预算**
 - **crewAI**：task 之间只传前序 `TaskOutput.raw` 字符串；delegation 只传 `{task, context}` 两个字符串，**零历史**
 - **agno Team**：`add_team_history_to_members = False`、`share_member_interactions = False`，**默认 member 完全看不到 team 历史和彼此交互**
@@ -366,18 +438,25 @@ subagent_state["messages"] = [HumanMessage(content=description)]
 
 ### 5.3 Claude Code 的具体限额
 
-- 独立 context window、独立 system prompt / 工具集 / 权限，只回传 summary
-- 嵌套深度默认 **3 层**（`CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`）
-- 并发上限 **20**（`CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`）
-- 单 session 生成上限 **200**（`CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION`，`/clear` 重置）
-- Plan mode 自动把探索委派给 Plan subagent
+子 agent 有独立 context window、独立 system prompt / 工具集 / 权限，只回传 summary。三个硬限额：
+
+| 限额 | 值 | 环境变量 |
+|---|---|---|
+| 嵌套深度 | **3 层** | `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` |
+| 并发上限 | **20** | `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` |
+| 单 session 生成上限 | **200**（`/clear` 重置） | `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` |
+
+此外 Plan mode 会自动把探索委派给 Plan subagent。
 
 gemini-cli 的 `codebase_investigator` 是个好范例：`maxTurns: 50`、`maxTimeMinutes: 10`，**只给只读工具**（LS/READ_FILE/GLOB/GREP）。
 
 ### 5.4 那场争论已经收敛了
 
-- **Cognition《Don't Build Multi-Agents》**（2025-06）两条原则：① Share context —— *"share full agent traces, not just individual messages"*；② Actions carry implicit decisions —— 并行 agent 看不到彼此工作时会做出互相冲突的隐含假设。推荐 single-threaded linear agent。文中直接点名批评 OpenAI Swarm 和 AutoGen。
-- **LangChain 的回应**（2025-06）给了现在被广泛接受的判据：**读任务 vs 写任务** —— *"designed primarily for reading tasks tend to be more manageable than those focused on writing tasks"*。读天然可并行，写会产生冲突决策。
+**Cognition《Don't Build Multi-Agents》**（2025-06）给了两条原则：① Share context —— *"share full agent traces, not just individual messages"*；② Actions carry implicit decisions —— 并行 agent 看不到彼此工作时会做出互相冲突的隐含假设。
+
+结论是推荐 single-threaded linear agent，文中直接点名批评 OpenAI Swarm 和 AutoGen。
+
+**LangChain 的回应**（2025-06）给了现在被广泛接受的判据：**读任务 vs 写任务** —— *"designed primarily for reading tasks tend to be more manageable than those focused on writing tasks"*。读天然可并行，写会产生冲突决策。
 
 **源码层面的实证完全吻合这条判据**：handoff/接力型（agent-framework、openai-agents）传全量；fan-out/委派型（deepagents、crewAI、agno、camel、Cline）只传任务描述。
 
@@ -403,7 +482,7 @@ flowchart TD
 
 ## 六、手法 5：检索 —— grep 派 vs 向量派的明确分野
 
-grep 派与向量派的项目分布：
+这一节的分野干净得出奇：CLI 编码 Agent 一个不落全是 grep 派，向量索引只剩 IDE 插件系在用。
 
 ```mermaid
 flowchart LR
@@ -425,27 +504,49 @@ flowchart LR
 
 Claude Code、codex、gemini-cli、qwen-code、opencode、goose、crush、Cline、OpenHands、Aider —— **全部无向量索引**。
 
+几个细节：
+
 - codex 甚至**没有内置 grep/glob 工具**，靠 `shell`/`unified_exec` 跑 `rg`，system prompt 明确写 *"prefer using `rg` or `rg --files`… because `rg` is much faster"*
 - crush 的 grep 内部 limit 100 条，超出标 `truncated` 并提示 *"Consider using a more specific path or pattern"*
 - goose 的跨 session 历史召回走 **SQLite `LOWER(json_extract(...)) LIKE ?` 子串匹配**，也不是向量
 
-理由是 Anthropic 说的 **just-in-time retrieval**：不预加载，只维护轻量标识符（路径/ID），运行时动态加载。代码库的结构信息（目录名、文件名、import 关系）本身就是高信噪比的元数据，grep 的精确性优于 embedding 的模糊性。
+理由是 Anthropic 说的 **just-in-time retrieval**：不预加载，只维护轻量标识符（路径/ID），运行时动态加载。
+
+代码库的结构信息（目录名、文件名、import 关系）本身就是高信噪比的元数据，grep 的精确性优于 embedding 的模糊性。
 
 ### 6.2 Aider 的 repo map：不用 embedding 的另一条路
 
-Aider 用 **tree-sitter + PageRank** 而非向量：
+Aider 用 **tree-sitter + PageRank** 而非向量，整条链路是：
+
+```
+tags = tree_sitter(repo)          # name.definition.* → def，name.reference.* → ref
+G = networkx.MultiDiGraph()
+for (referencer, definer) in refs:
+    G.add_edge(referencer, definer, weight = mul × sqrt(num_refs))
+
+rank = pagerank(G, personalize = 100 / len(fnames))   # 偏置给聊天中的文件
+装进预算：二分搜索，起点 max_map_tokens // 25，容差 15%
+```
+
+预算本身：
 
 ```python
 map_tokens = clamp(max_input_tokens / 8, 1024, 4096)   # 默认 1024
 ```
 
-- tree-sitter 抽 tag（`name.definition.*` → def，`name.reference.*` → ref），建 `networkx.MultiDiGraph`，边 = referencer → definer，`weight = mul × sqrt(num_refs)`
-- **权重乘数规则**：`ident in mentioned_idents` → ×10；snake_case/camelCase 且长度 ≥8 → ×10；`_` 开头（私有）→ ×0.1；被 >5 个文件定义（太常见）→ ×0.1；referencer 在聊天文件中 → 额外 ×50
-- **PageRank personalization**：`personalize = 100 / len(fnames)` 偏置给聊天中的文件
-- 装进预算用**二分搜索**（起点 `max_map_tokens // 25`，容差 15%）
-- 聊天里没有任何文件时，预算放大 `min(map_tokens × mul, max_context_window - 4096)`
+上面那个 `mul` 就是权重乘数，规则如下：
 
-超过 `map_tokens × 2` 会告警：*"Too much irrelevant code can confuse LLMs"*——这句话本身就是 context rot 的实践认知。
+| 条件 | 乘数 |
+|---|---|
+| `ident in mentioned_idents` | ×10 |
+| snake_case/camelCase 且长度 ≥8 | ×10 |
+| `_` 开头（私有） | ×0.1 |
+| 被 >5 个文件定义（太常见） | ×0.1 |
+| referencer 在聊天文件中 | 额外 ×50 |
+
+还有个边界情况：聊天里没有任何文件时，预算放大 `min(map_tokens × mul, max_context_window - 4096)`。
+
+超过 `map_tokens × 2` 会告警：*"Too much irrelevant code can confuse LLMs"* —— 这句话本身就是 context rot 的实践认知。
 
 ### 6.3 向量派（IDE 插件系）
 
@@ -463,6 +564,8 @@ Continue 的 `BaseRetrievalPipeline` 还有个混合设计：reranker 管线可�
 
 压缩会重写前缀 → cache 必然失效。这一块的工程含量很高，但很少被讨论。
 
+三小节分别是：Claude Code 的分层排序、codex 的架构级保证、以及各家的断点放置策略。
+
 ### 7.1 Claude Code：文档化最清楚的三层排序
 
 | Layer | 内容 | 何时变 |
@@ -472,6 +575,7 @@ Continue 的 `BaseRetrievalPipeline` 还有个混合设计：reranker 管线可�
 | Conversation | 消息、响应、tool results | 每轮 |
 
 配套设计：
+
 - **纯前缀精确匹配**，无 per-file / per-segment 缓存
 - Plan mode 指令、skill 加载都是**以 conversation message 追加**，因此**不破前缀**
 - **MCP 延迟加载的工具从不进入缓存前缀** → server 连断不影响缓存
@@ -501,6 +605,8 @@ opencode 按 provider 分发字段也很细：`anthropic/openrouter/alibaba → 
 ---
 
 ## 八、手法 7：专用记忆系统（争议最大的一块）
+
+三种流派、mem0 的架构剧变、Graphiti 的双时间轴、Letta 的 sleep-time compute，最后是本次调研最需要警示的一节：LOCOMO benchmark 已经不能用了。
 
 ### 8.1 三种流派
 
@@ -542,7 +648,9 @@ flowchart LR
     class N1,N2 data
 ```
 
-现行 pipeline 是**单次 LLM 调用的 ADD-only 抽取** + MD5 精确去重 + 0.95 相似度实体合并。检索是三路加性融合（向量 + BM25 + 实体 boost 0.5），BM25 参数按 query 词数自适应。`mem0/graphs/` 目录已不存在，`DEFAULT_UPDATE_MEMORY_PROMPT` 已是死代码。
+现行 pipeline 是**单次 LLM 调用的 ADD-only 抽取** + MD5 精确去重 + 0.95 相似度实体合并。检索是三路加性融合（向量 + BM25 + 实体 boost 0.5），BM25 参数按 query 词数自适应。
+
+代码层面的痕迹：`mem0/graphs/` 目录已不存在，`DEFAULT_UPDATE_MEMORY_PROMPT` 已是死代码。
 
 **仍按"两阶段 LLM pipeline + 向量图混合"理解 mem0 会得出错误结论。**
 
@@ -555,25 +663,53 @@ invalid_at    # T1: 事实停止为真
 expired_at    # T2: 该边被系统判定失效的时间
 ```
 
-冲突消解**完全程序化**（`resolve_edge_contradictions()`）：比较时间区间，冲突则 `edge.invalid_at = new_edge.valid_at; edge.expired_at = now()`。**旧事实不删除，标记失效并保留历史**。这与 mem0 v3 的"只 ADD 不删"和 v2 的"LLM 决定 DELETE"形成三方对照。
+冲突消解**完全程序化**（`resolve_edge_contradictions()`），比较时间区间即可判定：
+
+```
+for edge in 与新事实时间区间冲突的旧边:
+    edge.invalid_at = new_edge.valid_at
+    edge.expired_at = now()
+    # 注意：没有 delete
+```
+
+**旧事实不删除，标记失效并保留历史**。这与 mem0 v3 的"只 ADD 不删"和 v2 的"LLM 决定 DELETE"形成三方对照。
 
 检索是真混合：`bm25 + cosine + bfs`，reranker 支持 `rrf`（默认）/ `mmr` / `cross_encoder` / `node_distance` / `episode_mentions`，16 个预置 recipe。
 
 ### 8.4 Letta 的 sleep-time compute
 
-- **同步自编辑**：agent 自己调 `memory` 工具（Anthropic text-editor 风格的 `create`/`str_replace`/`insert`/`delete`/`rename`）
-- **异步 sleep-time**：`run_sleeptime_agents()` 在主 agent 流式响应的 `finally` 块触发，默认**每 5 轮**一次，后台起 Run 读取 `last_processed_message_id` 之后的消息再改记忆
-- ⚠️ 主仓库 README 已明示是 **legacy**，现役开发在 `letta-ai/letta-code`（TypeScript），架构已从"DB memory block"演进为 **MemFS：git 追踪的记忆文件系统**
+**同步自编辑**：agent 自己调 `memory` 工具（Anthropic text-editor 风格的 `create`/`str_replace`/`insert`/`delete`/`rename`）。
 
-**发现一个可复现的文档 bug**：`archival_memory_search` 的 docstring 写默认 top_k=10，代码实际是 `RETRIEVAL_QUERY_DEFAULT_PAGE_SIZE = 5`。
+**异步 sleep-time**：`run_sleeptime_agents()` 在主 agent 流式响应的 `finally` 块触发：
+
+```
+主 agent 流式响应结束（finally 块）:
+    每 5 轮触发一次:
+        后台起 Run
+        读取 last_processed_message_id 之后的消息
+        改记忆
+```
+
+⚠️ 主仓库 README 已明示是 **legacy**，现役开发在 `letta-ai/letta-code`（TypeScript），架构已从"DB memory block"演进为 **MemFS：git 追踪的记忆文件系统**。
+
+顺带**发现一个可复现的文档 bug**：`archival_memory_search` 的 docstring 写默认 top_k=10，代码实际是 `RETRIEVAL_QUERY_DEFAULT_PAGE_SIZE = 5`。
 
 ### 8.5 🚨 关于 benchmark：LOCOMO 已经不能用了
 
-这是本次调研最需要警示的部分。
+这是本次调研最需要警示的部分。四条证据：厂商互撕、独立审计、复现失败、以及一个最有说服力的反证。
 
 **厂商互撕：同一系统四个数字**
 
-Zep 在 LOCOMO 上的分数出现过 **65.99%（mem0 报告）→ 84%（Zep 论文）→ 75.14%（Zep 自测修正）→ 58.44%（mem0 重算）** 四个版本。Zep 维护者在 [zep-papers issue #5](https://github.com/getzep/zep-papers/issues/5) 中**承认了计算错误**（把已排除的 adversarial 类计入分子不计入分母），但坚持修正值是 75.14%。
+Zep 在 LOCOMO 上的分数出现过四个版本：
+
+| 分数 | 出处 |
+|---|---|
+| 65.99% | mem0 报告 |
+| 84% | Zep 论文 |
+| 75.14% | Zep 自测修正 |
+| 58.44% | mem0 重算 |
+
+Zep 维护者在 [zep-papers issue #5](https://github.com/getzep/zep-papers/issues/5) 中**承认了计算错误**（把已排除的 adversarial 类计入分子不计入分母），但坚持修正值是 75.14%。
 
 **独立第三方审计（关键）**
 
@@ -628,7 +764,9 @@ flowchart TD
 
 从 cognee 的 **1,200 字符** 到 Letta 的 **100,000 字符/block**。
 
-一篇独立研究（arXiv:2607.21962，2026-07）提出的 **"tenure crossover"** 值得注意：预算受限的常驻 map 短期领先（第 3 周 81.2%），但第 9 周因预算驱逐丢失 24% 早期内容降到 78.4%；而 graph 从 75.9% 升到 90.4%，hybrid 到 93.2%。**如果目标是长生命周期 agent，纯常驻方案有系统性衰减风险。**（注：该论文测的是自建实现，未直接测 mem0/Zep/Letta。）
+一篇独立研究（arXiv:2607.21962，2026-07）提出的 **"tenure crossover"** 值得注意：预算受限的常驻 map 短期领先（第 3 周 81.2%），但第 9 周因预算驱逐丢失 24% 早期内容降到 78.4%；而 graph 从 75.9% 升到 90.4%，hybrid 到 93.2%。
+
+**如果目标是长生命周期 agent，纯常驻方案有系统性衰减风险。**（注：该论文测的是自建实现，未直接测 mem0/Zep/Letta。）
 
 ---
 
@@ -636,11 +774,22 @@ flowchart TD
 
 ### 9.1 问题定义
 
-**Context Rot**（Chroma Research，2025-07，18 个模型全覆盖）：模型**不均匀地使用上下文**，输入越长性能越差，连"复制一段文本"这种平凡任务也退化；干扰项影响被放大；打乱顺序的 haystack 反而优于逻辑连贯的。结论：*"模型处理第 10000 个 token 应与第 100 个一样可靠"是错的。*
+**Context Rot**（Chroma Research，2025-07，18 个模型全覆盖）：模型**不均匀地使用上下文**，输入越长性能越差，连"复制一段文本"这种平凡任务也退化；干扰项影响被放大；打乱顺序的 haystack 反而优于逻辑连贯的。
 
-**Attention Budget**（Anthropic，2025-09）：Transformer 的 n² 两两关系使每个 token 都消耗注意力预算；模型对"跨全上下文依赖"训练暴露少，因此是**性能梯度**而非硬悬崖。Context engineering 定义 = *"curating and maintaining the optimal set of tokens during LLM inference"*，与 prompt engineering 的区别是**迭代式、每轮都要重新决策**。
+结论：*"模型处理第 10000 个 token 应与第 100 个一样可靠"是错的。*
 
-**四类失效模式**（Drew Breunig / LangChain）：Poisoning（幻觉进入上下文后被反复引用）、Distraction（历史压过训练先验）、Confusion（无关内容也被强行使用）、Clash（上下文内部矛盾）。
+**Attention Budget**（Anthropic，2025-09）：Transformer 的 n² 两两关系使每个 token 都消耗注意力预算；模型对"跨全上下文依赖"训练暴露少，因此是**性能梯度**而非硬悬崖。
+
+Context engineering 的定义 = *"curating and maintaining the optimal set of tokens during LLM inference"*，与 prompt engineering 的区别是**迭代式、每轮都要重新决策**。
+
+**四类失效模式**（Drew Breunig / LangChain）：
+
+| 失效模式 | 含义 |
+|---|---|
+| Poisoning | 幻觉进入上下文后被反复引用 |
+| Distraction | 历史压过训练先验 |
+| Confusion | 无关内容也被强行使用 |
+| Clash | 上下文内部矛盾 |
 
 ### 9.2 LangChain 四分法：Write / Select / Compress / Isolate
 

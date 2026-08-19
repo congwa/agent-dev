@@ -7,14 +7,17 @@
 
 ## 先分清两个词
 
-这两个词经常混着用，但完全不是一回事：
+采样和丢弃经常混着用，但完全不是一回事。
 
-**采样（sampling）= 民意调查。**
-全国 14 亿人不可能挨个问，随机抽 1000 个人，然后把结果乘回去，估算全国。
-你**主动**决定只看一部分，而且**知道自己看了多少比例**，所以能还原。
+**采样（sampling）= 民意调查。** 全国 14 亿人不可能挨个问，随机抽 1000 个人，然后把结果乘回去，估算全国。你**主动**决定只看一部分，而且**知道自己看了多少比例**，所以能还原。
 
-**丢弃（drop）= 水槽满了溢出去。**
-你不是主动选的，是实在装不下了。溢出去多少你可能都不知道，还原不了。
+**丢弃（drop）= 水槽满了溢出去。** 你不是主动选的，是实在装不下了。溢出去多少你可能都不知道，还原不了。
+
+| | 采样 sampling | 丢弃 drop |
+|---|---|---|
+| 怎么发生的 | 主动决定，你选择只看一部分 | 被动发生，队列/缓冲区装不下 |
+| 知不知道量 | 按比例抽取，知道自己抽了多少 | 溢出即砍，丢多少不一定知道 |
+| 能不能还原 | 可还原，结果乘回去就是全量 | 不可还原，丢掉的数据永远消失 |
 
 **能采样就别丢弃。** 采样是有控制的、可还原的、可预算的；丢弃是被动的、不可还原的。
 
@@ -62,7 +65,23 @@ if random.random() < 0.1:
     record_span()
 ```
 
-**这行代码是错的。** 跑一下就知道错在哪：
+**这行代码是错的。**
+
+错在哪里，两段伪代码摆一起就看出来了 —— 区别只在「骰子从哪来」：
+
+```
+# 方案 A：每个服务自己掷骰子
+for 服务 in [A, B, C, D]:
+    if random() < 0.1:  记下这一段       # 四次独立的随机，互不相干
+
+# 方案 B：读同一个 traceID
+for 服务 in [A, B, C, D]:
+    if traceID 低 64 位 < 阈值:  记下这一段   # 四次算的是同一个输入，答案必然相同
+```
+
+方案 A 的四次判断彼此独立，一条链路要 4 个服务**同时中奖**才完整，概率是 `0.1⁴ = 万分之一`；方案 B 的判断根本没有随机数，输入相同、结果就相同，所以要么四段全留、要么四段全丢。
+
+跑一下就知道差多少：
 
 ```bash
 python3 demos/demo03_sampling.py
@@ -86,7 +105,7 @@ python3 demos/demo03_sampling.py
 
 （traceID 是真随机的，所以每次跑具体数字会变，但这个量级差是稳定的。）
 
-原因很简单：掷骰子的方案里，一条链路要 4 个服务**同时中奖**才完整，概率是 `0.1⁴ = 万分之一`。剩下 3511 条是断成几截的残片 —— 存了，占空间，但排查问题时啥也看不出来。
+掷骰子方案剩下的那 3511 条是断成几截的残片 —— 存了，占空间，但排查问题时啥也看不出来。
 
 两种判定方式画成树是这样：
 
@@ -151,7 +170,9 @@ class TraceIdRatioBased(Sampler):
 
 这个规则的妙处在于 —— **全城每个路口的交警，不用互相打电话商量，看一眼车牌就能做出完全相同的判断**。
 
-trace 采样就是这个思路。结果是：一条 trace 经过 5 个微服务、3 层 collector，**每一处都独立算，但算出来的答案必然一致**。要么全留（拼成完整链路），要么全丢。绝不会出现「留了一半、链路断成两截」这种最糟糕的情况。
+trace 采样就是这个思路。一条 trace 经过 5 个微服务、3 层 collector，**每一处都独立算，但算出来的答案必然一致**。
+
+要么全留（拼成完整链路），要么全丢。绝不会出现「留了一半、链路断成两截」这种最糟糕的情况。
 
 ---
 
@@ -199,7 +220,16 @@ func TraceIDToRandomness(id pcommon.TraceID) Randomness {
 }
 ```
 
-**这个模式不需要配 seed，天然全网一致。** 新项目直接用这个。
+两套算法并排看：
+
+| | `hash_seed` | `proportional` / `equalizing` |
+|---|---|---|
+| 实现文件 | `fnvhasher.go` | `pkg/sampling/randomness.go` |
+| 怎么算 | 对 traceID 做 FNV-1a 32 位哈希 | 直接从 traceID 取后 8 字节，无哈希 |
+| 取多少位 | 精度 1/16384（14 bit） | 抹掉最高 8 bit，留 56 位 |
+| 要不要配 seed | 同层级所有 collector 必须配同一个 `hash_seed` | 不需要，天然全网一致 |
+
+**新项目直接用 `proportional` / `equalizing`。**
 
 决策结果会写回 W3C `tracestate` 的 `ot` section（`th=` 是 threshold，`rv=` 是 randomness）。下游任何 collector 读到 `th` 就知道上游用了多少采样率，可以算出 adjusted count 做无偏还原 —— 这个设计非常漂亮，把「我采了多少」这个信息随数据一起传下去了。
 
@@ -207,7 +237,20 @@ func TraceIDToRandomness(id pcommon.TraceID) Randomness {
 
 head sampling 的致命问题：**你在门口掷骰子的时候，还不知道这条请求会不会报错**。
 
-tail_sampling 反过来 —— 把整条 trace 在内存里缓冲一段时间，等 span 到齐后再用一组策略投票：
+tail_sampling 反过来 —— 把整条 trace 在内存里缓冲一段时间，等 span 到齐后再用一组策略投票。机制是这样：
+
+```
+收到 span:
+    trace[traceID].append(span)          # 先攒着，谁也不判
+
+等 decision_wait 秒（等 span 到齐）:
+    if 有 span 状态码是 ERROR:   全部保留     # 错误不靠概率碰运气
+    elif 有 span 耗时 > 阈值:    全部保留     # 慢请求同理
+    elif 路径是 /health /metrics: 全部丢弃
+    else:                        抽 10%
+```
+
+注意所有判断都作用在**整条 trace** 上，不是单条 span —— 这才是它能保证「错误一条不漏」的原因。对应配置：
 
 ```yaml
 processors:
@@ -262,11 +305,13 @@ flowchart TD
     class K4 main
 ```
 
-policy 一共 17 种：`always_sample`、`latency`、`numeric_attribute`、`probabilistic`、`status_code`、`string_attribute`、`trace_state`、`trace_flags`、`rate_limiting`、`bytes_limiting`、`span_count`、`boolean_attribute`、`ottl_condition`、`and`、`not`、`drop`、`composite`。
+上面配置里只用了 4 种 policy，可选的一共 17 种：`always_sample`、`latency`、`numeric_attribute`、`probabilistic`、`status_code`、`string_attribute`、`trace_state`、`trace_flags`、`rate_limiting`、`bytes_limiting`、`span_count`、`boolean_attribute`、`ottl_condition`、`and`、`not`、`drop`、`composite`。
 
-关键默认值：`decision_wait: 30s`、`num_traces: 50000`。
+关键默认值：`decision_wait: 30s`、`num_traces: 50000`。示例里两个值都被调小了。
 
-**部署上有个大坑**：tail sampling 要求「同一条 trace 的所有 span 必须到同一个 collector 实例」。所以前面必须有个按 traceID 做负载均衡的 `loadbalancing` exporter。否则一条 trace 的 span 散落在不同实例上，谁也看不到全貌，决策全错。
+**部署上有个大坑**：tail sampling 要求「同一条 trace 的所有 span 必须到同一个 collector 实例」。
+
+所以前面必须有个按 traceID 做负载均衡的 `loadbalancing` exporter。否则一条 trace 的 span 散落在不同实例上，谁也看不到全貌，决策全错。
 
 ### 一句话选型
 
@@ -295,7 +340,19 @@ InitialSamplingProbability:   0.001,
 MinSamplingProbability:       1e-5,     // 十万分之一
 ```
 
-它的概率调整算法有个很值得学的设计 —— **涨得慢、跌得快**：
+它的概率调整算法有个很值得学的设计 —— **涨得慢、跌得快**。先看示意：
+
+```
+factor = 目标QPS / 当前QPS
+新概率 = 旧概率 * factor
+
+if factor > 1:                       # 采少了，想往上调
+    涨幅最多只允许 +50%              # 慢慢加，防止过采样
+else:                                # 采多了
+    直接跳到新值                     # 不设上限，立刻止血
+```
+
+真实实现：
 
 ```go
 const defaultPercentageIncreaseCap = 0.5
@@ -331,6 +388,15 @@ func (c PercentageIncreaseCappedCalculator) Calculate(targetQPS, curQPS, prevPro
 
 真实 P99 耗时           : 204.6 ms
 采样后算出的 P99        : 189.1 ms   ← 不用还原，直接就是对的
+```
+
+还原不是「一律乘回去」，而是**按指标类型分叉**：
+
+```
+if 指标是数量 counter:            值 = 值 / 采样率     # QPS、错误数、总请求数
+elif 指标是分布 timer/histogram:  值 = 值             # P50/P99、平均值，原样
+elif 指标是瞬时值 gauge:          值 = 值             # 还原了反而是错的
+elif 指标是基数 set:              值 = 值             # 同上，而且会低估
 ```
 
 判定规则画成树是这样：
@@ -408,7 +474,7 @@ OpenTelemetry 里这个 `1/p` 有个专门的名字叫 **adjusted count**（`Thr
 
 ## IoT / MQTT：Broker 满了会怎么处理
 
-**这一段是给做 IoT 和直播的人看的。** 三个主流 broker 的策略完全不同，选错会踩坑。
+**这一段是给做 IoT 和直播的人看的。** 三个主流 broker 的策略完全不同，选错会踩坑：EMQX 丢最老的，Mosquitto 丢最新的，NATS 干脆丢整个连接。
 
 ### EMQX：丢最老的
 
@@ -429,7 +495,9 @@ mqtt {
 
 > 如果 Message Queue 也达到了长度限制，后续消息仍然会被缓存到 Message Queue，但 **Message Queue 中最老的消息会被丢弃**。
 
-**drop-oldest**。新消息永远进队，队头最老的被踢出去。这对行情推送、设备状态上报是**正确**的策略 —— 五分钟前的温度读数没有意义。
+**drop-oldest**。新消息永远进队，队头最老的被踢出去。
+
+这对行情推送、设备状态上报是**正确**的策略 —— 五分钟前的温度读数没有意义。
 
 ### Mosquitto：丢最新的
 
@@ -480,12 +548,18 @@ if c.out.pb > c.out.mp/4*3 && c.out.stc == nil {
 }
 ```
 
-**注意那个 75% 的 stall gate。** 这是我在所有 broker 里见过最成熟的设计：
+**注意那个 75% 的 stall gate。** 把两个水位抽出来是这样：
+
+```
+每次要往连接里写数据时:
+    if pending > 上限:            断连接，标记 SlowConsumer   # 100% 水位
+    if pending > 上限 * 3/4:      开一道闸门卡住生产者         # 75% 水位，背压
+```
 
 - pending 到 **75%** → 先卡住**生产者**，给消费者喘息机会（背压）
 - pending 到 **100%** → 才断连接（丢弃）
 
-**先背压、后丢弃，两段式。** 比一刀切优雅得多。这个模式值得在自己的系统里抄。
+**先背压、后丢弃，两段式。** 这是我在所有 broker 里见过最成熟的设计，比一刀切优雅得多，值得在自己的系统里抄。
 
 三家的丢弃逻辑画成图是这样：
 
@@ -545,7 +619,7 @@ sub.SetPendingLimits(1024*500, 1024*5000)   // 默认 500,000 条 / 64MB
 
 上面讲的都是「服务端收到之后怎么办」。但对 IoT 来说，**最划算的优化永远在设备侧**。
 
-三个手段，按性价比排序：
+三个手段，按性价比排序：变化才上报、批量上报、按设备 ID 一致性采样。
 
 ```mermaid
 flowchart TD

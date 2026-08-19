@@ -4,13 +4,37 @@
 
 这一区回答同一个问题：**`dsh --profile web --dump-config` 打出来的那一行，到底是什么？**
 
-每篇的固定结构：它在树上那行 YAML 原文 → 它注册了什么（服务 / 事件监听并标出派发模式 / 工具 / prompt 段 / 命令）→ 配置项表 → 模型看得见什么 → 什么时候你会想换掉它 → 坑与边界。
+每篇都按同一个顺序写下来，六段：
+
+1. 它在树上那行 YAML 原文
+2. 它注册了什么：服务 / 事件监听（并标出派发模式）/ 工具 / prompt 段 / 命令
+3. 配置项表
+4. 模型看得见什么
+5. 什么时候你会想换掉它
+6. 坑与边界
 
 当前进度：**59 / 130 篇已成稿**，71 篇待补。
 
 ## 计数为什么是 130
 
-三个出厂 bundle 的 patch 文件里 `- id:` 行数是 **78 + 78 + 6 = 162**，但这不等于插件数：同一个包可以占多行（`dsh-tool-subagent` 同时挂在 `tool-subagent` 与 `tool-subagent-fork` 两个 id 上；`code-runtime` 在 `web-app` 与 `headless` 各一行），而两个不同的插件说明符也可能来自同一个包目录（`dsh-web-app` 与 `dsh-web-app/startup` 是同一个包的两个入口）。**按不重复的插件说明符（含子路径入口）去重后是 130 个**，本区因此是 130 篇。
+先说结论：**162 是行数，130 才是插件数。**
+
+三个出厂 bundle 的 patch 文件里，`- id:` 行数是 **78 + 78 + 6 = 162**。但一行不等于一个插件，两种重复会把这个数字撑起来，也让"按包目录数"同样不成立：
+
+| 现象 | 例子 |
+|---|---|
+| 同一个包占多行 | `dsh-tool-subagent` 同时挂在 `tool-subagent` 与 `tool-subagent-fork` 两个 id 上；`code-runtime` 在 `web-app` 与 `headless` 各一行 |
+| 两个不同的插件说明符来自同一个包目录 | `dsh-web-app` 与 `dsh-web-app/startup` 是同一个包的两个入口 |
+
+所以计数口径既不是行数、也不是包目录数，而是插件说明符：
+
+```
+行     = 三个 bundle 的 patch 文件里所有 `- id:` 行     // 78 + 78 + 6 = 162
+说明符 = [每一行对应的插件说明符（含子路径入口）]
+插件   = 去重(说明符)                                   // 130
+```
+
+**按不重复的插件说明符（含子路径入口）去重后是 130 个**，本区因此是 130 篇。
 
 ## 状态标记
 
@@ -284,4 +308,3 @@
 | ⏳ `@deepseek-ai/dsh-headless` | `headless-runner` | `headless` | 待补 |
 | ⏳ `@deepseek-ai/dsh-headless/startup` | `headless-startup` | `headless` | 待补 |
 | ⏳ `@deepseek-ai/dsh-agent-presets` | `agent-presets` | `web-app` | 待补 |
-

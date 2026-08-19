@@ -11,7 +11,11 @@
   name: '@deepseek-ai/dsh-session-stats'
 ```
 
-出处 `packages/bundle/web-app/cordis.patch.yml:84-85`，上方注释：`Whole-log turn/step counts for the chat stats strip (the sessionStats projection key); the projection registry itself is a base-layer row.` 无 config、无 inject 行；包自己声明 `export const inject = ['sessionProjections']`（`packages/session/session-stats/src/index.ts:20`）。注册表 `session-projection` 本身是 base 层的行（`packages/bundle/base/cordis.patch.yml:126-127`），各形态都有；只有本行是 web-app 独有（其余 bundle 无此行），所以 `sessionStats` 这个 key 只在 Web 形态存在。
+配置树上就这两行，上方带一句注释：`Whole-log turn/step counts for the chat stats strip (the sessionStats projection key); the projection registry itself is a base-layer row.`（`packages/bundle/web-app/cordis.patch.yml:84-85`）
+
+这两行里没有 config、也没有 inject——依赖是包自己声明的：`export const inject = ['sessionProjections']`（`packages/session/session-stats/src/index.ts:20`）。
+
+值得单独记一笔的是它的挂载范围。注册表 `session-projection` 本身是 base 层的行（`packages/bundle/base/cordis.patch.yml:126-127`），各形态都有；而 `session-stats` 这一行只有 web-app 独有，其余 bundle 无此行。所以 `sessionStats` 这个 key 只在 Web 形态存在。
 
 ## 它注册了什么
 
@@ -21,7 +25,9 @@
 | 类型声明 | `SessionProjectionMap.sessionStats` | 唯一声明处 `src/types.ts:41-46`，字段文档在 `src/types.ts:22-39` |
 | invariant | 包名占位 | 空实现：折叠是纯函数，wire payload 由注册表逐次 schema 校验，事件关系归 dsh-agent-loop（`src/invariant.ts:17-26`） |
 
-**不注册 service、不监听任何事件、不注册工具或命令。** 它是 function plugin，只有一个 `apply`（`src/index.ts:27`）；投递（快照、变更流、历史尾页、`session/projection` 推送帧、会话列表行）全归投影 seam（`README.md:5`）。
+**不注册 service、不监听任何事件、不注册工具或命令。** 它是 function plugin，只有一个 `apply`（`src/index.ts:27`）。
+
+投递那一摊——快照、变更流、历史尾页、`session/projection` 推送帧、会话列表行——全归投影 seam（`README.md:5`）。
 
 ## 配置项
 
@@ -67,17 +73,61 @@ flowchart TD
     class F,G,H,I,J data
 ```
 
-schema 是 `.strict()` 的八个非负数（`src/projection.ts:65-74`）。每个字段在第一条贡献事件到达前都是 0；注册表一旦组合，key 永远在，客户端读**值**而不是判 key 是否存在（`README.md:15`）。
+换成一遍循环来看，这八个数就是同一趟扫描里各自累加出来的：
 
-为什么数 `step/end` 而不是 `assistant/message`：README 说得很直白——它是 step 生命周期的权威，agent loop 在 `finally` 里每进一个 step 就恰好写一条，所以完成、失败、取消、撞 max-tokens 的步都算；换成数组装消息会把 max-tokens 的 usage-host 消息多算、把取消的步漏算（`README.md:9`）。
+```
+for e in 整条日志:
+    if e is step/start:
+        本步起点 = e.时刻                       // llmMs 与 ttftMs 共用这个起点
+
+    if e is 本步首条非空 delta chunk:
+        ttftMs += e.时刻 - 本步起点
+        ttftSteps += 1
+        首 token 时刻 = e.时刻
+
+    if e is assistant/message 组装完成:
+        llmMs += e.时刻 - 本步起点
+        if 该步报了 usage:
+            decodeMs     += e.时刻 - 首 token 时刻
+            decodeTokens += usage 里 provider 报的输出 token
+
+    if e is tool/call:
+        pendingCalls[e.callId] = e.时刻
+    if e is tool/result 且 Object.hasOwn(pendingCalls, e.callId):
+        toolMs += e.时刻 - pendingCalls[e.callId]
+        删掉这条挂起
+
+    if e is step/end:
+        steps += 1
+        if e.turn != lastTurn:                  // 只有换了轮次才 +1
+            turns += 1
+            lastTurn = e.turn
+
+    if e is turn/end:
+        清空 pendingCalls                        // 没等到结果的不留到下一轮
+```
+
+折叠逻辑整体在 `src/projection.ts:105-171`。
+
+schema 是 `.strict()` 的八个非负数（`src/projection.ts:65-74`）。每个字段在第一条贡献事件到达前都是 0；注册表一旦组合，key 永远在，所以客户端读**值**而不是判 key 是否存在（`README.md:15`）。
+
+为什么数 `step/end` 而不是 `assistant/message`？README 说得很直白：它是 step 生命周期的权威，agent loop 在 `finally` 里每进一个 step 就恰好写一条。
+
+于是完成、失败、取消、撞 max-tokens 的步都算。换成数组装消息，会把 max-tokens 的 usage-host 消息多算、把取消的步漏算（`README.md:9`）。
 
 ## 模型看得见什么
 
-README："None, as the plugin only computes a client-facing read model of already-logged session events and touches no prompt, message, schema, stream, or tool result."（`README.md:28`）KV Cache 亦无影响（`README.md:32`）。
+README："None, as the plugin only computes a client-facing read model of already-logged session events and touches no prompt, message, schema, stream, or tool result."（`README.md:28`）
+
+KV Cache 亦无影响（`README.md:32`）。
 
 ## 什么时候你会想换掉它 / 怎么换
 
-- **不想要**：删掉或 `disabled: true`。Web 聊天页的 stats strip 不会消失，而是**整条退回窗口内折叠**——`StatsLine` 里 `useProjection('sessionStats') ?? deriveStats(settledNodes)`（`packages/client/ui-conversation/src/client/chat/StatsLine.tsx:170-171`）。字段名两边刻意一样，就是为了能整体回退。差别是：窗口折叠只统计已经加载进来的那段历史，翻页和压缩会让数字变。
+**不想要**：删掉或 `disabled: true`。
+
+这里有个反直觉的点——Web 聊天页的 stats strip 不会消失，而是**整条退回窗口内折叠**：`StatsLine` 里写的是 `useProjection('sessionStats') ?? deriveStats(settledNodes)`（`packages/client/ui-conversation/src/client/chat/StatsLine.tsx:170-171`）。字段名两边刻意起成一样，就是为了能整体回退。
+
+差别在口径：窗口折叠只统计已经加载进来的那段历史，翻页和压缩会让数字变。
 
 两条路径的口径差异摊开看：
 
@@ -99,8 +149,10 @@ flowchart LR
     class P1,P2 data
     class Q1,Q2 note
 ```
-- **想在别的形态里也有**：把这一行搬进对应 bundle 即可，前提是那棵树上有 `session-projection`（base 层已有）；不然 fiber 会一直 pending，什么都不注册（`README.md:24`）。
-- **想改口径**：没有配置开关，折叠逻辑是编译进包的纯函数（`src/projection.ts:105-171`）。要改只能自己写一个 key 不同的投影单元并接管消费端。
+
+**想在别的形态里也有**：把这一行搬进对应 bundle 即可，前提是那棵树上有 `session-projection`（base 层已有）；不然 fiber 会一直 pending，什么都不注册（`README.md:24`）。
+
+**想改口径**：没有配置开关，折叠逻辑是编译进包的纯函数（`src/projection.ts:105-171`）。要改只能自己写一个 key 不同的投影单元，并接管消费端。
 
 ## 坑与边界
 
@@ -111,10 +163,13 @@ README《Known Limitations》四条（`README.md:36-39`）：
 - **口径是日志范围而非界面范围**：被压缩掉的那些步仍然计数——这些数字描述整个会话，不是当前模型可见的表面。
 - **只在 web-app bundle 挂载**：别的形态没有 `sessionStats` key，消费者退回窗口内计数。
 
-另外两处读源码得到的细节：
-- `tool/result` 用 `Object.hasOwn` 查 `pendingCalls`——`callId` 是模型/工具 JSON 边界上来的，`constructor`、`toString` 这类原型属性名必须读作"未匹配"，否则 `toolMs` 会被 NaN 污染（`src/projection.ts:147-149`）。
-- `turn/end` 会清掉没等到结果的挂起调用，避免持久化状态无限增长（`src/projection.ts:163-167`）。
-- 与 [session-title](./dsh-session-title.md) 注册的 `title` 单元同住一个 `sessionProjections` 注册表，两者互不相干；差别在于 title 那颗是 base 层、且用 `ctx.inject` 做可选挂载，本颗是硬 `inject`，没有注册表就整个不启动。
+另外三处是读源码得到的细节。
+
+`tool/result` 用 `Object.hasOwn` 查 `pendingCalls`，不是直接取值。原因是 `callId` 从模型/工具的 JSON 边界上来，`constructor`、`toString` 这类原型属性名必须读作"未匹配"，否则 `toolMs` 会被 NaN 污染（`src/projection.ts:147-149`）。
+
+`turn/end` 会清掉没等到结果的挂起调用，避免持久化状态无限增长（`src/projection.ts:163-167`）。
+
+它与 [session-title](./dsh-session-title.md) 注册的 `title` 单元同住一个 `sessionProjections` 注册表，两者互不相干。差别在挂载方式：title 那颗是 base 层、且用 `ctx.inject` 做可选挂载；本颗是硬 `inject`，没有注册表就整个不启动。
 
 ## 未确认
 

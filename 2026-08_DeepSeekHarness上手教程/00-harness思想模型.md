@@ -2,9 +2,13 @@
 
 > 基于 `deepseek-ai/deepseek-harness` v0.1.0-rc.5（commit `47f9438`，2026-08-13 19:38 +0800），2026-08-14 核对。
 
-这一章只干一件事：把 "harness" 这个词讲清楚，并用 dsh 自己的代码证明它跟"框架"不是同一种东西。不讲安装、不讲配置，那些从 01 章开始。
+这一章只干一件事：把 "harness" 这个词讲清楚，并用 dsh 自己的代码证明它跟"框架"不是同一种东西。
 
-值得先花二十分钟读它，是因为这个区别不是术语洁癖。它决定了你写下的代码在下一代模型手里是增值还是贬值——这句话第 6 节会变成一条可以直接拿去自测的判据。中间会顺带说清楚一件反直觉的事：harness 式设计的工作量根本不在那个循环里，循环只有一个包，环境有几十个，这个数字你自己 clone 下来就能复现。
+不讲安装、不讲配置，那些从 01 章开始。
+
+值得先花二十分钟读它，是因为这个区别不是术语洁癖。它决定了你写下的代码在下一代模型手里是增值还是贬值——这句话第 6 节会变成一条可以直接拿去自测的判据。
+
+中间会顺带说清楚一件反直觉的事：harness 式设计的工作量根本不在那个循环里。循环只有一个包，环境有几十个，这个数字你自己 clone 下来就能复现。
 
 ---
 
@@ -12,7 +16,9 @@
 
 **harness = 把一个语言模型变成能干活的 agent 所需要的、模型之外的那一整套东西。**
 
-模型只负责一件事：决定下一步做什么。剩下的全归 harness——给它工具、真的去执行、把执行结果变成模型看得懂的文本、判断哪些操作需要人点头、超时了怎么收场、上下文塞满了扔掉哪些、以及把发生过的事记成一份能回放的日志。
+模型只负责一件事：决定下一步做什么。
+
+剩下的全归 harness——给它工具、真的去执行、把执行结果变成模型看得懂的文本、判断哪些操作需要人点头、超时了怎么收场、上下文塞满了扔掉哪些、以及把发生过的事记成一份能回放的日志。
 
 这条分界线的形状很简单：模型只往外发决定，执行、关卡、上下文、日志全长在它外面，而结果最终都要以文本的形式回到它眼前。
 
@@ -47,25 +53,39 @@ dsh 的 README 第一句就是这个定位：
 > DeepSeek Harness (`dsh`) is an open-source agent harness developed by DeepSeek AI.
 > — `README.md:5`
 
-官方中文版没有翻掉 harness，而是保留原词加了个括号注解："由 DeepSeek AI 开发的开源 agent harness（智能体框架）"（`README.zh.md:5`）。注解本身不算错，但它恰好抹掉了本章要讲的那个区别，所以下文我一律用原词。
+官方中文版没有翻掉 harness，而是保留原词加了个括号注解："由 DeepSeek AI 开发的开源 agent harness（智能体框架）"（`README.zh.md:5`）。
+
+注解本身不算错，但它恰好抹掉了本章要讲的那个区别，所以下文我一律用原词。
 
 ### 挽具这个比喻
 
-harness 的字面义是**挽具**：套在马身上、把马的力气传到车上的那套皮具与绳索。三层意思都对得上——力量来自马而不是挽具，正如能力来自模型而不是 harness；挽具不教马怎么跑，只决定力往哪传、什么时候能停，正如 harness 不规定推理步骤，只决定模型的动作如何作用于世界；换一匹更强的马，挽具照用。
+harness 的字面义是**挽具**：套在马身上、把马的力气传到车上的那套皮具与绳索。三层意思都对得上。
 
-最后这条是全章题眼。但请把整个比喻当**我的解释性写法**看，dsh 文档里没有任何一处这么讲。
+| 挽具 | harness |
+|---|---|
+| 力量来自马，不来自挽具 | 能力来自模型，不来自 harness |
+| 挽具不教马怎么跑，只决定力往哪传、什么时候能停 | harness 不规定推理步骤，只决定模型的动作如何作用于世界 |
+| 换一匹更强的马，挽具照用 | 换一个更强的模型，harness 照用 |
+
+最后这条是全章题眼。
+
+但请把整个比喻当**我的解释性写法**看，dsh 文档里没有任何一处这么讲。
 
 ### 词源那条线：能核实的和不能核实的
 
-社区里流传着一条演化线：`test harness`（跑测试用的固定装置）→ `eval harness`（跑模型评测用的那一层）→ `agent harness`（跑 agent 用的那一层）。听着很顺，**但这条线我在 dsh 仓库里核实不了**，本教程也拿不出可引用的一手来源，所以它进本章末尾的未确认列表。
+社区里流传着一条演化线：`test harness`（跑测试用的固定装置）→ `eval harness`（跑模型评测用的那一层）→ `agent harness`（跑 agent 用的那一层）。
+
+听着很顺，**但这条线我在 dsh 仓库里核实不了**，本教程也拿不出可引用的一手来源，所以它进本章末尾的未确认列表。
 
 仓库里能核实的只有两件事。
 
-一是 dsh 自己用 harness 指**产品整体**。术语表写 "The harness convention: a live agent is the key of its own scope"（`docs/glossary.md:14`），agent-loop 的 README 写 "This is the only package in the harness that contains concrete loop logic"（`packages/core/agent-loop/README.md:7`），两处的 harness 都等于"这套 agent 运行时"。
+一是 dsh 自己用 harness 指**产品整体**。术语表写 "The harness convention: a live agent is the key of its own scope"，agent-loop 的 README 写 "This is the only package in the harness that contains concrete loop logic"，两处的 harness 都等于"这套 agent 运行时"（`docs/glossary.md:14`、`packages/core/agent-loop/README.md:7`）。
 
 二是同一个仓库里，harness **也仍在"测试夹具"的老意义上使用**：`docs/testing.md:23` 提到 `makeBridgeHarness({ withBash: true })`，那是一个在测试里接上真实工具与执行器（`dsh-bash-local` + `dsh-tool-bash`）的夹具工厂。
 
-也就是说，"给被测对象搭一套外围装置，让它能真的跑起来"这层意思，在同一份代码库里同时服务于测试和 agent。这是可核实的巧合。历史上是不是前者传给了后者，我不写。
+也就是说，"给被测对象搭一套外围装置，让它能真的跑起来"这层意思，在同一份代码库里同时服务于测试和 agent。
+
+这是可核实的巧合。历史上是不是前者传给了后者，我不写。
 
 ---
 
@@ -92,7 +112,9 @@ graph.edge("verify",    "patch", when = testsFail)
 graph.run(input)
 ```
 
-这段东西读起来很舒服：流程一目了然，可以画成图，可以单测每个节点，跑一万次都是同一条路。它的代价长在同一个地方——**模型只能顺着你铺的轨道走，你没画的那条边它就走不了。**
+这段东西读起来很舒服：流程一目了然，可以画成图，可以单测每个节点，跑一万次都是同一条路。
+
+它的代价长在同一个地方——**模型只能顺着你铺的轨道走，你没画的那条边它就走不了。**
 
 具体是这样：
 
@@ -129,7 +151,9 @@ flowchart TD
     class X1,X2,X3 danger
 ```
 
-于是维护就变成了补边补节点：每发现一种模型"本来会做但被拦住"的行为，就往图里加一条边。图越长越像一张流程图，而你正在用流程图去规定一个比流程图聪明的东西该怎么想。
+于是维护就变成了补边补节点：每发现一种模型"本来会做但被拦住"的行为，就往图里加一条边。
+
+图越长越像一张流程图，而你正在用流程图去规定一个比流程图聪明的东西该怎么想。
 
 ---
 
@@ -137,16 +161,18 @@ flowchart TD
 
 反过来：**核心循环短到无话可说，顺序交给模型。**
 
-先约定两个词，dsh 术语表给了定义（`docs/glossary.md:37-38`）。**turn** 是一次把已进入 inbox 的输入排空，模型和它的工具都停下来才算结束；**step** 是一次模型请求外加这次响应引发的工具执行，一个 turn 含零到多个 step。
+先约定两个词，dsh 术语表给了定义。**turn** 是一次把已进入 inbox 的输入排空，模型和它的工具都停下来才算结束；**step** 是一次模型请求外加这次响应引发的工具执行，一个 turn 含零到多个 step。（`docs/glossary.md:37-38`）
 
-驱动循环在 `packages/core/agent-loop/src/agent.ts`。最外层在私有方法 `kick()`（`agent.ts:210`）里，就这样一行：
+驱动循环在 `packages/core/agent-loop/src/agent.ts`。最外层在私有方法 `kick()` 里，就这样一行：
 
 ```ts
 // packages/core/agent-loop/src/agent.ts:212
 while (await this.turn()) {}
 ```
 
-`turn()`（`agent.ts:246`）内部再套一层 `while (true)`（`agent.ts:263`）反复取 step，而 `step()`（`agent.ts:332`）的骨架只有四件事：拼请求、流式收模型输出、落日志、看有没有工具调用。一个 step 收不收工，判据就是这两行：
+`turn()` 内部再套一层 `while (true)` 反复取 step，而 `step()` 的骨架只有四件事：拼请求、流式收模型输出、落日志、看有没有工具调用。
+
+一个 step 收不收工，判据就是这两行：
 
 ```ts
 // packages/core/agent-loop/src/agent.ts:393-394
@@ -154,9 +180,34 @@ const toolCalls = message.content.filter(block => block.type === 'tool-call')
 if (toolCalls.length === 0) return { kind: 'completed' }
 ```
 
-没有工具调用就算完成；有就执行完再走下一个 step（`agent.ts:395-399`）。最外层那个 `while` 的终止条件在另一处：inbox 里没有待处理输入了，`turn()` 返回 `false`（`agent.ts:324`）。
+三层套下来就是全部骨架，写成示意伪代码是这样：
 
-三层套下来就是全部骨架：`kick()` 反复开 turn，`turn()` 反复取 step，一个 step 走到最后只问一句有没有工具调用。
+```
+kick():
+    while turn():           # turn 返回 false 就整体停
+        pass
+
+turn():
+    if inbox 里没有待处理输入:
+        return false        # 最外层那个 while 的终止条件在这
+    while true:
+        s = step()
+        if s.kind == 'completed':
+            break
+    return true
+
+step():
+    拼请求
+    流式收模型输出
+    落日志
+    if 这条消息里没有 tool-call:
+        return { kind: 'completed' }     # 没有工具调用就算完成
+    执行工具                              # 有就执行完再走下一个 step
+```
+
+一句话：`kick()` 反复开 turn，`turn()` 反复取 step，一个 step 走到最后只问一句有没有工具调用。
+
+行号：`kick()` 在 `agent.ts:210`，那行 `while` 在 `:212`；`turn()` 在 `:246`，内层 `while (true)` 在 `:263`，inbox 空时返回 `false` 在 `:324`；`step()` 在 `:332`，有工具调用就执行完再走下一个 step 在 `:395-399`。
 
 ```mermaid
 flowchart TD
@@ -183,11 +234,17 @@ flowchart TD
     class K,DONE entry
 ```
 
-请注意上面这些代码里缺了什么。**"取日志 → 定位 → 修改 → 验证"这个顺序在源码里根本不存在**，它是模型每一轮自己决定的。想先看配置文件？调 `read` 就行（工具名见 `packages/fs/tool-fs/src/read.ts:77`）。验证完想回头重取日志？再调一次 `bash` 就行（`packages/shell/tool-bash/src/index.ts:243`）。没有边要补，因为压根没有图。
+请注意上面这些代码里缺了什么。
+
+**"取日志 → 定位 → 修改 → 验证"这个顺序在源码里根本不存在**，它是模型每一轮自己决定的。
+
+想先看配置文件？调 `read` 就行。验证完想回头重取日志？再调一次 `bash` 就行。没有边要补，因为压根没有图。（工具名分别见 `packages/fs/tool-fs/src/read.ts:77`、`packages/shell/tool-bash/src/index.ts:243`）
 
 ### 立刻纠正一个误解
 
-读到这里最容易得出的结论是"harness 更简单"。不对。**harness 不是更简单，是难点搬了家。**
+读到这里最容易得出的结论是"harness 更简单"。
+
+不对。**harness 不是更简单，是难点搬了家。**
 
 框架里你控制的是**控制流**，harness 里你控制的是**模型所处的环境**：
 
@@ -200,7 +257,9 @@ flowchart TD
 | 工具卡住了怎么办 | 节点超时 | **核心工作**，且要分工具 |
 | 上下文塞满了扔什么、留什么 | 通常没有 | **核心工作** |
 
-右列每一行都是模型看得见、并据此改变行为的东西。工程量全在这里。下面用 dsh 的包结构把这句话坐实。
+右列每一行都是模型看得见、并据此改变行为的东西。工程量全在这里。
+
+下面用 dsh 的包结构把这句话坐实。
 
 ---
 
@@ -208,7 +267,7 @@ flowchart TD
 
 ### 4.1 循环在配置里就是一行 `- id:`
 
-先补三个词，第 03 / 22 章细讲。**profile** 是一份具名的启动组合，列出它要叠哪些 bundle；**bundle** 是"一组 Cordis 配置行 + 它们挂载的代码"的分发格式；两者各自在自己 `package.json` 的 `dsh` 字段里声明（`docs/architecture.md:19-23`）。dsh 的启动树就由这些 bundle 的 patch 文件按序叠出来，`dsh-base` 是每个 profile 的第一层（`docs/architecture.md:25`）。
+先补三个词，第 03 / 22 章细讲。**profile** 是一份具名的启动组合，列出它要叠哪些 bundle；**bundle** 是"一组 Cordis 配置行 + 它们挂载的代码"的分发格式；两者各自在自己 `package.json` 的 `dsh` 字段里声明。dsh 的启动树就由这些 bundle 的 patch 文件按序叠出来，`dsh-base` 是每个 profile 的第一层。（`docs/architecture.md:19-23`、`:25`）
 
 在这份文件里，**agent 循环和其它任何插件长得一模一样**：
 
@@ -220,7 +279,11 @@ flowchart TD
     agents: []
 ```
 
-整份文件 451 行、78 个这样的 `- id:` 行，它只是其中之一。而按 `docs/architecture.md:27` 的说法，上层 patch 按 id 命中某一行后会**整体替换它的 config**，不是深合并，这一行也不例外。架构文档说得更直白：
+整份文件 451 行、78 个这样的 `- id:` 行，它只是其中之一。
+
+而按 `docs/architecture.md:27` 的说法，上层 patch 按 id 命中某一行后会**整体替换它的 config**，不是深合并，这一行也不例外。
+
+架构文档说得更直白：
 
 > Every part of the product is a plugin, including the model adapter, the tool registry, the session log, and the agent loop itself, so every part is replaceable from configuration.
 > — `docs/architecture.md:11`
@@ -230,7 +293,11 @@ flowchart TD
 
 ### 4.2 有多少包真的依赖循环实现
 
-先交代口径，免得数字变成空口无凭。我遍历了 `packages/<group>/<pkg>/package.json` 共 219 份（`find packages -mindepth 3 -maxdepth 3 -name package.json | wc -l` 得到），解析 JSON，按 `dependencies` / `peerDependencies` / `devDependencies` / `optionalDependencies` 四个字段分别统计谁引用了 `@deepseek-ai/dsh-agent-loop`。包名是精确匹配，所以不含另一个包 `@deepseek-ai/dsh-agent-loop-testkit`（它在 `packages/test-support/agent-loop-testkit/`）。结果：
+先交代口径，免得数字变成空口无凭。
+
+我遍历了 `packages/<group>/<pkg>/package.json` 共 219 份（`find packages -mindepth 3 -maxdepth 3 -name package.json | wc -l` 得到），解析 JSON，按 `dependencies` / `peerDependencies` / `devDependencies` / `optionalDependencies` 四个字段分别统计谁引用了 `@deepseek-ai/dsh-agent-loop`。
+
+包名是精确匹配，所以不含另一个包 `@deepseek-ai/dsh-agent-loop-testkit`（它在 `packages/test-support/agent-loop-testkit/`）。结果：
 
 | 依赖字段 | 包数 | 是谁 |
 |---|---|---|
@@ -239,14 +306,20 @@ flowchart TD
 | `devDependencies` | 25 | 测试期依赖，配合 `dsh-agent-loop-testkit` 起一个真循环来跑集成测试 |
 | `optionalDependencies` | 0 | — |
 
-**219 个包里，运行期依赖循环实现的是 2 个，其中 1 个是 bundle、1 个是示例。**其余 217 个包在运行期不 import 循环，其中 25 个只在自己的测试里用它；它们靠服务与事件挂在扩展点上。这就是 agent-loop README 那句话的工程表现：
+**219 个包里，运行期依赖循环实现的是 2 个，其中 1 个是 bundle、1 个是示例。**
+
+其余 217 个包在运行期不 import 循环，其中 25 个只在自己的测试里用它；它们靠服务与事件挂在扩展点上。
+
+这就是 agent-loop README 那句话的工程表现：
 
 > This is the only package in the harness that contains concrete loop logic. Everything else is an abstract service or a plugin against extension points — new behavior goes into plugins, not here.
 > — `packages/core/agent-loop/README.md:7`
 
 ### 4.3 与此对照：环境有多少包
 
-同样是现场数的，`ls -d packages/<group>/*/ | wc -l` 数每个分组下的包目录。表里反复出现的 **seam** 是 dsh 术语表的词：一个可替换的能力，由"服务定义 + 一到多个提供方 + 消费方"三种角色构成，`packages/shell` 是它给的范例（`docs/glossary.md:9`）。
+同样是现场数的，`ls -d packages/<group>/*/ | wc -l` 数每个分组下的包目录。
+
+表里反复出现的 **seam** 是 dsh 术语表的词：一个可替换的能力，由"服务定义 + 一到多个提供方 + 消费方"三种角色构成，`packages/shell` 是它给的范例（`docs/glossary.md:9`）。
 
 | 分组 | 包数 | 管什么 |
 |---|---|---|
@@ -300,7 +373,9 @@ flowchart TD
 
 ## 5. 环境工程学：四个真实样例
 
-下面四个都是 dsh 内置插件。它们都不改流程，只改模型所处的环境，而效果比在图上加一条边更强——因为它们对**大量**路径同时生效。每个的覆盖边界我都在各自小节里写清楚，那些边界比结论更值得记。
+下面四个都是 dsh 内置插件。它们都不改流程，只改模型所处的环境，而效果比在图上加一条边更强——因为它们对**大量**路径同时生效。
+
+每个的覆盖边界我都在各自小节里写清楚，那些边界比结论更值得记。
 
 四个挂的不是同一个点。先看一次工具调用要穿过哪些关卡，以及它们各自守在哪一关（整条管线的逐关讲解在第 13 章）。
 
@@ -337,23 +412,71 @@ flowchart TD
 
 ### 5.1 没读过就不许写：`fs-observation-policy`
 
-它在 `ctx.fs` provider 之上加了一层文件层不变式：记录"这个 owner 观察过哪些路径、观察到的版本是多少"，再把这份记录翻译成 provider 的 CAS 守卫（CAS = compare-and-swap，写的时候带上你以为的版本号，对不上就整个写入失败；`packages/fs/fs-observation-policy/README.md:42`）。
+它在 `ctx.fs` provider 之上加了一层文件层不变式：记录"这个 owner 观察过哪些路径、观察到的版本是多少"，再把这份记录翻译成 provider 的 CAS 守卫。
 
-插件体本身小得出奇，只挂三个 `fs/*` 监听器，源码里就是三行 `ctx.on`（`src/index.ts:119`、`:122`、`:127`，对照表在 `README.md:36-38`）。效果是两条：编辑一个从没读过的文件会抛 `FS_NOT_OBSERVED`，错误文本是 `edit requires reading "<path>" first`（`src/index.ts:82`）；读过但文件已被改动则报 `FS_STALE_VERSION`，工具层再给消息追加一句 `— re-read the file, then retry`（`README.md:58`）。
+CAS = compare-and-swap，写的时候带上你以为的版本号，对不上就整个写入失败（`packages/fs/fs-observation-policy/README.md:42`）。
+
+机制写成示意伪代码就是：
+
+```
+observed[owner][path] = version          # 观察一次，记下路径和版本
+
+改动一个 path 时:
+    if path 不在 observed[owner]:
+        抛 FS_NOT_OBSERVED               # edit requires reading "<path>" first
+    else:
+        带上 observed 里那个 version 交给 provider 做 CAS
+
+provider 侧:
+    版本对不上 → 整个写入失败 → FS_STALE_VERSION
+    工具层再给消息追加一句 "— re-read the file, then retry"
+```
+
+插件体本身小得出奇，只挂三个 `fs/*` 监听器，源码里就是三行 `ctx.on`。
+
+行号：三行 `ctx.on` 在 `src/index.ts:119`、`:122`、`:127`（对照表在 `README.md:36-38`）；`FS_NOT_OBSERVED` 的错误文本 `edit requires reading "<path>" first` 在 `src/index.ts:82`；`FS_STALE_VERSION` 的追加文案在 `README.md:58`。
 
 **为什么比改流程有效**：用图去解决这件事，你得在每个可能编辑文件的节点前插一个"先读"节点，而且只覆盖你想到的那些节点。这里是一条文件层不变式，凡是走文件工具的改动，任何顺序、任何模型走法都绕不过去。
 
-**它管到哪为止**：README 自己写了三条边界，别记错。闸门只对**经文件工具发出的改动**生效——`fs/write-intent` / `fs/edit-intent` 是那个工具包 dispatch 的，管线图上标的是 "tool-fs mutations only"（`docs/tool-execution-pipeline.md:19`、`README.md:32`）。直接拿 `ctx.fs` 写文件的插件不经过它（`README.md:50`），直接拿 `ctx.fs` 读文件也不会被记成"观察过"（`README.md:72`）。它约束的还**不是"你读全了没有"**：任何一次窗口读都授权整文件覆写（`README.md:73`）。
+**它管到哪为止**：README 自己写了三条边界，别记错。
+
+| 边界 | 具体是什么 | 出处 |
+|---|---|---|
+| 只管文件工具发出的改动 | `fs/write-intent` / `fs/edit-intent` 是那个工具包 dispatch 的，管线图上标 "tool-fs mutations only" | `docs/tool-execution-pipeline.md:19`、`README.md:32` |
+| 直接用 `ctx.fs` 就绕过了 | 直接拿 `ctx.fs` 写文件不经过它；直接拿 `ctx.fs` 读文件也不会被记成"观察过" | `README.md:50`、`:72` |
+| 不管"你读全了没有" | 任何一次窗口读都授权整文件覆写 | `README.md:73` |
 
 ### 5.2 重复调同一个工具时提醒：`repeat-tool-reminder`
 
-它统计每个 agent"连续调用同一工具、且参数规范化后完全相同"的次数，在配置的次数上注入一段升级式提醒，让模型停下来重读上一次结果、换个做法或者干脆收工。默认阈值 `[3, 5, 8]`，写在 Schema 的 `.default()` 里（`packages/guard/repeat-tool-reminder/src/index.ts:46`，配置示例见 `README.md:13`）。它**不否决、不改写**任何调用（`README.md:5`）。
+它统计每个 agent"连续调用同一工具、且参数规范化后完全相同"的次数，在配置的次数上注入一段升级式提醒，让模型停下来重读上一次结果、换个做法或者干脆收工。
 
-**为什么比改流程有效**：卡在循环里是模型的典型失败模式，但它可能卡在任何一对工具上，图里没法穷举。这个插件挂在 `tools/post-execute` 上（`src/index.ts:213`），连被 `tools/pre-execute` 拒掉的调用也计数（`README.md:28`）——"反复撞一堵拒绝的墙"正是最该打断的循环。提醒走决策的 `additionalContexts`，落成一条带来源标注的合成 `user/message`，而 `tool/result` 仍然是工具自己的原始输出（`README.md:35`），审计不被污染。
+示意伪代码：
+
+```
+if 本次工具名 == 上次 且 参数规范化后完全相同:
+    count += 1
+else:
+    count = 1
+
+if count 命中阈值（默认 [3, 5, 8]）:
+    注入一段升级式提醒          # 只提醒，不否决、不改写这次调用
+```
+
+默认阈值 `[3, 5, 8]` 写在 Schema 的 `.default()` 里（`packages/guard/repeat-tool-reminder/src/index.ts:46`，配置示例见 `README.md:13`）。它**不否决、不改写**任何调用（`README.md:5`）。
+
+**为什么比改流程有效**：卡在循环里是模型的典型失败模式，但它可能卡在任何一对工具上，图里没法穷举。
+
+这个插件挂在 `tools/post-execute` 上，连被 `tools/pre-execute` 拒掉的调用也计数——"反复撞一堵拒绝的墙"正是最该打断的循环（`src/index.ts:213`、`README.md:28`）。
+
+提醒走决策的 `additionalContexts`，落成一条带来源标注的合成 `user/message`，而 `tool/result` 仍然是工具自己的原始输出（`README.md:35`），审计不被污染。
 
 ### 5.3 超时是一个可插拔策略，不是硬编码：`timeout-policy`
 
-零配置插件，整个插件体只注册一个 `tools/execute` 环绕监听器，源码里就一句 `ctx.on('tools/execute', ...)`（`packages/guard/timeout-policy/src/index.ts:56`）。预算不写在它自己身上，而是从工具**自己的**声明 `ToolDefinition.timeoutMs` 里读（`README.md:5`）；超时就把结果换成结构化的 `TOOL_TIMEOUT`（`src/index.ts:46`、`README.md:24`）。在配置里它也是一行：
+零配置插件，整个插件体只注册一个 `tools/execute` 环绕监听器，源码里就一句 `ctx.on('tools/execute', ...)`（`packages/guard/timeout-policy/src/index.ts:56`）。
+
+预算不写在它自己身上，而是从工具**自己的**声明 `ToolDefinition.timeoutMs` 里读（`README.md:5`）；超时就把结果换成结构化的 `TOOL_TIMEOUT`（`src/index.ts:46`、`README.md:24`）。
+
+在配置里它也是一行：
 
 ```yaml
 # packages/guard/timeout-policy/README.md:12
@@ -361,13 +484,25 @@ flowchart TD
   name: '@deepseek-ai/dsh-tool-call-timeout-policy'
 ```
 
-**为什么比改流程有效**：删掉这一行，超时能力整体消失，别的什么都不变。多个 `tools/execute` 环绕器按注册顺序组合（`README.md:36`），而 Cordis 的规则是 "listeners run outermost-first"、默认注册是 push 到队尾（`vendor/cordis/src/events.ts:228`、`:236-241`、`:255`），先注册的在外层。于是"超时覆盖整个重试"还是"超时覆盖每次重试"，就变成了一个配置顺序问题。
+**为什么比改流程有效**：删掉这一行，超时能力整体消失，别的什么都不变。
 
-代价有三处，都得知道。它是**协作式**的，只通过 `exec.signal` 通知，不做强杀，忽略 signal 的工具不会停（`README.md:32`）。它**没有全局默认预算**，内置的 `bash` / `read` / `write` / `edit` 都故意不声明 `timeoutMs`（`README.md:57`）。还有一个最容易混的：别把它和 `bash` 自带的那个 `timeoutMs` **参数**搞混，那是模型可传的入参，由执行器自己实现并会真的杀掉命令（`packages/shell/tool-bash/src/index.ts:254`），跟这个插件不是一回事。
+多个 `tools/execute` 环绕器按注册顺序组合（`README.md:36`），而 Cordis 的规则是 "listeners run outermost-first"、默认注册是 push 到队尾（`vendor/cordis/src/events.ts:228`、`:236-241`、`:255`），先注册的在外层。于是"超时覆盖整个重试"还是"超时覆盖每次重试"，就变成了一个配置顺序问题。
+
+代价有三处，都得知道：
+
+| 代价 | 说明 | 出处 |
+|---|---|---|
+| 它是协作式的 | 只通过 `exec.signal` 通知，不做强杀，忽略 signal 的工具不会停 | `README.md:32` |
+| 没有全局默认预算 | 内置的 `bash` / `read` / `write` / `edit` 都故意不声明 `timeoutMs` | `README.md:57` |
+| 最容易混的那个同名参数 | 别把它和 `bash` 自带的那个 `timeoutMs` **参数**搞混，那是模型可传的入参，由执行器自己实现并会真的杀掉命令 | `packages/shell/tool-bash/src/index.ts:254` |
 
 ### 5.4 后置关卡可以把校验失败灌回给模型：`tools/post-execute` 的 `block`
 
-工具执行完之后还有一道 waterfall（`docs/tool-execution-pipeline.md:21`）。waterfall 是 dsh/Cordis 的洋葱式派发：一串监听器层层套在最内层的默认行为外面，每层都能改写参数，也能不调 `next()` 直接短路掉后面所有人（第 11 章专讲）。这道关卡的返回类型定义在：
+工具执行完之后还有一道 waterfall（`docs/tool-execution-pipeline.md:21`）。
+
+waterfall 是 dsh/Cordis 的洋葱式派发：一串监听器层层套在最内层的默认行为外面，每层都能改写参数，也能不调 `next()` 直接短路掉后面所有人（第 11 章专讲）。
+
+这道关卡的返回类型定义在：
 
 ```ts
 // packages/core/tools/src/index.ts:597
@@ -379,7 +514,11 @@ export type PostToolDecision =
 
 选 `block` 时，注册表把这次调用**改写成一个 `isError` 结果，内容就是你给的 `feedback`**（`packages/core/tools/src/index.ts:1748-1755`）。
 
-**为什么比改流程有效**：这意味着"编辑完跑一遍 lint，不过就把 lint 报错当成这次编辑工具的失败返回给模型"可以做成一个插件，而不必在图里加一个 lint 节点再加一条回边。模型看到的是它最熟悉的东西——一次失败的工具调用加一段错误文本——它天然就会去修。整条管线的形状见 `docs/tool-execution-pipeline.md`（文字说明在 `:6`，mermaid 图从 `:8` 起），逐关讲解在第 13 章。
+**为什么比改流程有效**：这意味着"编辑完跑一遍 lint，不过就把 lint 报错当成这次编辑工具的失败返回给模型"可以做成一个插件，而不必在图里加一个 lint 节点再加一条回边。
+
+模型看到的是它最熟悉的东西——一次失败的工具调用加一段错误文本——它天然就会去修。
+
+整条管线的形状见 `docs/tool-execution-pipeline.md`（文字说明在 `:6`，mermaid 图从 `:8` 起），逐关讲解在第 13 章。
 
 ---
 
@@ -412,9 +551,13 @@ flowchart TD
     class B1 data
 ```
 
-**写死的边会。**"验证失败必须回到修改"这条边，在更强的模型手里是障碍，它本来想回去重取日志。你写下的每一条顺序约束，都是在为今天这个模型的弱点打补丁，而补丁会比弱点活得更久。
+**写死的边会。**"验证失败必须回到修改"这条边，在更强的模型手里是障碍，它本来想回去重取日志。
 
-**沙箱、审批、日志、截断不会。**模型强十倍，你更需要沙箱（它能干的破坏更大）、更需要审批（它敢做的动作更多）、一样需要日志（要能复盘）、一样需要截断与压缩（上下文窗口再大也是有限的）。这些约束的对象不是模型的智力，是**它作用的这个世界**。
+你写下的每一条顺序约束，都是在为今天这个模型的弱点打补丁，而补丁会比弱点活得更久。
+
+**沙箱、审批、日志、截断不会。**模型强十倍，你更需要沙箱（它能干的破坏更大）、更需要审批（它敢做的动作更多）、一样需要日志（要能复盘）、一样需要截断与压缩（上下文窗口再大也是有限的）。
+
+这些约束的对象不是模型的智力，是**它作用的这个世界**。
 
 框架的代码随模型变强而贬值，harness 的代码随模型变强而增值。这是本章唯一需要记住的一句话。
 
@@ -442,7 +585,9 @@ flowchart TD
 | 子 agent 委派 | 把一段活交给子 agent，多个具名 provider 可并存 | `packages/subagent/README.md:5` |
 | workflow 引擎 | 跑模型写的编排脚本，有一个 provider 把脚本放进 worker 线程 | `packages/workflow/README.md:5`、`:10` |
 
-区别只有一个，但很关键：**它们是启动树里普通的一行 `- id:`，上层 patch 能整行替换掉（`docs/architecture.md:27`），不是骨架。**装上以后它们也不承担"决定下一步做什么"这件事，那始终在模型手里。而框架里的图是骨架，拆了就没有程序了。
+区别只有一个，但很关键：**它们是启动树里普通的一行 `- id:`，上层 patch 能整行替换掉（`docs/architecture.md:27`），不是骨架。**
+
+装上以后它们也不承担"决定下一步做什么"这件事，那始终在模型手里。而框架里的图是骨架，拆了就没有程序了。
 
 ---
 
@@ -471,15 +616,21 @@ flowchart TD
 ### 三条路线
 
 **A. 我只想用起来**（不写代码）
+
 `01` 整体架构 → `02` 跑起来 → `04` 接模型 → `03` 配置四层 → `18` 沙箱审批 → `17` 压缩与长会话 → `25` 常见坑。
+
 `24` 遥测与数据边界在公司电脑上先读。
 
 **B. 我要写插件扩展它**（在 A 的基础上）
+
 `05` Cordis 心智模型 → `06` 第一个插件 → `07` Service → `08` effect 与生命周期 → `09` 配置与 Schema → `10` 事件系统 → `11` waterfall → `12` 写工具 → `13` 工具执行管线。
+
 本章第 5 节那四个样例用到的关卡，逐关讲解在 `13`；已有 `hooks.json` 想直接复用走 `14`；扩展点找不着北时查 `20` 那张对照表。
 
 **C. 我要拿它当底座造自己的产品**（在 B 的基础上）
+
 `23` headless 与 SDK（怎么嵌进自己的程序）→ `22` bundle 与 profile（怎么把你的组合分发出去）→ `15` 上下文装配 + `16` 会话日志（你的产品语义最终要落到这两处）→ `19` 子 agent 与 workflow → `21` Code Mode。
+
 长程任务是两条相反的路，都要读：`26` 保留会话的 Goal 模式 vs `27` 扔掉会话的 Ralph Loop，然后 `28` 自己写一个续跑插件。
 
 按需查阅：`内置插件参考/` 一插件一篇，在正文里遇到某个包名想知道它到底注册了什么、模型看到什么、有什么已知限制时再翻。

@@ -13,9 +13,27 @@
 
 假设你要回答一个问题：「这个仓库里，用户登录之后 session 是怎么持久化的？」
 
-你打开 agent，它开始 grep、read、grep、read。二十次工具调用之后它给了你一个准确的答案。很好。但现在你的对话历史里躺着 **20 个文件的完整内容**——大概 8 万 token。接下来你说「好，现在帮我给登录加个二次验证」，这 8 万 token 会跟着每一次 LLM 调用一起发出去，一直发到你关掉这个会话为止。其中 95% 是你再也不会用到的噪音，但它们仍然要付费、仍然占着窗口、仍然会稀释模型对真正重要的那几条指令的注意力。
+你打开 agent，它开始 grep、read、grep、read。二十次工具调用之后它给了你一个准确的答案。很好。
+
+但现在你的对话历史里躺着 **20 个文件的完整内容**——大概 8 万 token。接下来你说「好，现在帮我给登录加个二次验证」，这 8 万 token 会跟着每一次 LLM 调用一起发出去，一直发到你关掉这个会话为止。
+
+其中 95% 是你再也不会用到的噪音，但它们仍然要付费、仍然占着窗口、仍然会稀释模型对真正重要的那几条指令的注意力。
 
 **子 agent 就是为了解决这一件事**：派一个独立的 agent 去做这 20 次工具调用，它自己那份上下文随便脏，做完之后只把一段几百字的结论交回来，然后连同它的整个历史一起被丢掉。主线程只多了几百字。
+
+两条路径在上下文账本上的差别，写成伪代码只有几行：
+
+```
+# 不用子 agent
+history = []
+for i in 1..20:
+    history += 整个文件内容            # 累计约 8 万 token
+之后每一次 LLM 调用都要重发整个 history
+
+# 用子 agent
+结论 = 子agent.做这20次调用()          # 它自己的 history 脏了也没关系，用完即弃
+history += 结论                        # 主线程只多了几百字
+```
 
 用一个类比：你是项目负责人，你派实习生去图书馆查一整天资料，他回来给你一页纸的摘要。你的脑子里只多了一页纸，不是一整天的阅读量。
 
@@ -47,6 +65,7 @@ flowchart TD
 ```
 
 这个类比在几个地方是成立的：
+
 - **分工**：不同的子 agent 可以配不同的系统提示词、不同的模型（便宜的模型干粗活）、不同的工具白名单（只读的探索者拿不到写文件的工具）。
 - **并行**：三个互不相关的问题可以同时派三个人去查，墙钟时间几乎不变。
 - **专长**：「代码审查员」和「实现者」用同一个模型但不同的人格，产出质量确实不一样。
@@ -62,11 +81,17 @@ flowchart TD
 
 ## 1. 为什么这件事很难
 
+六个难点，后面每家实现都会把它们各答一遍：回传带宽（1.1）、同步还是异步（1.2）、失败与中断（1.3）、可观测性（1.4）、并行写冲突（1.5）、成本与递归（1.6）。
+
+其中 1.5 最被低估，也是唯一一个到最后仍然没有几家给出机制解的。
+
 ### 1.1 回传带宽悖论
 
 子 agent 的全部价值来自「只回传结论」。但父 agent 拿到的结论越短，它就越可能觉得信息不够、于是自己再去读一遍那些文件——隔离白做了，还多花了一份子 agent 的钱。反过来，如果允许子 agent 回传完整的探索过程，主线程立刻被污染回原样。
 
-所以每个 harness 都必须回答：**回传的载荷是什么形态、多大**。是纯文本？是结构化 JSON？能不能回传文件路径让父 agent 自己去读（这实际上是把「读」的成本推迟到父 agent 头上）？有没有硬性截断？Codex 给的答案是硬截断到 1000 token（见 3.3），这个数字本身就是一个态度：宁可信息不足也不许污染。
+所以每个 harness 都必须回答：**回传的载荷是什么形态、多大**。是纯文本？是结构化 JSON？能不能回传文件路径让父 agent 自己去读（这实际上是把「读」的成本推迟到父 agent 头上）？有没有硬性截断？
+
+Codex 给的答案是硬截断到 1000 token（见 3.3），这个数字本身就是一个态度：宁可信息不足也不许污染。
 
 ### 1.2 同步调用还是异步邮箱
 
@@ -75,7 +100,21 @@ flowchart TD
 - **RPC / future 模型**：`result = spawn_and_wait(task)`。父 agent 阻塞等待，结果作为工具返回值直接进上下文。心智负担最低，但父 agent 在等待期间什么都做不了——并行的好处被吃掉一大半。
 - **actor / 邮箱模型**：`spawn` 立即返回一个 id，父 agent 继续干活；子 agent 完成时往父 agent 的邮箱里投一条消息；父 agent 用 `wait` 阻塞在「有没有新邮件」上，而不是「某个特定 agent 完没完」。
 
-第二种在并行度上明显更优，但它引入了一堆新问题：消息什么时候被消费进上下文？父 agent 正在跑一个工具调用时收到消息怎么办？子 agent 之间能不能互相发消息（能的话就是完整的 actor 系统了，路由、寻址、死锁全都要考虑）。Codex 从 v1 到 v2 的演进正好就是从第一种走向第二种，见 3.2。
+写成两段调用序列，差别更直观：
+
+```
+# RPC / future
+result = spawn_and_wait(task)      # 父 agent 就卡在这一行
+
+# actor / 邮箱
+id  = spawn(task)                  # 立即返回
+...父 agent 继续干别的...
+msg = wait()                       # 阻塞在「有没有新邮件」，不是「某个 agent 完没完」
+```
+
+第二种在并行度上明显更优，但它引入了一堆新问题：消息什么时候被消费进上下文？父 agent 正在跑一个工具调用时收到消息怎么办？子 agent 之间能不能互相发消息（能的话就是完整的 actor 系统了，路由、寻址、死锁全都要考虑）。
+
+Codex 从 v1 到 v2 的演进正好就是从第一种走向第二种，见 3.2。
 
 两种模型的骨架并排放一起看更清楚：
 
@@ -112,7 +151,9 @@ flowchart LR
 
 ### 1.4 可观测性：黑盒里的黑盒
 
-LLM agent 本身就是一个不透明的东西——你看着它调工具，但你不知道它为什么这么调。子 agent 在这之上又加了一层：你的终端上现在显示一行「subagent running...」，里面正在发生 30 次工具调用，你一次都看不到。等它出来的时候你只有一段结论，无法判断这段结论是扎实的还是它读了两个文件就编的。
+LLM agent 本身就是一个不透明的东西——你看着它调工具，但你不知道它为什么这么调。
+
+子 agent 在这之上又加了一层：你的终端上现在显示一行「subagent running...」，里面正在发生 30 次工具调用，你一次都看不到。等它出来的时候你只有一段结论，无法判断这段结论是扎实的还是它读了两个文件就编的。
 
 Pi 的整个立场就建立在这个论证上（见 2.2）。而 Codex 和 LangChain 的应对是把子 agent 的事件流也发出来，让 UI 层去展开——代价是 UI 复杂度和事件流量。
 
@@ -125,7 +166,9 @@ Pi 的整个立场就建立在这个论证上（见 2.2）。而 Codex 和 LangC
 - A 读了 `auth.ts` 的第 10-50 行，B 在 A 读完之后把 20 行删了，A 基于旧内容生成的 patch 现在要么打不上，要么打上去把 B 的改动覆盖了。
 - 更隐蔽的情况：A 看到 `auth.ts` 里有个它不认识的函数（其实是 B 刚加的），觉得这是脏代码，**把它删了**。
 
-数据库有事务，git 有 merge，agent 之间什么都没有。三家 harness 里没有任何一家提供了机制层面的解决方案（第四个样本 Grok Build 提供了，见第 8 节）。Codex 的解法完全在提示词层：内置的 `worker` 角色描述里逐字写着「明确分配文件所有权」和「告诉 worker 它不是唯一在这个代码库里的人，不要回滚别人的改动」（见 3.3）。这是一个诚实但脆弱的答案——它依赖模型听话。
+数据库有事务，git 有 merge，agent 之间什么都没有。三家 harness 里没有任何一家提供了机制层面的解决方案（第四个样本 Grok Build 提供了，见第 8 节）。
+
+Codex 的解法完全在提示词层：内置的 `worker` 角色描述里逐字写着「明确分配文件所有权」和「告诉 worker 它不是唯一在这个代码库里的人，不要回滚别人的改动」（见 3.3）。这是一个诚实但脆弱的答案——它依赖模型听话。
 
 四家在这道题上的答案摆在一起看，差距很直观：
 
@@ -152,13 +195,17 @@ flowchart TD
 
 ### 1.6 成本与递归爆炸
 
-一个子 agent 可以再派子 agent。深度 3、每层 4 个，就是 64 个并发 LLM 会话。必须有硬性的深度上限和总数上限，而且这些上限必须在 harness 层面强制，不能指望提示词。同时还有一个更微妙的成本问题：**父 agent 学会了「派人」这个动作之后，会倾向于把什么都派出去**，包括那些自己两步就能做完的事。派一个人的固定开销（新的系统提示词、新的环境上下文、新的工具描述）常常有一两万 token，比亲自做还贵。
+一个子 agent 可以再派子 agent。深度 3、每层 4 个，就是 64 个并发 LLM 会话。必须有硬性的深度上限和总数上限，而且这些上限必须在 harness 层面强制，不能指望提示词。
+
+同时还有一个更微妙的成本问题：**父 agent 学会了「派人」这个动作之后，会倾向于把什么都派出去**，包括那些自己两步就能做完的事。派一个人的固定开销（新的系统提示词、新的环境上下文、新的工具描述）常常有一两万 token，比亲自做还贵。
 
 ## 2. Pi 的做法
 
 ### 2.1 一句话概括
 
-**不内置**。README 的 Philosophy 一节明确列出「No sub-agents」，理由是实现方式太多、不应由 core 决定；官方给的替代路径有三条：用 tmux 开多个 pi 实例、自己写扩展、装第三方包。仓库里附了一个完整的示例扩展作为「自己写」的参考实现，它通过 **spawn 独立的 `pi` 子进程**来获得天然的上下文隔离。
+**不内置**。README 的 Philosophy 一节明确列出「No sub-agents」，理由是实现方式太多、不应由 core 决定；官方给的替代路径有三条：用 tmux 开多个 pi 实例、自己写扩展、装第三方包。
+
+仓库里附了一个完整的示例扩展作为「自己写」的参考实现，它通过 **spawn 独立的 `pi` 子进程**来获得天然的上下文隔离。
 
 ### 2.2 机制拆解
 
@@ -174,17 +221,32 @@ flowchart TD
 **No background bash.** Use tmux. Full observability, direct interaction.
 ```
 
-这两条要连起来读才能理解 Pi 的论证。它的主张是：一个跑在后台、你看不见其内部的执行单元，是可观测性的净损失；而 tmux 已经解决了这个问题——开一个 pane 跑第二个 pi 实例，你能实时看到它每一步在做什么，能随时切进去直接跟它对话，能在它跑偏的时候立刻纠正。相比之下，把这个实例塞进「subagent 工具」里，你唯一能看到的就是最后那段返回文本。
+这两条要连起来读才能理解 Pi 的论证。它的主张是：一个跑在后台、你看不见其内部的执行单元，是可观测性的净损失；而 tmux 已经解决了这个问题——开一个 pane 跑第二个 pi 实例，你能实时看到它每一步在做什么，能随时切进去直接跟它对话，能在它跑偏的时候立刻纠正。
+
+相比之下，把这个实例塞进「subagent 工具」里，你唯一能看到的就是最后那段返回文本。
 
 这个论点是对的。它的代价也很明确：**tmux 方案没有程序化编排**。你没法让主 agent 自己决定「这里应该派三个人并行查三个问题」，你得自己开三个 pane、自己写三段 prompt、自己把三份结果复制粘贴回主会话。人是编排器，这在探索性工作里挺好，在批量任务里就是纯手工劳动。
 
-于是 Pi 又提供了示例扩展，把程序化编排这条路补上。核心设计：
+于是 Pi 又提供了示例扩展，把程序化编排这条路补上。核心设计有三条。
 
-**agent 定义 = 带 frontmatter 的 markdown 文件**。发现路径是 `~/.pi/agent/agents/*.md`（用户级，默认加载）和 `.pi/agents/*.md`（项目级，**默认不加载**）。这个默认值是安全考虑：项目级 agent 定义是跟着仓库走的，等于让 clone 下来的代码往你的 agent 里注入系统提示词。README 里写得很直白：「Project-local agents are repo-controlled prompts that can instruct the model to read files, run bash commands, etc.」要启用得显式传 `agentScope: "both"`，而且交互模式下还会再弹一次确认。
+**第一，agent 定义 = 带 frontmatter 的 markdown 文件。** 发现路径有两条，默认行为不一样：
 
-**隔离机制 = 独立进程**。这是 Pi 方案最干净的一点：子 agent 不是同一个进程里的另一个 agent loop，而是一个真正的 `pi` 子进程。上下文窗口的隔离不需要任何代码来保证——两个进程本来就没有共享内存。
+| 路径 | 层级 | 默认是否加载 |
+|---|---|---|
+| `~/.pi/agent/agents/*.md` | 用户级 | 加载 |
+| `.pi/agents/*.md` | 项目级 | **不加载** |
 
-**三种调用模式**：`single`（一个 agent 一个任务）、`parallel`（数组，最多 8 个任务、4 个并发）、`chain`（数组，用 `{previous}` 占位符把上一步输出喂给下一步）。
+项目级默认不加载是安全考虑：项目级 agent 定义是跟着仓库走的，等于让 clone 下来的代码往你的 agent 里注入系统提示词。README 里写得很直白：「Project-local agents are repo-controlled prompts that can instruct the model to read files, run bash commands, etc.」要启用得显式传 `agentScope: "both"`，而且交互模式下还会再弹一次确认。
+
+**第二，隔离机制 = 独立进程。** 这是 Pi 方案最干净的一点：子 agent 不是同一个进程里的另一个 agent loop，而是一个真正的 `pi` 子进程。上下文窗口的隔离不需要任何代码来保证——两个进程本来就没有共享内存。
+
+**第三，三种调用模式：**
+
+| 模式 | 形态 | 上限 |
+|---|---|---|
+| `single` | 一个 agent 一个任务 | — |
+| `parallel` | 数组 | 最多 8 个任务、4 个并发 |
+| `chain` | 数组，用 `{previous}` 占位符把上一步输出喂给下一步 | — |
 
 一次委派从起进程到回传结论的完整链路是这样的：
 
@@ -212,6 +274,28 @@ flowchart TD
 
 ### 2.3 源码
 
+整条链路先用伪代码过一遍，下面的源码片段都能对号入座：
+
+```
+def 委派(agent 定义, task):
+    args = ["--mode", "json", "-p", "--no-session"]
+    if agent.model:  args += ["--model", agent.model]
+    if agent.tools:  args += ["--tools", ",".join(agent.tools)]
+    if agent.systemPrompt 非空:
+        写到临时文件
+        args += ["--append-system-prompt", 临时文件路径]   # append，不是 replace
+    args += [f"Task: {task}"]
+
+    proc = spawn("pi", args)
+    for line in proc.stdout:        # JSONL，父进程逐行解析，实时看到每一步
+        展示(line)
+
+    on 中断信号:                     # 工具执行拿到的 AbortSignal
+        SIGTERM → 等 5 秒 → 还活着就 SIGKILL
+
+    return 最后一条文本              # 模型可见部分截断到 50 KB/task
+```
+
 子进程的起法：
 
 `packages/coding-agent/examples/extensions/subagent/index.ts:294`
@@ -222,7 +306,14 @@ flowchart TD
 	if (agent.tools && agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
 ```
 
-四个固定参数各有讲究。`--mode json` 让子进程把事件以 JSONL 形式吐到 stdout（父进程逐行解析，这是流式可观测性的来源）；`-p` 是非交互的一次性执行；`--no-session` 让子 agent 不落盘会话文件——它是一次性的，没有恢复的必要。`--model` 和 `--tools` 则来自 agent 定义的 frontmatter，实现了「便宜模型干粗活」和「只读探索者」。
+四个固定参数各有讲究：
+
+| 参数 | 作用 |
+|---|---|
+| `--mode json` | 子进程把事件以 JSONL 形式吐到 stdout；父进程逐行解析，这是流式可观测性的来源 |
+| `-p` | 非交互的一次性执行 |
+| `--no-session` | 子 agent 不落盘会话文件——它是一次性的，没有恢复的必要 |
+| `--model` / `--tools` | 来自 agent 定义的 frontmatter，实现「便宜模型干粗活」和「只读探索者」 |
 
 系统提示词的传递方式很朴素——写到临时文件再用 `--append-system-prompt` 指过去：
 
@@ -272,7 +363,9 @@ const COLLAPSED_ITEM_COUNT = 10;
 const PER_TASK_OUTPUT_CAP = 50 * 1024;
 ```
 
-50 KB per task 的模型可见上限。这个值比 Codex 的 1000 token 宽松一个数量级——Pi 的示例扩展更倾向于「全须全尾地回传」，隔离效果因此打了折扣。README 里还专门区分了「模型可见的输出」和「tool details 里的完整结果」：截断只发生在前者，UI 展开还能看到全部。这是一个值得抄的分层。
+50 KB per task 的模型可见上限。这个值比 Codex 的 1000 token 宽松一个数量级——Pi 的示例扩展更倾向于「全须全尾地回传」，隔离效果因此打了折扣。
+
+README 里还专门区分了「模型可见的输出」和「tool details 里的完整结果」：截断只发生在前者，UI 展开还能看到全部。这是一个值得抄的分层。
 
 agent 定义本身就是很好的 prompt 设计素材。`scout` 的关键在于它明确告诉模型「你的读者没见过你读过的文件」：
 
@@ -309,7 +402,9 @@ Bash is for read-only commands only: `git diff`, `git log`, `git show`. Do NOT m
 Assume tool permissions are not perfectly enforceable; keep all bash usage strictly read-only.
 ```
 
-`--tools read,grep,find,ls,bash` 能把工具集限制成只读工具**加 bash**，而 bash 本身是万能的。作者知道这个洞补不上，于是在提示词里再叮嘱一遍。这句话应该被每一个「用工具白名单实现沙箱」的人读一遍。
+`--tools read,grep,find,ls,bash` 能把工具集限制成只读工具**加 bash**，而 bash 本身是万能的。作者知道这个洞补不上，于是在提示词里再叮嘱一遍。
+
+这句话应该被每一个「用工具白名单实现沙箱」的人读一遍。
 
 工作流被表达为 prompt 模板而不是代码：
 
@@ -328,7 +423,9 @@ Use the subagent tool with the chain parameter to execute this workflow:
 Execute this as a chain, passing output between steps via {previous}.
 ```
 
-这里有一个容易忽略的架构选择：**编排逻辑不在代码里，在提示词里**。扩展只提供了 `chain` 这个原语，「scout → planner → worker」这条流水线是靠一段自然语言让主模型去组装 `chain` 参数的。好处是改流程不用改代码，坏处是流程的执行没有任何保证——模型完全可以决定跳过 planner。
+这里有一个容易忽略的架构选择：**编排逻辑不在代码里，在提示词里**。扩展只提供了 `chain` 这个原语，「scout → planner → worker」这条流水线是靠一段自然语言让主模型去组装 `chain` 参数的。
+
+好处是改流程不用改代码，坏处是流程的执行没有任何保证——模型完全可以决定跳过 planner。
 
 ### 2.4 代价与适用边界
 
@@ -363,15 +460,23 @@ Execute this as a chain, passing output between steps via {previous}.
 | 工具加载 | 每个 handler 都实现 `search_info()`，走延迟加载 | 全部不实现，始终在工具列表里 |
 | 消息加密 | 无 | `message` 字段带 `.with_encrypted()` |
 
-演进的方向可以从这张表里读出来，我的推测是三条线：
+演进的方向可以从这张表里读出来，我的推测是三条线。
 
-**第一，从 future 模型转向 actor 模型。** v1 的 `wait_agent` 是一个典型的 `join()`：你传一组 agent id，阻塞到它们全部到终态，返回值里带着结果。v2 的 `wait_agent` 只接受一个 `timeout_ms`，返回值只有一句 `"Wait completed."` / `"Wait interrupted by new input."` / `"Wait timed out."`。内容去哪了？内容通过 `InterAgentCompletionMessage` 直接注入到父 agent 的上下文里，`wait` 只负责唤醒。这是标准的邮箱语义，而且顺带解决了一个 v1 做不到的事：**用户在父 agent 等待期间插话，`wait` 也会提前返回**（`WaitOutcome::Steered`）。
+**第一，从 future 模型转向 actor 模型。** v1 的 `wait_agent` 是一个典型的 `join()`：你传一组 agent id，阻塞到它们全部到终态，返回值里带着结果。v2 的 `wait_agent` 只接受一个 `timeout_ms`，返回值只有一句 `"Wait completed."` / `"Wait interrupted by new input."` / `"Wait timed out."`。
 
-**第二，从「id」转向「命名空间」。** v1 的 agent id 是 ThreadId，模型只能靠自己在上下文里记住「那个查数据库的是 `thr_abc123`」。v2 强制 `spawn_agent` 传 `task_name`，自动拼成 `/root/task1/task_3` 这样的路径，还支持相对寻址。工具描述里那句话很关键：「an agent `/root/task2/task_3` would only be able to communicate with this agent via its canonical name `/root/task1/task_3`」——这意味着 v2 允许**任意两个 agent 互相通信**，不只是父子。这已经是一个完整的 actor 网络了，命名系统是必需品。
+内容去哪了？内容通过 `InterAgentCompletionMessage` 直接注入到父 agent 的上下文里，`wait` 只负责唤醒。这是标准的邮箱语义，而且顺带解决了一个 v1 做不到的事：**用户在父 agent 等待期间插话，`wait` 也会提前返回**（`WaitOutcome::Steered`）。
+
+**第二，从「id」转向「命名空间」。** v1 的 agent id 是 ThreadId，模型只能靠自己在上下文里记住「那个查数据库的是 `thr_abc123`」。v2 强制 `spawn_agent` 传 `task_name`，自动拼成 `/root/task1/task_3` 这样的路径，还支持相对寻址。
+
+工具描述里那句话很关键：「an agent `/root/task2/task_3` would only be able to communicate with this agent via its canonical name `/root/task1/task_3`」——这意味着 v2 允许**任意两个 agent 互相通信**，不只是父子。这已经是一个完整的 actor 网络了，命名系统是必需品。
 
 **第三，从「隔离优先」转向「理解优先」。** 这是最反直觉的一条。v1 的 `fork_context` 默认 `false`：子 agent 只拿到一条 prompt，最大化隔离。v2 的 `fork_turns` 默认 `"all"`：子 agent 拿到父 agent 的**全部历史**。工具描述里给了理由：「passing `fork_turns="none"` will not pass any surrounding context to the spawned subagent, which may cause the agent to lack the context it needs to complete its task」。
 
-这一条值得停下来想想。默认 fork 全部历史，等于说子 agent 的输入上下文和父 agent 一样大——「隔离上下文窗口」这个初衷似乎被推翻了。但仔细看，隔离仍然成立，只是隔离的方向变了：**子 agent 探索过程中产生的那 8 万 token 垃圾不会回到父 agent**。父 agent 的历史被复制给子 agent（一次性成本，且能命中 prompt cache），子 agent 的历史不会污染父 agent（持续收益）。v1 的做法是双向隔离，v2 是单向隔离。单向隔离牺牲了初始 token，换来子 agent 不会因为不知道背景而做错事。考虑到 1.0 节里说的「实习生没有共享记忆」是子 agent 最大的失败源，这个交换在我看来是划算的。
+这一条值得停下来想想。默认 fork 全部历史，等于说子 agent 的输入上下文和父 agent 一样大——「隔离上下文窗口」这个初衷似乎被推翻了。
+
+但仔细看，隔离仍然成立，只是隔离的方向变了：**子 agent 探索过程中产生的那 8 万 token 垃圾不会回到父 agent**。父 agent 的历史被复制给子 agent（一次性成本，且能命中 prompt cache），子 agent 的历史不会污染父 agent（持续收益）。
+
+v1 的做法是双向隔离，v2 是单向隔离。单向隔离牺牲了初始 token，换来子 agent 不会因为不知道背景而做错事。考虑到 1.0 节里说的「实习生没有共享记忆」是子 agent 最大的失败源，这个交换在我看来是划算的。
 
 三条演进线并排放一起看：
 
@@ -410,7 +515,20 @@ flowchart LR
         }
 ```
 
-这不只是文案。`codex-rs/core/src/session/multi_agents.rs:39`：
+这不只是文案。挑选委派策略的判定顺序是这样的：
+
+```
+if 多agent版本 != V2:
+    return 不启用
+if 配置里有 multi_agent_mode_hint_text（哪怕是空字符串）:
+    return Custom(那段文本)            # 自定义策略，压过内置策略
+if 推理档位 == Ultra:
+    return Proactive                   # 模型自主决定何时委派
+else:
+    return ExplicitRequestOnly         # 用户不开口就不许派人
+```
+
+也就是说推理档位直接决定委派策略，但配置里给了 hint 文本时轮不到档位说话。实现在 `codex-rs/core/src/session/multi_agents.rs:39`：
 
 ```rust
 pub(crate) fn effective_multi_agent_mode(turn_context: &TurnContext) -> Option<MultiAgentMode> {
@@ -433,7 +551,7 @@ pub(crate) fn effective_multi_agent_mode(turn_context: &TurnContext) -> Option<M
     };
 ```
 
-推理档位直接决定委派策略。这个模式最终变成一段注入到上下文里的 developer 消息：
+这个模式最终变成一段注入到上下文里的 developer 消息：
 
 `codex-rs/core/src/context/multi_agent_mode_instructions.rs:6`
 
@@ -442,7 +560,9 @@ const EXPLICIT_REQUEST_ONLY_MULTI_AGENT_MODE_TEXT: &str = "Any earlier instructi
 const PROACTIVE_MULTI_AGENT_MODE_TEXT: &str = "Proactive multi-agent delegation is active. Any earlier instruction requiring an explicit user request before spawning sub-agents no longer applies. Use sub-agents when parallel work would materially improve speed or quality. This mode remains active until a later multi-agent mode developer message changes it.";
 ```
 
-两段文本都以「之前那条相反的指令作废」开头——因为这段 developer 消息是随会话状态**增量注入**的（`MultiAgentModeState` 实现了 `render_diff`），历史里可能残留着上一次的相反指令，必须显式覆盖。这是一个在「上下文是 append-only 日志」这个约束下做状态机的经典技巧。
+两段文本都以「之前那条相反的指令作废」开头——因为这段 developer 消息是随会话状态**增量注入**的（`MultiAgentModeState` 实现了 `render_diff`），历史里可能残留着上一次的相反指令，必须显式覆盖。
+
+这是一个在「上下文是 append-only 日志」这个约束下做状态机的经典技巧。
 
 推理档位到委派策略的映射就是一棵简单的判定树：
 
@@ -525,7 +645,9 @@ You must behave deterministically and conservatively.
 """
 ```
 
-这是一个几乎不消耗智力的角色：`reasoning_effort = "low"`，超时上限调到一小时，唯一职责是盯着一个长时间运行的命令。它的价值不是「思考」而是「代替父 agent 承担等待」——父 agent 不用把一小时的构建日志读进自己的上下文，只需要在结束时收一句「成功/失败」。这是子 agent 作为**上下文管理手段**最纯粹的形态，跟并行毫无关系。
+这是一个几乎不消耗智力的角色：`reasoning_effort = "low"`，超时上限调到一小时，唯一职责是盯着一个长时间运行的命令。
+
+它的价值不是「思考」而是「代替父 agent 承担等待」——父 agent 不用把一小时的构建日志读进自己的上下文，只需要在结束时收一句「成功/失败」。这是子 agent 作为**上下文管理手段**最纯粹的形态，跟并行毫无关系。
 
 而 `worker` 角色的描述，正面回答了 1.5 的并行写冲突：
 
@@ -552,7 +674,9 @@ Rules:
     config.cwd = turn_cwd;
 ```
 
-**所有子 agent 共享父 agent 的工作目录**。没有 worktree 隔离，没有容器隔离。三个 worker 并行改同一个仓库，冲突的唯一防线就是上面那段提示词里的「ownership」约定。v1 的工具描述里还追加了一条更操作性的要求：「For code-edit subtasks, decompose work so each delegated task has a disjoint write set」——把写集不相交的责任推给了父 agent 的规划能力。
+**所有子 agent 共享父 agent 的工作目录**。没有 worktree 隔离，没有容器隔离。三个 worker 并行改同一个仓库，冲突的唯一防线就是上面那段提示词里的「ownership」约定。
+
+v1 的工具描述里还追加了一条更操作性的要求：「For code-edit subtasks, decompose work so each delegated task has a disjoint write set」——把写集不相交的责任推给了父 agent 的规划能力。
 
 这是一个诚实的设计：Codex 没有假装解决了这个问题。但也必须说清楚，**这是纪律不是机制**，模型不听话时没有任何东西会拦住它。
 
@@ -608,7 +732,9 @@ fn format_agent_nickname(name: &str, nickname_reset_count: usize) -> String {
 
 一百个名字用完之后重置，第二轮叫「Newton the 2nd」。为了一个内部标识符写序数词后缀的英文规则（还处理了 11/12/13 的例外），这是很明显的 UX 投入。
 
-为什么值得？因为 `thr_01JQ8X...` 这种 id 用户没法在对话里指代。有了昵称，用户可以说「让 Newton 停下」「Curie 那个结果不对」。这些昵称还会被注入到 agent 自己的环境上下文里：
+为什么值得？因为 `thr_01JQ8X...` 这种 id 用户没法在对话里指代。有了昵称，用户可以说「让 Newton 停下」「Curie 那个结果不对」。
+
+这些昵称还会被注入到 agent 自己的环境上下文里：
 
 `codex-rs/core/src/session_prefix.rs:50`
 
@@ -657,7 +783,12 @@ const ERROR_NEXT_ACTION: &str = "This agent's turn failed. If you still need thi
 
 #### 限制与可观测性
 
-深度上限默认是 **1**（`codex-rs/core/src/config/mod.rs:284`：`pub(crate) const DEFAULT_AGENT_MAX_DEPTH: i32 = 1;`），也就是说**默认不允许子 agent 再派子 agent**。超限时返回给模型的是一句人话：
+两道硬闸门：
+
+| 闸门 | 值 | 超限时 |
+|---|---|---|
+| 深度上限 | 默认 **1**（`codex-rs/core/src/config/mod.rs:284`：`pub(crate) const DEFAULT_AGENT_MAX_DEPTH: i32 = 1;`），即默认不允许子 agent 再派子 agent | 返回一句人话，见下 |
+| 并发上限 | `agents.max_concurrent_threads_per_session`（`AgentRegistry::reserve_spawn_slot`） | 返回 `AgentLimitReached` |
 
 `codex-rs/core/src/tools/handlers/multi_agents/spawn.rs:67`
 
@@ -669,11 +800,18 @@ const ERROR_NEXT_ACTION: &str = "This agent's turn failed. If you still need thi
     }
 ```
 
-并发上限来自 `agents.max_concurrent_threads_per_session`（`AgentRegistry::reserve_spawn_slot`），超限返回 `AgentLimitReached`。
+可观测性方面，Codex 走的是「把子 agent 活动也变成 turn item 发给 UI」，一共四个通道：
 
-可观测性方面，Codex 走的是「把子 agent 活动也变成 turn item 发给 UI」：`TurnItem::CollabAgentToolCall`（带 `agents_states: HashMap<ThreadId, AgentStatus>`）和 `TurnItem::SubAgentActivity`（`kind: Started | Interacted | Interrupted`）。拓扑本身持久化在独立的 `agent-graph-store` crate 里，`ThreadSpawnEdgeStatus` 只有 `Open` / `Closed` 两个状态——这个 crate 的 doc comment 写得很到位：「Storage-neutral parent/child topology for thread-spawned agents.」
+| 通道 | 内容 |
+|---|---|
+| `TurnItem::CollabAgentToolCall` | 带 `agents_states: HashMap<ThreadId, AgentStatus>` |
+| `TurnItem::SubAgentActivity` | `kind: Started \| Interacted \| Interrupted` |
+| `agent-graph-store` crate | 持久化拓扑，`ThreadSpawnEdgeStatus` 只有 `Open` / `Closed` 两个状态 |
+| `SubagentStart` / `SubagentStop` hook | 外部可编程的钩子（`codex-rs/hooks/src/lib.rs:28`），payload 带子 agent 身份与独立转录路径 |
 
-外部可编程的钩子是两个专门的 hook 事件（`codex-rs/hooks/src/lib.rs:28`）：`SubagentStart` / `SubagentStop`。它们的输入 payload 里带着子 agent 的身份和独立的转录路径：
+`agent-graph-store` 这个 crate 的 doc comment 写得很到位：「Storage-neutral parent/child topology for thread-spawned agents.」
+
+hook 的输入 payload 长这样：
 
 `codex-rs/hooks/src/schema.rs:592`
 
@@ -706,7 +844,9 @@ pub(crate) struct SubagentStopCommandInput {
 
 ### 4.1 一句话概括
 
-**没有 `spawn_agent` 这个概念，因为不需要**：`create_agent()` 返回的是一个编译好的 LangGraph 图，图是 Runnable，Runnable 可以被包成一个 `@tool`——「子 agent」就是「工具里调了另一个 agent」，一行 `agent.invoke(...)`。框架额外做的两件事是：`SubagentTransformer` 把嵌套 agent 的事件流提升成可独立消费的句柄（可观测性），以及 LangGraph 的图原语（`Send`、subgraph 独立 state schema）提供任意编排拓扑。
+**没有 `spawn_agent` 这个概念，因为不需要**：`create_agent()` 返回的是一个编译好的 LangGraph 图，图是 Runnable，Runnable 可以被包成一个 `@tool`——「子 agent」就是「工具里调了另一个 agent」，一行 `agent.invoke(...)`。
+
+框架额外做的两件事是：`SubagentTransformer` 把嵌套 agent 的事件流提升成可独立消费的句柄（可观测性），以及 LangGraph 的图原语（`Send`、subgraph 独立 state schema）提供任意编排拓扑。
 
 ### 4.2 机制拆解
 
@@ -787,7 +927,9 @@ recovers the originating tool call and exposes it as a `cause`
 """
 ```
 
-这里要纠正一个容易产生的误解：**这个文件不是「把 agent 变成工具」的实现**，它是一个**流转换器**。它的作用是：当嵌套的 agent 在跑的时候，把属于它的那部分事件从主事件流里劈出来，包成一个独立的 `SubagentRunStream` 句柄推到 `run.subagents` 上。也就是说，1.4 说的「黑盒里的黑盒」，LangChain 的答案是——**把黑盒开个窗**：
+这里要纠正一个容易产生的误解：**这个文件不是「把 agent 变成工具」的实现**，它是一个**流转换器**。
+
+它的作用是：当嵌套的 agent 在跑的时候，把属于它的那部分事件从主事件流里劈出来，包成一个独立的 `SubagentRunStream` 句柄推到 `run.subagents` 上。也就是说，1.4 说的「黑盒里的黑盒」，LangChain 的答案是——**把黑盒开个窗**：
 
 ```python
     run = supervisor.stream_events({"messages": [HumanMessage("weather?")]}, version="v3")
@@ -804,7 +946,9 @@ recovers the originating tool call and exposes it as a `cause`
     assert handles[0].cause == {"type": "toolCall", "tool_call_id": "call_w"}
 ```
 
-`handle.cause` 是一条**因果边**：这个子 agent 是被哪个 tool_call 触发的。有了它，UI 就能把「主 agent 调了 call_weather」和「weather_agent 内部的 12 个事件」在时间轴上正确地嵌套起来。这在三家里是最完整的子 agent 可观测性模型——Codex 发的是扁平的 turn item（靠 `agent_path` 自己拼层级），Pi 的示例扩展是逐行解析子进程 stdout。
+`handle.cause` 是一条**因果边**：这个子 agent 是被哪个 tool_call 触发的。有了它，UI 就能把「主 agent 调了 call_weather」和「weather_agent 内部的 12 个事件」在时间轴上正确地嵌套起来。
+
+这在三家里是最完整的子 agent 可观测性模型——Codex 发的是扁平的 turn item（靠 `agent_path` 自己拼层级），Pi 的示例扩展是逐行解析子进程 stdout。
 
 判定边界的代码也把 trade-off 说清楚了：
 
@@ -921,7 +1065,9 @@ scoped namespace. ...
 """
 ```
 
-`langgraph-supervisor` 那条弃用提示值得单独想一下。官方的判断是：把编排封装成一个高阶 API（`create_supervisor(agents=[...])`）反而降低了控制力，因为**多 agent 系统的难点从来不是"怎么调度"，而是"每个 agent 看到什么上下文"**。原话里的 "more control over context engineering" 就是这个意思。这跟本章第 0 节的判断是一致的：子 agent 的本质是上下文管理，编排只是它的外壳。
+`langgraph-supervisor` 那条弃用提示值得单独想一下。官方的判断是：把编排封装成一个高阶 API（`create_supervisor(agents=[...])`）反而降低了控制力，因为**多 agent 系统的难点从来不是"怎么调度"，而是"每个 agent 看到什么上下文"**。原话里的 "more control over context engineering" 就是这个意思。
+
+这跟本章第 0 节的判断是一致的：子 agent 的本质是上下文管理，编排只是它的外壳。
 
 ### 4.3 代价与适用边界
 
@@ -952,19 +1098,34 @@ scoped namespace. ...
 
 ## 6. 可以拿走的工程经验
 
-**1. 先问「是不是上下文问题」，不是「是不是并行问题」。** 判断是否该拆子 agent 的第一标准：*这个子任务会不会产生大量我之后再也不需要的中间数据？* 会 → 拆。典型正例：搜索一个大代码库回答一个具体问题（Codex 的 explorer）；盯着一个跑 40 分钟的构建（Codex 的 awaiter，它跟并行毫无关系，纯粹是不想让日志进主上下文）；把一个 500 行的日志文件读完只为找一行错误。典型反例：「帮我改这三个文件」——上下文量不大，拆了反而要付三份系统提示词的开销。
+**1. 先问「是不是上下文问题」，不是「是不是并行问题」。** 判断是否该拆子 agent 的第一标准：*这个子任务会不会产生大量我之后再也不需要的中间数据？* 会 → 拆。
 
-**2. 派人之前先问「我的下一步是不是等它」。** Codex 的 v1 工具描述把这条写成了硬规则：「Do not delegate urgent blocking work when your immediate next step depends on that result. If the very next action is blocked on that task, the main rollout should usually do it locally to keep the critical path moving.」这是最实用的一条判据。如果你派完人立刻就要 `wait`，那你只是给自己加了一层间接、付了一份额外的启动成本，一点并行度都没换到。适合派出去的是**旁路任务**（sidecar），不是关键路径。
+典型正例：搜索一个大代码库回答一个具体问题（Codex 的 explorer）；盯着一个跑 40 分钟的构建（Codex 的 awaiter，它跟并行毫无关系，纯粹是不想让日志进主上下文）；把一个 500 行的日志文件读完只为找一行错误。
 
-**3. 回传格式里放坐标，不放内容。** Pi 的 scout 要求「`path/to/file.ts` (lines 10-50) - 这里有什么」，这一条同时满足了两个矛盾的目标：主 agent 上下文不被文件内容淹没，同时又保留了定点重读的能力。任何「探索型子 agent」的输出格式都应该抄这个：**结论 + 精确坐标 + 从哪开始看**。配套地，还要像 Codex 的 explorer 描述那样明确告诉父 agent「一般不要复查」，否则省下来的 token 会在复查里花掉。
+典型反例：「帮我改这三个文件」——上下文量不大，拆了反而要付三份系统提示词的开销。
 
-**4. 并行写代码之前，先把写集切开，并且告诉每个 worker 它不是一个人。** 三家里没有任何一家在机制上解决了这个问题，所以你只能靠纪律。Codex 的两条提示词值得逐字借用：给每个 worker **明确的文件/模块所有权**；显式告诉它「代码库里还有别人在改，不要回滚别人的改动，要适配别人的改动」。第二条尤其重要——没有这句话，worker 看到自己没写过的代码时会倾向于当作垃圾清掉。如果你的场景允许，更硬的方案是给每个 worker 开一个 `git worktree`，最后由父 agent 做 merge——这三家都没做（Grok Build 做了，`isolation: "worktree"`，见第 8 节），你也可以做。
+**2. 派人之前先问「我的下一步是不是等它」。** Codex 的 v1 工具描述把这条写成了硬规则：「Do not delegate urgent blocking work when your immediate next step depends on that result. If the very next action is blocked on that task, the main rollout should usually do it locally to keep the critical path moving.」
 
-**5. 失败要翻译成人话，并且附带下一步建议。** `"This agent's turn failed. If you still need this agent, use the available collaboration tools to give it another task."` 这一句的价值在于它把「错误」变成了「可执行的状态」。同理，Codex 的深度超限返回的是 `"Agent depth limit reached. Solve the task yourself."` 而不是一个错误码。所有面向 LLM 的错误路径都应该这么写：**发生了什么 + 你现在可以做什么**。
+这是最实用的一条判据。如果你派完人立刻就要 `wait`，那你只是给自己加了一层间接、付了一份额外的启动成本，一点并行度都没换到。适合派出去的是**旁路任务**（sidecar），不是关键路径。
+
+**3. 回传格式里放坐标，不放内容。** Pi 的 scout 要求「`path/to/file.ts` (lines 10-50) - 这里有什么」，这一条同时满足了两个矛盾的目标：主 agent 上下文不被文件内容淹没，同时又保留了定点重读的能力。
+
+任何「探索型子 agent」的输出格式都应该抄这个：**结论 + 精确坐标 + 从哪开始看**。配套地，还要像 Codex 的 explorer 描述那样明确告诉父 agent「一般不要复查」，否则省下来的 token 会在复查里花掉。
+
+**4. 并行写代码之前，先把写集切开，并且告诉每个 worker 它不是一个人。** 三家里没有任何一家在机制上解决了这个问题，所以你只能靠纪律。
+
+Codex 的两条提示词值得逐字借用：给每个 worker **明确的文件/模块所有权**；显式告诉它「代码库里还有别人在改，不要回滚别人的改动，要适配别人的改动」。第二条尤其重要——没有这句话，worker 看到自己没写过的代码时会倾向于当作垃圾清掉。
+
+如果你的场景允许，更硬的方案是给每个 worker 开一个 `git worktree`，最后由父 agent 做 merge——这三家都没做（Grok Build 做了，`isolation: "worktree"`，见第 8 节），你也可以做。
+
+**5. 失败要翻译成人话，并且附带下一步建议。** `"This agent's turn failed. If you still need this agent, use the available collaboration tools to give it another task."` 这一句的价值在于它把「错误」变成了「可执行的状态」。
+
+同理，Codex 的深度超限返回的是 `"Agent depth limit reached. Solve the task yourself."` 而不是一个错误码。所有面向 LLM 的错误路径都应该这么写：**发生了什么 + 你现在可以做什么**。
 
 **6. 给子 agent 起人能叫得出的名字。** 一百个科学家名字加上「the 2nd」的序数词后缀，这看起来像是过度设计，但它解决的是一个真问题：用户需要在对话里指代某个具体的子 agent。如果你的 UI 里子 agent 只有 UUID，用户就只能说「那个……第二个跑起来的那个」。
 
 **7. 滥用的典型症状**，看到以下任何一条就该退回去用单 agent：
+
 - **子 agent 的输出被父 agent 原样转述给用户**。这说明父 agent 没做任何整合，你只是加了一层没有价值的中转。
 - **父 agent 派完人立刻 `wait`，而且只派了一个**。这是把同步调用伪装成了委派，纯亏一份启动开销。Codex 的工具描述专门写了「Do not repeatedly wait by reflex」。
 - **子 agent 的任务描述超过了它要读的内容**。你为了讲清楚任务写了 2000 字，而任务本身只需要读一个 300 行的文件——委派的固定成本已经超过了收益。
@@ -1020,9 +1181,15 @@ flowchart TD
     class WT,C2 data
 ```
 
-内置三型 `general-purpose` / `explore`（只读）/ `plan`（只读架构师）（task.rs:867-990），与 Codex 的 default/explorer/worker 三角色几乎一一对应。用户自定义 agent 是 `.md` + frontmatter，发现顺序里**原生认 `~/.claude/agents/`**（`xai-grok-agent/src/discovery.rs:186-189`）——Pi 用同样的 markdown+frontmatter 格式但只认自己的目录，Grok 直接兼容 Claude Code 的。嵌套深度默认 1（`MAX_SUBAGENT_DEPTH: u32 = 1`，`task/mod.rs:36`），与 Codex 的默认值相同——两家产品在 1.6 节的递归爆炸问题上独立收敛到同一个数。
+内置三型 `general-purpose` / `explore`（只读）/ `plan`（只读架构师）（task.rs:867-990），与 Codex 的 default/explorer/worker 三角色几乎一一对应。
 
-**上下文继承是第三种答案**。第 3.2 节讲过 Codex v1（默认不继承）到 v2（默认全继承）的摇摆，Grok 的 `InitialContextSource`（`subagent/mod.rs:52-63`）三档：`New`（默认，只带 task prompt + 压缩版 AGENTS.md）、`Forked`（父会话史规范化成一条 `<background_context>` 用户消息——**最多 3 个完整 turn 逐字保留、更早的只留统计摘要**，并剥掉 system-reminder/git_status 等噪声标签，`xai-grok-subagent-resolution/src/context.rs:11-48`）、`Resumed`。`Forked` 是隔离-理解轴上的折中：既不像 v1 那样让子 agent 盲干，也不像 v2 那样付全量 fork 的 token——**衰减式继承**（近处逐字、远处摘要）正是第 04 章压缩的思路被搬到了 spawn 时刻。
+用户自定义 agent 是 `.md` + frontmatter，发现顺序里**原生认 `~/.claude/agents/`**（`xai-grok-agent/src/discovery.rs:186-189`）——Pi 用同样的 markdown+frontmatter 格式但只认自己的目录，Grok 直接兼容 Claude Code 的。
+
+嵌套深度默认 1（`MAX_SUBAGENT_DEPTH: u32 = 1`，`task/mod.rs:36`），与 Codex 的默认值相同——两家产品在 1.6 节的递归爆炸问题上独立收敛到同一个数。
+
+**上下文继承是第三种答案**。第 3.2 节讲过 Codex v1（默认不继承）到 v2（默认全继承）的摇摆，Grok 的 `InitialContextSource`（`subagent/mod.rs:52-63`）三档：`New`（默认，只带 task prompt + 压缩版 AGENTS.md）、`Forked`（父会话史规范化成一条 `<background_context>` 用户消息——**最多 3 个完整 turn 逐字保留、更早的只留统计摘要**，并剥掉 system-reminder/git_status 等噪声标签，`xai-grok-subagent-resolution/src/context.rs:11-48`）、`Resumed`。
+
+`Forked` 是隔离-理解轴上的折中：既不像 v1 那样让子 agent 盲干，也不像 v2 那样付全量 fork 的 token——**衰减式继承**（近处逐字、远处摘要）正是第 04 章压缩的思路被搬到了 spawn 时刻。
 
 三档摆在隔离-理解这条轴上：
 
@@ -1042,9 +1209,15 @@ flowchart LR
     class C note
 ```
 
-**回传与管理**：tool result 带 `SubagentCompletedOutput`（output + `<subagent_meta>` 统计 + resume 提示，task.rs:210-253）；后台模式先返回 id，由 `get_task_output`（可多 id 聚合等待，上限 20）/ `wait_tasks`（wait_any|wait_all）/ `kill_task` 管理（task.rs:444-478, 656-714）。**没有 agent 互发消息**——父模型对运行中的子 agent 只有 poll/wait/kill，`resume_from` 仅限已完成者。也就是说 Grok 停在了 Codex v1.5 的位置：邮箱化了等待，但没有走到 v2 的任意 agent 网络。防提前收尾靠 `Stop` hook 的 payload 枚举在飞的 `backgroundTasks`（`hooks/src/event.rs:255-288`）。
+**回传与管理**：tool result 带 `SubagentCompletedOutput`（output + `<subagent_meta>` 统计 + resume 提示，task.rs:210-253）；后台模式先返回 id，由 `get_task_output`（可多 id 聚合等待，上限 20）/ `wait_tasks`（wait_any|wait_all）/ `kill_task` 管理（task.rs:444-478, 656-714）。
 
-**编排的第四种载体**。本章看过三种编排逻辑的居所：Pi 写在 prompt 模板里、Codex 放在模型脑子里（ultra 档自主委派）、LangChain 写成 Python 代码。Grok 的 `workflow` 工具给了第四种：**模型现场生成 Rhai 脚本**，host 函数只有 `agent()/parallel()/phase()/log()`（`xai-workflow/src/engine.rs:461-710`），预算护栏 `DEFAULT_AGENT_BUDGET=128`、上限 1024、`MAX_HOST_CALLS=10_000`（lib.rs），支持 `validate_only` 干跑和 `resume_from_run_id` 断点续跑。它比 Pi 的 chain 有真控制流、比 Codex 的"模型自由发挥"可审计、比 LangChain 的预写代码灵活——代价是脚本本身也是模型生成物，第 2.3 节"模型完全可以决定跳过 planner"的问题只是从 prompt 层挪到了 DSL 层。
+**没有 agent 互发消息**——父模型对运行中的子 agent 只有 poll/wait/kill，`resume_from` 仅限已完成者。也就是说 Grok 停在了 Codex v1.5 的位置：邮箱化了等待，但没有走到 v2 的任意 agent 网络。防提前收尾靠 `Stop` hook 的 payload 枚举在飞的 `backgroundTasks`（`hooks/src/event.rs:255-288`）。
+
+**编排的第四种载体**。本章看过三种编排逻辑的居所：Pi 写在 prompt 模板里、Codex 放在模型脑子里（ultra 档自主委派）、LangChain 写成 Python 代码。
+
+Grok 的 `workflow` 工具给了第四种：**模型现场生成 Rhai 脚本**，host 函数只有 `agent()/parallel()/phase()/log()`（`xai-workflow/src/engine.rs:461-710`），预算护栏 `DEFAULT_AGENT_BUDGET=128`、上限 1024、`MAX_HOST_CALLS=10_000`（lib.rs），支持 `validate_only` 干跑和 `resume_from_run_id` 断点续跑。
+
+它比 Pi 的 chain 有真控制流、比 Codex 的"模型自由发挥"可审计、比 LangChain 的预写代码灵活——代价是脚本本身也是模型生成物，第 2.3 节"模型完全可以决定跳过 planner"的问题只是从 prompt 层挪到了 DSL 层。
 
 **本节未确认**：并发子 agent 数量的硬上限未找到（20 是 `get_task_output` 查询侧上限，不是并发侧）；`Forked` 模式的 3-turn 常量是否可配置未查。
 
@@ -1099,13 +1272,17 @@ flowchart TD
     class ACP,CX,CC,DS note
 ```
 
-`NO_START_CAPABILITIES` 的注释把代价写得很直白（`packages/subagent/subagent/src/out-of-process.ts:19-23`）：跨进程的孩子**没法**兑现 `outputSchema`/`maxDepth`/`toolFilter`/`persona`，所以服务在 `start()` 之前就用 `SubagentError('UNSUPPORTED_CAPABILITY')` 拒掉（`subagent/src/index.ts:442, 492`），"never accepted-then-ignored"。这是本章第一次看到有人把「工具白名单在跨进程场景下不可执行」这件事做成了**类型化的能力协商**，而不是像 Pi 的 `reviewer.md` 那样在提示词里叮嘱一句。
+`NO_START_CAPABILITIES` 的注释把代价写得很直白（`packages/subagent/subagent/src/out-of-process.ts:19-23`）：跨进程的孩子**没法**兑现 `outputSchema`/`maxDepth`/`toolFilter`/`persona`，所以服务在 `start()` 之前就用 `SubagentError('UNSUPPORTED_CAPABILITY')` 拒掉（`subagent/src/index.ts:442, 492`），"never accepted-then-ignored"。
+
+这是本章第一次看到有人把「工具白名单在跨进程场景下不可执行」这件事做成了**类型化的能力协商**，而不是像 Pi 的 `reviewer.md` 那样在提示词里叮嘱一句。
 
 选哪个 provider 不是工具参数，而是**加载几个工具实例**。默认组合（`packages/bundle/base/cordis.patch.yml:313-329`）挂了两个 `tool-subagent`：`subagent`（provider=spawn，`backgroundMode: continuable`）和 `subagent_fork`（provider=fork，`one-shot`）。示例组合里还能再挂 `subagent_codex` / `subagent_claude_code`（`examples/acp-agent/product-subagent-both.cordis.yml:14-27`，两者都被迫写 `maxDepth: provider-managed`——递归预算归对方运行时管）。
 
 ### 9.2 上下文继承：不是一个参数，是两把不同的工具
 
-Codex 在 v1（默认不继承）和 v2（默认全继承）之间摇摆，Grok 用 `InitialContextSource` 三档，LangChain 交给调用者。dsh 的答案是把 spawn 和 fork 做成两个 provider、暴露成两个工具名，让模型在调用点选。而且 `inheritsParentContext` 这个布尔值的主要用途是**生成不同的工具描述**（`tool-subagent/src/index.ts:211-236`、`:291`）：fork 那份写 "It already sees this conversation's completed turns… state only what is new"，spawn 那份写 "it does not see this conversation"。注释解释了为什么必须这样：给 fork 用 spawn 的措辞是**说谎**。（它还有第二处用途：`tool-ralph` 拿它做准入校验，直接拒掉继承型 provider，`tool-ralph/src/index.ts:228-230`。）
+Codex 在 v1（默认不继承）和 v2（默认全继承）之间摇摆，Grok 用 `InitialContextSource` 三档，LangChain 交给调用者。dsh 的答案是把 spawn 和 fork 做成两个 provider、暴露成两个工具名，让模型在调用点选。
+
+而且 `inheritsParentContext` 这个布尔值的主要用途是**生成不同的工具描述**（`tool-subagent/src/index.ts:211-236`、`:291`）：fork 那份写 "It already sees this conversation's completed turns… state only what is new"，spawn 那份写 "it does not see this conversation"。注释解释了为什么必须这样：给 fork 用 spawn 的措辞是**说谎**。（它还有第二处用途：`tool-ralph` 拿它做准入校验，直接拒掉继承型 provider，`tool-ralph/src/index.ts:228-230`。）
 
 fork 的 seed 口径与 Grok 的衰减式继承不同——它是**无损的 completed-turn 前缀**（止于最后一个 `turn/end`，不含在飞的那个 turn），且只在创建时抓一次（`subagent-fork-in-process/src/index.ts:48-53`，one-shot 路径在 `:68-69` 调用）。没有 Grok 那种「近 3 turn 逐字、更早的摘要」的压缩。
 
@@ -1124,7 +1301,9 @@ if (composition.persona !== undefined) {
 if (composition.toolFilter !== undefined) childCtx.tools.restrict(composition.toolFilter)
 ```
 
-所以 `toolFilter` 只是**在继承来的那棵树上再做交集**，不是能力的来源。同一段函数的注释点明了这个设计的脆弱处：一个没 join preset 的孩子会看到**空的工具注册表**——正因为如此，join 和 per-child 注册被强行写在同一个函数里，"Taking the parent as a parameter is what makes that omission unrepresentable at the call sites"。preset id 还会写进子会话 header（:108-111），理由是冷读转录时必须用同一套工具集重建历史。
+所以 `toolFilter` 只是**在继承来的那棵树上再做交集**，不是能力的来源。
+
+同一段函数的注释点明了这个设计的脆弱处：一个没 join preset 的孩子会看到**空的工具注册表**——正因为如此，join 和 per-child 注册被强行写在同一个函数里，"Taking the parent as a parameter is what makes that omission unrepresentable at the call sites"。preset id 还会写进子会话 header（:108-111），理由是冷读转录时必须用同一套工具集重建历史。
 
 比工具白名单更硬的一条：委派时**强制把 approval 策略钉成 `'never'`**，不管父 agent 自己是什么策略（`child-agent.ts:199-215`），并作为 `source: 'delegation'` 事件落进子日志。配套的固定上下文句子（:135-139）告诉子 agent：
 
@@ -1134,7 +1313,11 @@ if (composition.toolFilter !== undefined) childCtx.tools.restrict(composition.to
 
 ### 9.4 continuable 子 agent：比 Codex v2 更彻底的 actor 化，外加一条子→父推送
 
-默认的 `subagent` 工具是 `backgroundMode: continuable`，`run_in_background` **默认 true**（`tool-subagent/src/index.ts:263`）——与 Grok 一致，与三个主样本相反。返回的不是 job id 而是**持久的 child session id**（`:398`，`subagentId: started.childId`），子 agent 是一个「至多一个活 Activation 的持久 Session」，三态 `running` / `waiting` / `settled` 由 Agent 静默性和 owned-child 集合推导，不维护第二个状态机（`subagent/src/continuation.ts:145-159, 871-873`；`docs/subsystems/subagent.md:136`）。`send_message` 冷 resume 已落盘的孩子，`interrupt_agent` 能打断**任意后代**而不只是直接子女（工具描述：`tool-subagent-control/src/index.ts:82-87`，"The target may be your direct child or a deeper agent created under you"），且只停当前 turn、排队消息原地保留。
+默认的 `subagent` 工具是 `backgroundMode: continuable`，`run_in_background` **默认 true**（`tool-subagent/src/index.ts:263`）——与 Grok 一致，与三个主样本相反。
+
+返回的不是 job id 而是**持久的 child session id**（`:398`，`subagentId: started.childId`），子 agent 是一个「至多一个活 Activation 的持久 Session」，三态 `running` / `waiting` / `settled` 由 Agent 静默性和 owned-child 集合推导，不维护第二个状态机（`subagent/src/continuation.ts:145-159, 871-873`；`docs/subsystems/subagent.md:136`）。
+
+`send_message` 冷 resume 已落盘的孩子，`interrupt_agent` 能打断**任意后代**而不只是直接子女（工具描述：`tool-subagent-control/src/index.ts:82-87`，"The target may be your direct child or a deeper agent created under you"），且只停当前 turn、排队消息原地保留。
 
 三态之间怎么迁移，画成状态机比文字描述清楚得多：
 
@@ -1148,17 +1331,25 @@ stateDiagram-v2
     settled --> [*]
 ```
 
-真正的新东西是 `report`：一个**只注册进 continuable 子 agent 自己 scope**的工具（`tool-subagent-report/src/index.ts:39-52`，注册点 `:64`），让孩子在**不结束自己 turn**的情况下主动把结论推给直接父亲，`reportDelivery` 可选 `wakeup`（默认，唤醒父亲开一个新 turn）或 `quiet`（只入上下文不唤醒，`:26-36`）。它的提示词直指第 1.1 节的带宽悖论，而且给的是和 Pi scout「回传坐标」不同的解法：
+真正的新东西是 `report`：一个**只注册进 continuable 子 agent 自己 scope**的工具（`tool-subagent-report/src/index.ts:39-52`，注册点 `:64`），让孩子在**不结束自己 turn**的情况下主动把结论推给直接父亲，`reportDelivery` 可选 `wakeup`（默认，唤醒父亲开一个新 turn）或 `quiet`（只入上下文不唤醒，`:26-36`）。
+
+它的提示词直指第 1.1 节的带宽悖论，而且给的是和 Pi scout「回传坐标」不同的解法：
 
 > The agent that started you shares your workspace but does not automatically receive your transcript, tool output, or reasoning, so a closing remark such as "done" leaves it nothing it can use.
 
-**共享工作区就是回传通道**——不传内容，因为文件本来就在那儿。另外，Activation 结算时 runtime 还会**无条件**给父亲发一条 `subagent-settled` 通知（`continuation.ts:83, 1414`），和孩子自己写的 `report` 用不同的 `kind`，理由写在类型注释里：合并两者等于「credit the child with words it never wrote」（`docs/subsystems/subagent.md:212-231`）。这个「运行时的话」和「孩子的话」分开记账的做法，四个既有样本都没有。
+**共享工作区就是回传通道**——不传内容，因为文件本来就在那儿。
+
+另外，Activation 结算时 runtime 还会**无条件**给父亲发一条 `subagent-settled` 通知（`continuation.ts:83, 1414`），和孩子自己写的 `report` 用不同的 `kind`，理由写在类型注释里：合并两者等于「credit the child with words it never wrote」（`docs/subsystems/subagent.md:212-231`）。这个「运行时的话」和「孩子的话」分开记账的做法，四个既有样本都没有。
 
 ### 9.5 编排：一个引擎，两个消费者（模型写脚本 / 部署写脚本）
 
-`ctx.workflowEngine` 与 Grok 的 `workflow` 工具形态几乎一样，但脚本语言是**普通 JavaScript**（`node:worker_threads` 里一个 `vm` context），host 全局只有 5 个函数加一个数据全局（`workflow-worker-thread/src/runtime.ts:100-108`）：`agent` / `parallel` / `pipeline` / `phase` / `log` / `args`。比 Grok 的 Rhai 多一个 `pipeline(items, ...stages)`——逐项流水线、**阶段之间没有 barrier**，工具描述明确说 "prefer this for multi-stage work"（`tool-workflow/src/index.ts:144`）。
+`ctx.workflowEngine` 与 Grok 的 `workflow` 工具形态几乎一样，但脚本语言是**普通 JavaScript**（`node:worker_threads` 里一个 `vm` context），host 全局只有 5 个函数加一个数据全局（`workflow-worker-thread/src/runtime.ts:100-108`）：`agent` / `parallel` / `pipeline` / `phase` / `log` / `args`。
 
-真正拉开差距的是 `agent(prompt, opts)` 的 `opts.schema`：传 JSON Schema 就返回**校验过的结构化对象**，脚本可以直接在 JS 里对它做计算（`runtime.ts:39`：`SUPPORTED_AGENT_OPTIONS = new Set(['label', 'phase', 'schema', 'provider', 'model'])`）。第 8 节记录的 Grok host 函数清单里没提到这一项（该节没有展开 Rhai `agent()` 的可选参数，未在 Grok 仓库复核）。而下一行同样值钱（`runtime.ts:40-41`）：
+比 Grok 的 Rhai 多一个 `pipeline(items, ...stages)`——逐项流水线、**阶段之间没有 barrier**，工具描述明确说 "prefer this for multi-stage work"（`tool-workflow/src/index.ts:144`）。
+
+真正拉开差距的是 `agent(prompt, opts)` 的 `opts.schema`：传 JSON Schema 就返回**校验过的结构化对象**，脚本可以直接在 JS 里对它做计算（`runtime.ts:39`：`SUPPORTED_AGENT_OPTIONS = new Set(['label', 'phase', 'schema', 'provider', 'model'])`）。第 8 节记录的 Grok host 函数清单里没提到这一项（该节没有展开 Rhai `agent()` 的可选参数，未在 Grok 仓库复核）。
+
+而下一行同样值钱（`runtime.ts:40-41`）：
 
 ```ts
 /** Deferred Claude Code options we name explicitly in the rejection message. */
@@ -1169,7 +1360,20 @@ const DEFERRED_AGENT_OPTIONS = new Set(['effort', 'isolation', 'agentType'])
 
 护栏：`maxConcurrentAgents` 默认 0→自动 `min(16, max(1, cores-2))`（`workflow-worker-thread/src/index.ts:35`，实现在 `:152`）、`maxTotalAgents` 1000（"a runaway-loop backstop"）、单次 `parallel/pipeline` 最多 4096 项、同步片 5s、取消宽限 5s（`index.ts:116-121`；`runtime.ts:256-258`）。
 
-第 8 节批评 Grok 时说「脚本本身也是模型生成物，跳过 planner 的问题只是从 prompt 层挪到了 DSL 层」。dsh 给了这个批评一个正面回应：同一个引擎上还挂着 `tool-ralph`（`packages/workflow/tool-ralph/src/index.ts:413` 注册为 `ralph`），脚本是**编译期写死的常量** `RALPH_SCRIPT`，注释直说 "The model supplies data only; it cannot alter the loop, provider route, schema, or handoff validation."（:87-88）。模型只能传 `objective` 和 `maxRounds`。循环体是：每轮开一个**全新**子 agent，只带不变的 objective 和上一轮那份被 schema 严格校验、超 16384 字符就报错的结构化 handoff（:24-30, :90-177）。工具描述那句是全项目最凝练的上下文管理声明：
+第 8 节批评 Grok 时说「脚本本身也是模型生成物，跳过 planner 的问题只是从 prompt 层挪到了 DSL 层」。dsh 给了这个批评一个正面回应：同一个引擎上还挂着 `tool-ralph`，脚本是**编译期写死的常量** `RALPH_SCRIPT`。循环体长这样：
+
+```
+handoff = 空
+for round in 1..maxRounds:
+    child = 全新子 agent          # 不带父会话，也不带上一轮的子会话
+    result = child.run(objective, handoff)   # 跨轮的只有这两样
+    handoff = schema 严格校验(result)         # 超 16384 字符直接报错
+    # 文件改动留在共享工作区里，不进上下文
+```
+
+模型能碰的只有 `objective` 和 `maxRounds`——注释直说 "The model supplies data only; it cannot alter the loop, provider route, schema, or handoff validation."。行号：注册为 `ralph` 在 `packages/workflow/tool-ralph/src/index.ts:413`，那句注释在 `:87-88`，循环体与 handoff 校验在 `:24-30, :90-177`。
+
+工具描述那句是全项目最凝练的上下文管理声明：
 
 > Each round opens a new child with no parent conversation or prior child session; the shared workspace is long-term memory, and only a bounded structured report crosses rounds.
 
@@ -1209,9 +1413,15 @@ flowchart TD
 
 ### 9.7 可观测性：子 agent 是可以走进去说话的会话
 
-第 1.4 节说子 agent 是「黑盒里的黑盒」，Pi 的立场是宁可用 tmux 换可观测性。dsh 的答案比另外四家都远：子 agent 的转录**就是一个普通 Session**，Web 端在父会话头部挂一棵可懒加载展开的目录树，点任意深度调 `SessionRuntime.openSubagent()` 切进去（`packages/client/ui-subagent/README.md:5-11`）。一次性子 agent 打开是只读执行记录；**continuable 子 agent 只要父亲还活着，输入框就是可用的——你打的字直接进它的 FIFO inbox，Stop 走 `subagent.interrupt`**。也就是说 Pi 用 tmux 换来的「实时看到 + 随时切进去直接对话」，dsh 在保留程序化编排的前提下拿到了。代价写在同一份 README 的 Known Limitations 里：目录树**没有持久的结果状态**，只有 running/inactive，分不清完成、失败还是取消。
+第 1.4 节说子 agent 是「黑盒里的黑盒」，Pi 的立场是宁可用 tmux 换可观测性。
 
-模型侧则相反地保守：`report` 是唯一的中途回传，工具描述逐字承诺 "You receive its result, not its intermediate steps."（fork 那份，`tool-subagent/src/index.ts:219`；spawn 那份是 "The subagent returns its result, not its intermediate steps."，:229-230）。**人看得见全部，模型只看得见结论**——这个分层比 Pi 的「模型可见截断 50 KB / tool details 看全部」更彻底。
+dsh 的答案比另外四家都远：子 agent 的转录**就是一个普通 Session**，Web 端在父会话头部挂一棵可懒加载展开的目录树，点任意深度调 `SessionRuntime.openSubagent()` 切进去（`packages/client/ui-subagent/README.md:5-11`）。一次性子 agent 打开是只读执行记录；**continuable 子 agent 只要父亲还活着，输入框就是可用的——你打的字直接进它的 FIFO inbox，Stop 走 `subagent.interrupt`**。
+
+也就是说 Pi 用 tmux 换来的「实时看到 + 随时切进去直接对话」，dsh 在保留程序化编排的前提下拿到了。代价写在同一份 README 的 Known Limitations 里：目录树**没有持久的结果状态**，只有 running/inactive，分不清完成、失败还是取消。
+
+模型侧则相反地保守：`report` 是唯一的中途回传，工具描述逐字承诺 "You receive its result, not its intermediate steps."（fork 那份，`tool-subagent/src/index.ts:219`；spawn 那份是 "The subagent returns its result, not its intermediate steps."，:229-230）。
+
+**人看得见全部，模型只看得见结论**——这个分层比 Pi 的「模型可见截断 50 KB / tool details 看全部」更彻底。
 
 ### 9.8 本节未确认
 

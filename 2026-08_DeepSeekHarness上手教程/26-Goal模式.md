@@ -2,7 +2,9 @@
 
 > 基于 `deepseek-ai/deepseek-harness` v0.1.0-rc.5（commit `47f9438`），2026-08-14 核对。
 
-你让 agent"把这个模块的测试补齐"。它改了两个文件、跑了一次 `pytest`、输出一段总结，然后停下来。你说"继续"，它就继续；你不说，它就一直停在那儿等你。
+你让 agent"把这个模块的测试补齐"。它改了两个文件、跑了一次 `pytest`、输出一段总结，然后停下来。
+
+你说"继续"，它就继续；你不说，它就一直停在那儿等你。
 
 问题不在模型不够努力，在于 harness 的默认节奏是**一次人类输入 = 一个 turn**。turn 结束，agent 回到 idle，没有人再推它。
 
@@ -12,9 +14,20 @@
 
 ## agent 停下来那一刻，你有两种补法
 
-一种是每轮开一个全新的 agent，只把一份结构化报告交给下一轮——那是 Ralph。另一种是**留在同一个会话里**：上下文、工具结果、之前的对话全都还在，只是有个驱动器在 agent 空闲时自动塞进去下一条提示。dsh 把后者叫 **goal**。
+一种是每轮开一个全新的 agent，只把一份结构化报告交给下一轮——那是 Ralph。
 
-驱动器的 Agent Note 把层级定死了：Goal → Goal Round → Turn → Step（`.agents/notes/implemented/feature/2026-07-19-same-session-goal-round-driver.md:17`）。turn / step / round 三个词的官方定义在 `docs/glossary.md:37-39`：一个 goal round 就是一次外层策略迭代，它落成**一个** goal 来源的 turn，而那个 turn 里可以有任意多个 step。
+另一种是**留在同一个会话里**：上下文、工具结果、之前的对话全都还在，只是有个驱动器在 agent 空闲时自动塞进去下一条提示。dsh 把后者叫 **goal**。
+
+驱动器的 Agent Note 把层级定死了：
+
+```
+Goal
+ └─ Goal Round        一次外层策略迭代
+     └─ Turn          一个 goal round 落成「一个」goal 来源的 turn
+         └─ Step      一个 turn 里可以有任意多个 step
+```
+
+层级出自 `.agents/notes/implemented/feature/2026-07-19-same-session-goal-round-driver.md:17`；turn / step / round 三个词的官方定义在 `docs/glossary.md:37-39`。
 
 有一条容易被忽略但很重要：同一会话里普通的人类 turn **不算** goal round，也不消耗额度（`docs/glossary.md:26`）。你在中途插一句"顺便看看 CI"，这句话不会吃掉目标的轮次预算。
 
@@ -47,7 +60,9 @@
 | `dsh-tool-goal` | 模型可调用的目标工具 | — | `packages/goal/README.md:11` |
 | `dsh-command-goal` | 人用的 `/goal` 命令 | — | `packages/goal/README.md:12` |
 
-拆成四个不是洁癖。`goal` 只管"目标现在是什么状态"，它明确**不决定什么时候续跑**（`packages/goal/goal/README.md:54`）；驱动器只管调度，连 `maxGoalRounds` 都不复制一份（理由后面说）；工具和命令是两个互不知道对方存在的消费者。四个里任何一个都可以单独不挂，剩下的照样能跑。
+拆成四个不是洁癖。`goal` 只管"目标现在是什么状态"，它明确**不决定什么时候续跑**（`packages/goal/goal/README.md:54`）；驱动器只管调度，连 `maxGoalRounds` 都不复制一份（理由后面说）；工具和命令是两个互不知道对方存在的消费者。
+
+四个里任何一个都可以单独不挂，剩下的照样能跑。
 
 把依赖方向摊平了看是这个形状：三个消费者各从自己的入口进来，都只落到 `ctx.goals` 这一个服务上，服务再往日志里写；只有驱动器反过来还订阅了 `goal/changed`。
 
@@ -82,6 +97,8 @@ flowchart LR
 ## 目标"出了什么事"和"这个进程能不能动它"是两件事
 
 这是整章最容易读错的地方，我建议慢一点看。
+
+一句话地图：目标身上挂着两个维度，一个叫 `phase`、写进日志、跟着会话走；另一个叫 `activation`、只活在进程内存里、从不落盘。要自动开下一轮，**两个必须同时成立**。
 
 ### 四个持久 phase
 
@@ -119,7 +136,14 @@ stateDiagram-v2
     complete --> [*]: create 只能顶掉已 complete 的目标
 ```
 
-以上都在 `packages/goal/goal/src/index.ts`。三个容易看漏的判定：`create` 撞上一个未完成的目标会直接报 `GOAL_ALREADY_EXISTS`（`index.ts:255-257`），想换目标要么 `clear` 要么 `resume`，不许覆盖；`resume` 会拒绝"已经 active 而且 armed"这种冗余操作（`index.ts:318-320`），也会拒绝额度已经用尽的目标（`index.ts:321-326`）；`edit` 保留 blocker 原因和 activation——blocker 靠 `...current` 展开原样带过去（`index.ts:284`），activation 靠把 `cache.activation` 原值传下去（`index.ts:289`）。而 `resume` 反过来会把 blocker 清掉，因为新快照由 `withPhase()` 重建，压根不带 `blockedReason`（`index.ts:450-458`）。
+以上都在 `packages/goal/goal/src/index.ts`。有四个判定光看图看不出来，单独列一下：
+
+| 判定 | 行为 | 源码 |
+|---|---|---|
+| `create` 撞上未完成的目标 | 直接报 `GOAL_ALREADY_EXISTS`；想换目标要么 `clear` 要么 `resume`，不许覆盖 | `index.ts:255-257` |
+| `resume` 会拒绝两种情况 | 一是"已经 active 而且 armed"这种冗余操作，二是额度已经用尽的目标 | `index.ts:318-320`、`:321-326` |
+| `edit` 保留 blocker 原因和 activation | blocker 靠 `...current` 展开原样带过去，activation 靠把 `cache.activation` 原值传下去 | `index.ts:284`、`:289` |
+| `resume` 反过来会把 blocker 清掉 | 新快照由 `withPhase()` 重建，压根不带 `blockedReason` | `index.ts:450-458` |
 
 ### active 不等于可以自动跑
 
@@ -129,7 +153,34 @@ type GoalActivation = 'armed' | 'disarmed'
 
 这行在 `packages/goal/goal/src/types.ts:71`。`phase` 回答"这个目标出了什么事"，`activation` 回答"**这个进程**现在有没有权限再开一轮"（`docs/subsystems/goal.md:21`）。
 
-关键在于 **activation 从不落盘**（`packages/goal/goal/src/types.ts:81-82`）。它被摁回 `disarmed` 的时机有三处：缓存新建时一律 disarmed（`index.ts:428`）；每一次 `agent/session-start` 边沿再 disarm 一次（`index.ts:198-200`）；每观察到一条 `goal/change` 事件也回落 disarmed，除非它正好是本进程这次变更预登记的那一条（`index.ts:437-447`）。
+关键在于 **activation 从不落盘**（`packages/goal/goal/src/types.ts:81-82`）。整台机器写成伪代码是这样：
+
+```
+activation = 'disarmed'                        // 缓存新建时的初值
+
+on create / resume:                  activation = 'armed'
+on pause / complete / block / clear: activation = 'disarmed'
+on edit:                             activation 不变
+
+on agent/session-start 边沿:          activation = 'disarmed'
+on 观察到一条 goal/change:
+    if 这条不是本进程这次变更预登记的那一条:
+        activation = 'disarmed'
+
+// 每个 idle 边沿上问一次
+if goal.phase == 'active' and activation == 'armed':
+    预留下一轮
+else:
+    不动，等人再显式 resume 一次
+```
+
+也就是说，它被摁回 `disarmed` 的时机一共三处：
+
+| 时机 | 出处 |
+|---|---|
+| 缓存新建时一律 disarmed | `index.ts:428` |
+| 每一次 `agent/session-start` 边沿再 disarm 一次 | `index.ts:198-200` |
+| 每观察到一条 `goal/change` 事件也回落 disarmed，除非它正好是本进程这次变更预登记的那一条 | `index.ts:437-447` |
 
 两个维度是这么合起来判的——一个从日志里读出来，一个只活在进程内，而且有三处边沿专门把后者摁回去：
 
@@ -163,7 +214,9 @@ flowchart TD
     class D1,D2,D3 entry
 ```
 
-于是 resume 一个旧会话、fork 一个会话、或者换掉驱动器插件，目标、phase、revision、已跑轮数全都在，但**它不会自己动**。要动，必须有人再显式 `resume` 一次——那次 resume 会写一条新 revision，是模型和人都看得见的授权边沿。
+于是 resume 一个旧会话、fork 一个会话、或者换掉驱动器插件，目标、phase、revision、已跑轮数全都在，但**它不会自己动**。
+
+要动，必须有人再显式 `resume` 一次——那次 resume 会写一条新 revision，是模型和人都看得见的授权边沿。
 
 `disarm()` 是整套 API 里唯一的例外方法（`packages/goal/goal/src/index.ts:236`）：
 
@@ -179,11 +232,22 @@ disarm(agent: Agent): GoalView | undefined {
 
 它**不写事件、不涨 revision、不发 `goal/changed`**（`packages/goal/goal/README.md:20`）。理由很干净："我这个进程不再自动干活"根本不是关于目标的事实，是关于本进程的事实——写进日志反而污染重放。
 
-驱动器里 `disarm(state)` 有 12 个调用点，最典型的三处是加载到已有 agent 上（`goal-round-driver/src/index.ts:418-421`）、持久化 flush 失败时（`:146-150`）、卸载前（`:425-443`）；另外 `agent/error`（`:248`）、驱动任务自身抛错（`:222`、`:228`、`:238`）、`turn/end` 报 `max-tokens`（`:319`）也都会走到它。
+驱动器里 `disarm(state)` 有 12 个调用点，前三行是最典型的三处：
+
+| 调用点 | 行号 |
+|---|---|
+| 加载到已有 agent 上 | `goal-round-driver/src/index.ts:418-421` |
+| 持久化 flush 失败时 | `:146-150` |
+| 卸载前 | `:425-443` |
+| `agent/error` | `:248` |
+| 驱动任务自身抛错 | `:222`、`:228`、`:238` |
+| `turn/end` 报 `max-tokens` | `:319` |
 
 ### 为什么 blocked 只有一个
 
-provider 限额、配置预算、执行错误、需要人来拍板——这四类完全可以做成四个 phase。dsh 故意合成一个：`blocked` 带一个策略自选的 `code` 加一段给人看的 `message`（`packages/goal/goal/src/types.ts:50-56`），`code` 必须是 lower-kebab-case，正则在 `index.ts:172`。
+provider 限额、配置预算、执行错误、需要人来拍板——这四类完全可以做成四个 phase。
+
+dsh 故意合成一个：`blocked` 带一个策略自选的 `code` 加一段给人看的 `message`（`packages/goal/goal/src/types.ts:50-56`），`code` 必须是 lower-kebab-case，正则在 `index.ts:172`。
 
 好处是生命周期不膨胀，任何"被挡住了"都落到同一个停止态，路由靠 code 而不是靠新增状态（`packages/goal/goal/README.md:22`）。当前仓库里真实产生的 code 只有四个：
 
@@ -245,11 +309,20 @@ private expectCurrent(cache: GoalCache, ref: GoalRef): GoalSnapshot {
 }
 ```
 
-拿旧 revision 来改，直接拒。这就是为什么模型的系统提示词硬性要求"先 `get_goal` 再 `update_goal`，把 id 和 revision 原样抄过去"（`tool-goal/src/index.ts:116-117`）。另有一道身份检查：服务只认注册表里那个**一模一样的 live Agent 对象**，id 相同但对象不同也拒（`index.ts:414-418`）。
+拿旧 revision 来改，直接拒。这就是为什么模型的系统提示词硬性要求"先 `get_goal` 再 `update_goal`，把 id 和 revision 原样抄过去"（`tool-goal/src/index.ts:116-117`）。
+
+另有一道身份检查：服务只认注册表里那个**一模一样的 live Agent 对象**，id 相同但对象不同也拒（`index.ts:414-418`）。
 
 ### 每次变更都追加一条带完整快照的事件
 
-`goal/change` 是 goal 域自己的会话事件（`packages/goal/goal/src/domain.ts:61-68`），负载是两种之一。一种是完整快照 `{ kind, version, operation, goal, roundsStarted, createdAt, updatedAt }`（`domain.ts:24-32`）——注意不是 diff，是**变更后的全量状态**。另一种是墓碑：`clear` 写 `{ kind, version, operation: 'clear', cleared: GoalRef, clearedAt }`（`domain.ts:35-41`），其中 `cleared.revision` 是被清目标的 revision 加一（`index.ts:380`）。
+`goal/change` 是 goal 域自己的会话事件（`packages/goal/goal/src/domain.ts:61-68`），负载是两种之一：
+
+| 形状 | 负载 | 出处 |
+|---|---|---|
+| 完整快照 | `{ kind, version, operation, goal, roundsStarted, createdAt, updatedAt }` | `domain.ts:24-32` |
+| 墓碑（`clear` 写的） | `{ kind, version, operation: 'clear', cleared: GoalRef, clearedAt }`，其中 `cleared.revision` 是被清目标的 revision 加一（`index.ts:380`） | `domain.ts:35-41` |
+
+注意第一种不是 diff，是**变更后的全量状态**。
 
 全量快照让重放变成"最后一条赢"，也让 `clear` 这种"删除"仍然带着 revision 留在历史里。清掉的是**指针**，不是记录。
 
@@ -281,7 +354,15 @@ flowchart TD
     class X danger
 ```
 
-严格重放（`packages/goal/goal/src/fold.ts`）不是走过场。`decodeGoalChange()` 逐字段校验，而且要求 key 集合**精确相等**（`fold.ts:104-106`、`fold.ts:156-159`），`create` 必须是全新 id 加 revision 1 加 phase active 加 rounds 0（`fold.ts:289-295`）。时间戳有两道独立的检查：同一条变更里 `updatedAt` 不许早于 `createdAt`（`fold.ts:162`），相邻两次变更之间 `updatedAt` 不许倒退（`fold.ts:209-213`）。写入侧同样有一道钳制，时钟回拨时新 `updatedAt` 取 `max(now, 上次)`（`index.ts:507-512`）。
+严格重放（`packages/goal/goal/src/fold.ts`）不是走过场，它一共卡这么几道：
+
+| 检查 | 出处 |
+|---|---|
+| `decodeGoalChange()` 逐字段校验，且要求 key 集合**精确相等** | `fold.ts:104-106`、`:156-159` |
+| `create` 必须是全新 id 加 revision 1 加 phase active 加 rounds 0 | `fold.ts:289-295` |
+| 同一条变更里 `updatedAt` 不许早于 `createdAt` | `fold.ts:162` |
+| 相邻两次变更之间 `updatedAt` 不许倒退 | `fold.ts:209-213` |
+| 写入侧的钳制：时钟回拨时新 `updatedAt` 取 `max(now, 上次)` | `index.ts:507-512` |
 
 说"日志是唯一权威"是有具体所指的：目标状态完全不依赖 inbox 摆放、claim、admission 或 discard（`packages/goal/goal/README.md:24`）。持久化、resume、fork 天然继承 goal 记录，不需要第二个数据库（`packages/goal/goal/README.md:57`），session header 的字段清单里也确实没有任何 goal 相关项（`packages/session/session-persistence-jsonl/README.md:17`）。
 
@@ -291,7 +372,9 @@ flowchart TD
 
 ## 一次 goal round 从预留到落盘
 
-驱动器（`packages/goal/goal-round-driver/src/index.ts`）没有任何配置项，只有一行 `inject = ['agents', 'goals', 'sessions']`（`:19`）。它在 agent 变 idle（`:259-277`）、目标变更（`:278-282`）这些边沿上请求一次 `drive()`，并用一个 per-agent 的串行队列合并触发（`:207-241`）。
+驱动器（`packages/goal/goal-round-driver/src/index.ts`）没有任何配置项，只有一行 `inject = ['agents', 'goals', 'sessions']`（`:19`）。
+
+它在 agent 变 idle（`:259-277`）、目标变更（`:278-282`）这些边沿上请求一次 `drive()`，并用一个 per-agent 的串行队列合并触发（`:207-241`）。
 
 ```
 agent → idle
@@ -362,7 +445,9 @@ sequenceDiagram
 
 被取消的轮次不会被偷偷重启。下一次 idle 边沿上，驱动器看到有 queued / claimed / cancelled 的 attempt 而目标仍是 active + armed，就把目标 `pause` 掉（`:263-274`）；pause 也失败才退化成 disarm。
 
-装了 `dsh-goal-round-driver/invariant` 这个伴生插件的部署还有一道独立防线（它 inject `invariants`，`goal-round-driver/src/invariant.ts:15`、`:82-83`）：候选事件进入日志**之前**，用同一个纯函数重新渲染一遍该轮 prompt 并做深比对（`isDeepStrictEqual`），不一致就 fail（`invariant.ts:46-58`）。伪造的 goal round 进不了日志——但没装这个伴生插件就没有这道检查。
+装了 `dsh-goal-round-driver/invariant` 这个伴生插件的部署还有一道独立防线（它 inject `invariants`，`goal-round-driver/src/invariant.ts:15`、`:82-83`）：候选事件进入日志**之前**，用同一个纯函数重新渲染一遍该轮 prompt 并做深比对（`isDeepStrictEqual`），不一致就 fail（`invariant.ts:46-58`）。
+
+伪造的 goal round 进不了日志——但没装这个伴生插件就没有这道检查。
 
 ---
 
@@ -374,9 +459,19 @@ sequenceDiagram
 | `maxGoalRounds` | 建目标时解析并写死进快照 | **目标自己**（每个目标一份） | `types.ts:66-67`、`index.ts:158-163` |
 | `blockedAfterConsecutiveRounds` | `3` | `dsh-tool-goal` | `packages/goal/tool-goal/src/index.ts:32-34` |
 
-`create()` 在提交前就把部署默认值**物化**进快照（`index.ts:252`、`index.ts:161`），请求级的 `maxGoalRounds` 覆盖它。所以改配置只影响**之后**新建的目标，已有目标要靠 `edit` 改（`edit` 能替换 `maxGoalRounds`，`index.ts:287`）。
+第二行的"写死进快照"是关键，写成伪代码：
 
-驱动器故意一个都不复制。README 把理由写得很直白：`maxGoalRounds` 属于目标定义，模型侧的 blocked 阈值属于 `dsh-tool-goal`，在驱动器里再存一份"可能产生互相分叉的策略"（`packages/goal/goal-round-driver/README.md:20`）。这是本章最值得抄走的一条判断——**一个可调值只能有一个所有者**。
+```
+create(objective, 请求级 maxGoalRounds?):
+    快照.maxGoalRounds = 请求级 maxGoalRounds ?? 部署配置的 defaultMaxGoalRounds
+    // 提交前就物化，此后这个目标只认自己快照里那个数
+```
+
+所以改配置只影响**之后**新建的目标，已有目标要靠 `edit` 改（`edit` 能替换 `maxGoalRounds`）。出处：物化在 `index.ts:252`、`index.ts:161`，`edit` 的替换在 `index.ts:287`。
+
+驱动器故意一个都不复制。README 把理由写得很直白：`maxGoalRounds` 属于目标定义，模型侧的 blocked 阈值属于 `dsh-tool-goal`，在驱动器里再存一份"可能产生互相分叉的策略"（`packages/goal/goal-round-driver/README.md:20`）。
+
+这是本章最值得抄走的一条判断——**一个可调值只能有一个所有者**。
 
 额度只数轮次。token、钱、墙上时间、provider 配额都不在它管辖内（`packages/goal/goal/README.md:55`）。
 
@@ -384,13 +479,30 @@ sequenceDiagram
 
 ## 模型那边看到什么
 
-`get_goal()` / `create_goal(objective, max_goal_rounds?)` / `update_goal(goal_id, revision, action, ...)` 三个工具分别注册在 `packages/goal/tool-goal/src/index.ts:195`、`:207`、`:234`。`update_goal` 的 action 是 `edit | pause | resume | complete | blocked`（`:43`）。
+模型手上是三个工具：`get_goal()` / `create_goal(objective, max_goal_rounds?)` / `update_goal(goal_id, revision, action, ...)`，分别注册在 `packages/goal/tool-goal/src/index.ts:195`、`:207`、`:234`。`update_goal` 的 action 是 `edit | pause | resume | complete | blocked`（`:43`）。
 
-权限有三条硬的，都在 `packages/goal/tool-goal/src/authority.ts`。调用者必须是注册表里那个 live agent、状态 `running`、且是当前 initiator，还得有一个打开的 turn（`authority.ts:50-63`）。`create` / `edit` / `pause` / `resume` 要求**本 turn 里有一条 `source.kind === 'user'` 的消息，且 agent 是 runtime root**（`authority.ts:70-74`、`:90-93`），子 agent 直接不合格。`complete` / `blocked` 额外接受一种授权：本 turn 就是当前目标那一轮，id / revision / round 三项全等（`authority.ts:77-83`、`:101-108`）。
+权限有三条硬的，都在 `packages/goal/tool-goal/src/authority.ts`：
 
-这里最容易误解的是那个 `{ kind: 'user' }`。它是**宿主标记（host attestation），不是身份证明**——检查函数只看本 turn 里有没有这么一条消息，不看是谁产生的（`authority.ts:72-73`）。仓库自己把这条边界写在注释和 README 里：非人类生产者必须自己传 source，否则就等于白捡了人类授权（`authority.ts:66-68`、`packages/goal/tool-goal/README.md:23`）。驱动器自己就老实传了 `{ kind: 'goal', ... }`（`goal-round-driver/src/index.ts:178`）。
+| 要求 | 管哪些动作 | 出处 |
+|---|---|---|
+| 调用者必须是注册表里那个 live agent、状态 `running`、且是当前 initiator，还得有一个打开的 turn | 全部 | `authority.ts:50-63` |
+| 本 turn 里有一条 `source.kind === 'user'` 的消息，且 agent 是 runtime root；子 agent 直接不合格 | `create` / `edit` / `pause` / `resume` | `authority.ts:70-74`、`:90-93` |
+| 额外接受一种授权：本 turn 就是当前目标那一轮，id / revision / round 三项全等 | `complete` / `blocked` | `authority.ts:77-83`、`:101-108` |
 
-自主轮次里报 `blocked` 还有一道机械下限：`roundsStarted` 没到 `blockedAfterConsecutiveRounds` 就直接抛 `GOAL_TOOL_BLOCK_THRESHOLD`（`tool-goal/src/index.ts:299-306`）。这道下限只在授权来自 goal round 时生效（`:299`），人直接下令不受限制。
+这里最容易误解的是那个 `{ kind: 'user' }`。它是**宿主标记（host attestation），不是身份证明**——检查函数只看本 turn 里有没有这么一条消息，不看是谁产生的（`authority.ts:72-73`）。
+
+仓库自己把这条边界写在注释和 README 里：非人类生产者必须自己传 source，否则就等于白捡了人类授权（`authority.ts:66-68`、`packages/goal/tool-goal/README.md:23`）。驱动器自己就老实传了 `{ kind: 'goal', ... }`（`goal-round-driver/src/index.ts:178`）。
+
+自主轮次里报 `blocked` 还有一道机械下限：
+
+```
+report_blocked():
+    if 授权来自 goal round and roundsStarted < blockedAfterConsecutiveRounds:
+        throw GOAL_TOOL_BLOCK_THRESHOLD
+    // 人直接下令时这个分支根本不进
+```
+
+也就是这道下限只在授权来自 goal round 时生效，人直接下令不受限制（`tool-goal/src/index.ts:299-306`，只在 goal round 授权下生效见 `:299`）。
 
 ### `<goal_round>` 提示长什么样
 
@@ -410,7 +522,9 @@ the configured goal-tool policy before reporting a blocker.
 </goal_round>
 ```
 
-正文那一大段在源码里是字符串拼接出的**一整行、不含换行**（`prompt.ts:18-23`），上面按拼接边界折行只是为了在页面上读得下去，模型看到的是一整段。objective 用 `JSON.stringify` 包起来（`prompt.ts:16`），所以多行文本或者带尖括号的目标不会把这个框架撑破。
+正文那一大段在源码里是字符串拼接出的**一整行、不含换行**（`prompt.ts:18-23`），上面按拼接边界折行只是为了在页面上读得下去，模型看到的是一整段。
+
+objective 用 `JSON.stringify` 包起来（`prompt.ts:16`），所以多行文本或者带尖括号的目标不会把这个框架撑破。
 
 另有一段固定策略提示注册到系统提示词的 `order: 114` 处（`tool-goal/src/index.ts:189-193`），配置的阈值会插值进去（`:113-123`）。
 
@@ -422,7 +536,9 @@ the configured goal-tool policy before reporting a blocker.
 
 用官方 `dsh` 的话什么都不用做。base bundle 已经默认挂好了四个条目：`goal`、`goal-round-driver`、`command-goal`（`packages/bundle/base/cordis.patch.yml:256-263`）和 `tool-goal`（`:374-375`），全部不带 config，也就是 `defaultMaxGoalRounds: 256` 加 `blockedAfterConsecutiveRounds: 3`。
 
-Web 形态多绕了一道。`packages/bundle/web-app/cordis.patch.yml:345-346` 把 base 那行 `tool-goal` 整个 `disabled: true`，因为它被下放到了 agent preset——`code` / `standard` / `cordis` 三个 preset 各自重新挂了一行（`apps/cli/config/agent-presets/code/agent.cordis.yml:104-105`、`standard/agent.cordis.yml:97-98`、`cordis/agent.cordis.yml:85-86`）。goal 服务、驱动器和 `/goal` 命令仍然留在 host plane，同文件 `:336-343` 的注释解释了原因。所以 Web 下模型照样看得到 goal 工具，只是**哪个 preset 给不给**变成了 preset 自己的选择。
+Web 形态多绕了一道。`packages/bundle/web-app/cordis.patch.yml:345-346` 把 base 那行 `tool-goal` 整个 `disabled: true`，因为它被下放到了 agent preset——`code` / `standard` / `cordis` 三个 preset 各自重新挂了一行（`apps/cli/config/agent-presets/code/agent.cordis.yml:104-105`、`standard/agent.cordis.yml:97-98`、`cordis/agent.cordis.yml:85-86`）。
+
+goal 服务、驱动器和 `/goal` 命令仍然留在 host plane，同文件 `:336-343` 的注释解释了原因。所以 Web 下模型照样看得到 goal 工具，只是**哪个 preset 给不给**变成了 preset 自己的选择。
 
 自己组一个 app 时，最小三个插件来自驱动器 README（`packages/goal/goal-round-driver/README.md:9-18` 原文）：
 
@@ -437,7 +553,9 @@ Web 形态多绕了一道。`packages/bundle/web-app/cordis.patch.yml:345-346` �
   name: '@deepseek-ai/dsh-goal-round-driver'
 ```
 
-前提是这个 app 已经提供了它们 inject 的服务：驱动器要 `agents` / `goals` / `sessions`（`goal-round-driver/src/index.ts:19`），tool-goal 要 `agents` / `goals` / `tools` / `systemPrompt`（`tool-goal/src/index.ts:23`）。要让人能用 `/goal`，再加 `commands` 加 `command-goal`（`packages/goal/command-goal/README.md:26-33`）。想改默认额度：
+前提是这个 app 已经提供了它们 inject 的服务：驱动器要 `agents` / `goals` / `sessions`（`goal-round-driver/src/index.ts:19`），tool-goal 要 `agents` / `goals` / `tools` / `systemPrompt`（`tool-goal/src/index.ts:23`）。要让人能用 `/goal`，再加 `commands` 加 `command-goal`（`packages/goal/command-goal/README.md:26-33`）。
+
+想改默认额度：
 
 ```yaml
 - id: goal
@@ -462,7 +580,18 @@ Web 形态多绕了一道。`packages/bundle/web-app/cordis.patch.yml:345-346` �
 | `/goal edit`（不带目标） | 报错，不建目标（`index.ts:40`、`:119-120`） |
 | `/goal pause` / `/goal resume` / `/goal clear` | 对应 verb |
 
-最容易踩的是这个：控制词只有在**独占整条输入**时才是控制词（`index.ts:34-40`）。`/goal pause after verification` 会建一个叫"pause after verification"的目标，不会暂停任何东西。
+最容易踩的是这个：控制词只有在**独占整条输入**时才是控制词。写成伪代码就一目了然：
+
+```
+剩下的串 = 去掉 "/goal " 之后的整串
+if 剩下的串 为空:                              显示状态与可用命令
+if 剩下的串 恰好等于 pause / resume / clear:    执行对应 verb
+if 剩下的串 恰好等于 edit:                      报错，不建目标
+if 剩下的串 以 edit 开头且后面还有内容:          改目标
+否则:                                          把整串当成新目标 create + arm
+```
+
+所以 `/goal pause after verification` 会建一个叫"pause after verification"的目标，不会暂停任何东西（`index.ts:34-40`）。
 
 命令返回的文本由 `command-goal/src/index.ts:81-93` 拼出，形状是：
 
@@ -476,7 +605,9 @@ Activation: armed
 Commands: /goal edit <objective>, /goal pause, /goal clear
 ```
 
-blocked 时会在 `Status:` 下面多一行 `Blocker: <code>: <message>`（`index.ts:80`）。这条命令**不触发模型 turn**（`packages/goal/command-goal/README.md:5`），上面这段呈现文本也**不进日志**，但变更本身照样以 `goal/change` 落盘（`:43`）。
+blocked 时会在 `Status:` 下面多一行 `Blocker: <code>: <message>`（`index.ts:80`）。
+
+这条命令**不触发模型 turn**（`packages/goal/command-goal/README.md:5`），上面这段呈现文本也**不进日志**，但变更本身照样以 `goal/change` 落盘（`:43`）。
 
 建完之后 agent 一空闲，驱动器就会开第一轮，`Rounds:` 那一栏会随着每次 `user/message` 落盘往上走。
 
@@ -484,7 +615,7 @@ Web 端另有一条 GoalBar。据包 README（`packages/client/ui-goal/README.md
 
 ### 在日志里看 `goal/change`
 
-会话日志默认落在 `~/.dsh/sessions`（`packages/bundle/base/cordis.patch.yml:98-101`，`root: !!js dshHomePath('sessions')`；`~/.dsh` 这个缺省值见 `packages/util/home-paths/src/index.ts:12`），布局是 `<root>/--<归一化 cwd>--/<编码后的 session id>/session.jsonl.zstd`（`packages/session/session-persistence-jsonl/README.md:9-15`）。
+会话日志默认落在 `~/.dsh/sessions`，布局是 `<root>/--<归一化 cwd>--/<编码后的 session id>/session.jsonl.zstd`。出处：默认根目录见 `packages/bundle/base/cordis.patch.yml:98-101`（`root: !!js dshHomePath('sessions')`），`~/.dsh` 这个缺省值见 `packages/util/home-paths/src/index.ts:12`，布局见 `packages/session/session-persistence-jsonl/README.md:9-15`。
 
 默认是 zstd 压缩，直接 `grep` 是看不见的。要用行式文本读，得先把持久化配成 `compression: 'none'`（`packages/session/session-persistence-jsonl/README.md:28`、`:74`）——这跟 [16 章](./16-会话日志与分叉.md)讲的是同一个日志。
 
@@ -508,7 +639,9 @@ export function apply(ctx: Context): void {
 }
 ```
 
-那行 `import type {} from '@deepseek-ai/dsh-goal'` 不是装饰。`ctx.goals` 和 `goal/changed` 都是靠该包的 declaration merging 挂上去的，不引它就没有类型。载荷里的 `agent` 由发射端注入（`packages/core/agent/src/dispatch.ts:118`），`change.goal` 在 `clear` 时缺席（`domain.ts:84-90`）。这个监听写法在仓库测试里有真身：`packages/goal/goal-round-driver/tests/goal-round-driver.spec.ts:271`。
+那行 `import type {} from '@deepseek-ai/dsh-goal'` 不是装饰。`ctx.goals` 和 `goal/changed` 都是靠该包的 declaration merging 挂上去的，不引它就没有类型。
+
+载荷里的 `agent` 由发射端注入（`packages/core/agent/src/dispatch.ts:118`），`change.goal` 在 `clear` 时缺席（`domain.ts:84-90`）。这个监听写法在仓库测试里有真身：`packages/goal/goal-round-driver/tests/goal-round-driver.spec.ts:271`。
 
 主动建目标的最小插件，改编自仓库里真实的测试夹具 `examples/headless-agent/tests/fixtures/goal-domain/seed-goal.ts:3-19`：
 
@@ -532,7 +665,9 @@ export function apply(ctx: Context): void {
 }
 ```
 
-注意这个插件绕过了模型工具那层的人类授权检查——`requireDirectHuman` 只管 `tool-goal`（`packages/goal/tool-goal/src/authority.ts:90-93`），服务本身只检查 live agent（`goal/src/index.ts:414-418`）。同进程插件是被信任的，这是明写的边界（`packages/goal/goal/README.md:58`）。
+注意这个插件绕过了模型工具那层的人类授权检查——`requireDirectHuman` 只管 `tool-goal`（`packages/goal/tool-goal/src/authority.ts:90-93`），服务本身只检查 live agent（`goal/src/index.ts:414-418`）。
+
+同进程插件是被信任的，这是明写的边界（`packages/goal/goal/README.md:58`）。
 
 ---
 

@@ -12,9 +12,11 @@
   disabled: !!js process.platform !== 'win32'
 ```
 
-`packages/bundle/base/cordis.patch.yml:184-186`。与 bash 侧的 `disabled` 条件严格互补——base 里两行同时存在，运行时只有一行活着，因此 `ctx.shell` 永远只有一个实现。这一行**没有 config 块**，用的是继承来的默认值（bash 侧那行还额外覆写了 `timeoutMs: 60000`，pwsh 这行没有）。
+关键在 `disabled` 这一行：它与 bash 侧的条件严格互补。base 里两行同时存在，运行时只有一行活着，所以 `ctx.shell` 永远只有一个实现。
 
-注入清单：`static override inject = ['subprocess', 'sandbox', 'sandboxPolicy']`（`packages/shell/pwsh-sandbox/src/index.ts:53`）。
+还要注意这一行**没有 config 块**，用的是继承来的默认值。bash 侧那一行还额外覆写了 `timeoutMs: 60000`，pwsh 这行没有。
+
+出处：树上这三行见 `packages/bundle/base/cordis.patch.yml:184-186`；注入清单是 `static override inject = ['subprocess', 'sandbox', 'sandboxPolicy']`（`packages/shell/pwsh-sandbox/src/index.ts:53`）。
 
 ## 它注册了什么
 
@@ -23,9 +25,29 @@
 | service | `ctx.shell` | 经基类 `ShellExecutor` 注册（`packages/shell/shell/src/index.ts:67`）；继承自 `PwshLocalExecutor` |
 | 事件监听 | 无 | 与 bash 侧一致 |
 
-覆写方法与 bash 侧逐行对齐（源码用 `jscpd:ignore-start` 标注这是刻意镜像，`src/index.ts:51`）：`sandboxMode`（79、83-85 行）、`resolve()`（92-94）、`run()`（96-122）、`start()`（124-150）、`onProcessDone()`（156-173）、私有 `confine()`（183-185）。
+覆写的方法与 bash 侧逐行对齐。源码里用 `jscpd:ignore-start` 标注了这是刻意镜像，不是没抽干净（`src/index.ts:51`）：
 
-与 bash 侧唯一实质差异在 `confine()`：bash 侧硬编码 `['bash', '-c', command]`（`packages/shell/bash-sandbox/src/index.ts:178`），这里调的是父类的 `this.argv(spec)`（`src/index.ts:184`），即 `[pwshPath, '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', <preamble + command>]`（`packages/shell/pwsh-local/src/index.ts:218`）。
+| 覆写 | 行号 |
+|---|---|
+| `sandboxMode` | 79、83-85 |
+| `resolve()` | 92-94 |
+| `run()` | 96-122 |
+| `start()` | 124-150 |
+| `onProcessDone()` | 156-173 |
+| 私有 `confine()` | 183-185 |
+
+与 bash 侧唯一的实质差异落在 `confine()` 上——bash 侧把 argv 写死了，pwsh 侧转身去问父类要：
+
+```
+# bash-sandbox 的 confine
+argv = ['bash', '-c', command]
+
+# pwsh-sandbox 的 confine
+argv = this.argv(spec)
+     = [pwshPath, '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', preamble + command]
+```
+
+对应 `packages/shell/bash-sandbox/src/index.ts:178`（bash 侧硬编码）、`src/index.ts:184`（这里调 `this.argv(spec)`）、`packages/shell/pwsh-local/src/index.ts:218`（父类拼出来的那条 argv）。
 
 ## 配置项
 
@@ -41,9 +63,25 @@
 | `graceMs` | number | `3000` | kill 升级宽限 |
 | `pwshPath` | string | 无（省略时按已知安装位置与 PATH 顺序探测） | 显式指定的 pwsh 可执行文件 |
 
-来源 `packages/shell/pwsh-local/src/index.ts:131-139`（`pwshPath` 的探测顺序说明在 71-77 行）。沙箱模式与 workspace root **不在这里**，归 `ctx.sandboxPolicy`（`src/index.ts:33-38`）。
+来源 `packages/shell/pwsh-local/src/index.ts:131-139`，`pwshPath` 的探测顺序说明在 71-77 行。
+
+找配置的人容易在这里扑空：沙箱模式与 workspace root **不在这里**，归 `ctx.sandboxPolicy`（`src/index.ts:33-38`）。
 
 ## 行为
+
+一条命令进来，先看模式，再决定要不要过沙箱：
+
+```
+mode = ctx.sandboxPolicy.resolve()
+
+if mode == 'danger-full-access':
+    直接走本地执行器，压根不咨询 provider
+    结果带上 sandbox: { mode, denied: false }
+else:                                  # read-only / workspace-write
+    argv = ctx.sandbox.confine(argv)   # 包一层
+    if runner 起不来:  fail closed
+    if 写入被拒:       按后端 denialSignatures 分类进 sandbox.denied
+```
 
 | 情况 | 结果 |
 |---|---|
@@ -83,7 +121,11 @@ flowchart TD
 
 ## 模型看得见什么
 
-本包不注册工具、不注册 prompt 段。模型看到的是被限制命令**自身的 stderr**（例如 Windows ACL runner 下的 `Access to the path '...' is denied.`），以及 [tool-pwsh](./dsh-tool-pwsh.md) 把分类后的拒绝转成的标准权限拒绝面（README.md:20）。README 明确：「No model-visible text beyond the command's stderr and the tool layer's standard denial surface.」（README.md:24）
+本包不注册工具、不注册 prompt 段。
+
+模型看到的只有两样东西：被限制命令**自身的 stderr**（例如 Windows ACL runner 下的 `Access to the path '...' is denied.`），以及 [tool-pwsh](./dsh-tool-pwsh.md) 把分类后的拒绝转成的标准权限拒绝面（README.md:20）。
+
+README 把这句话写死了：「No model-visible text beyond the command's stderr and the tool layer's standard denial surface.」（README.md:24）
 
 ## 什么时候你会想换掉它 / 怎么换
 
@@ -94,10 +136,10 @@ flowchart TD
 ## 坑与边界
 
 - **Windows 上读是完全不受限的**：ACL runner 只限制写；读边界的说明在 `@deepseek-ai/dsh-sandbox-windows-acl`（README.md:32）。
-- **workspace-write 的 temp 授权是私有的**：按「活跃 session / workspace 对」私有，无 agent 的调用每次拿一个新的私有目录；环境里的 temp 根**永远不授予**，runner 会在 spawn 前把 TMP/TEMP 改写到私有目录（README.md:33）。
-- **read-only 只能算 partial**：受限令牌必须保留 Everyone，凡是 DACL 给 Everyone 写权限的对象（包括 NUL 设备的兼容打开）仍属于环境权限；PowerShell 的 `> $null` 重定向照常工作，因为它并不打开 NUL（README.md:34）。
-- **语言模式塌陷**：read-only 下 pwsh 会因为 temp 写入被拒而落进 ConstrainedLanguage，且无法从内部提升——这条限制记在 [tool-pwsh](./dsh-tool-pwsh.md) 的 README 里（`packages/shell/tool-pwsh/README.md:123`），因为它由工具描述教给模型。
-- **runner 归因与拒绝分类的保守性与 bash 侧完全相同**：拒绝从「非零退出 + stderr 命中签名」推断，误判/漏判都可能（分类逻辑见 `packages/shell/pwsh-sandbox/src/helpers.ts`）。
+- **workspace-write 的 temp 授权是私有的**：按「活跃 session / workspace 对」私有，无 agent 的调用每次拿一个新的私有目录。环境里的 temp 根**永远不授予**，runner 会在 spawn 前把 TMP/TEMP 改写到私有目录（README.md:33）。
+- **read-only 只能算 partial**：受限令牌必须保留 Everyone，凡是 DACL 给 Everyone 写权限的对象仍属于环境权限，包括 NUL 设备的兼容打开。顺带一提，PowerShell 的 `> $null` 重定向照常工作，因为它并不打开 NUL（README.md:34）。
+- **语言模式塌陷**：read-only 下 pwsh 会因为 temp 写入被拒而落进 ConstrainedLanguage，且无法从内部提升。这条限制记在 [tool-pwsh](./dsh-tool-pwsh.md) 的 README 里（`packages/shell/tool-pwsh/README.md:123`），因为它由工具描述教给模型。
+- **runner 归因与拒绝分类的保守性与 bash 侧完全相同**：拒绝是从「非零退出 + stderr 命中签名」推断出来的，误判/漏判都可能（分类逻辑见 `packages/shell/pwsh-sandbox/src/helpers.ts`）。
 
 ## 相关
 

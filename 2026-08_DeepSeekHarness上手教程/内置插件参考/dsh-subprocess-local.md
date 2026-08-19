@@ -11,7 +11,11 @@
   name: '@deepseek-ai/dsh-subprocess-local'
 ```
 
-`packages/bundle/base/cordis.patch.yml:163-164`。**配置树 id 是 `subprocess`，不是 `subprocess-local`**——`--dump-config` 里看到的就是 `subprocess`。没有 `inject`、没有 `config`，两者都是刻意的：README 原文「It has no config: every disposition, limit, terminal dimension, grace, and directory arrives from the calling capability seams」（README.md:5）。
+**配置树 id 是 `subprocess`，不是 `subprocess-local`**——`--dump-config` 里看到的就是 `subprocess`。这一点第一次翻配置的人很容易对不上号。
+
+没有 `inject`、没有 `config`，两者都是刻意的。README 原文：「It has no config: every disposition, limit, terminal dimension, grace, and directory arrives from the calling capability seams」。
+
+出处：`packages/bundle/base/cordis.patch.yml:163-164`，README 引文见 `README.md:5`。
 
 ## 它注册了什么
 
@@ -21,18 +25,37 @@
 | 进程钩子 | Node `exit` 监听器 | 构造时经 `ctx.effect` 挂 `process.prependListener('exit', …)`，dispose 时先 await 正常清理再摘掉（`src/index.ts:47-60`） |
 | 事件监听 | 无 | 不参与 cordis 事件总线 |
 
-三个抽象方法的实现：`resolveExecutable()`（104-135）、`spawn()`（146-157）、`spawnTerminal()`（161-184）。
+它要落地的抽象方法只有三个：`resolveExecutable()`（104-135）、`spawn()`（146-157）、`spawnTerminal()`（161-184）。下面「关键行为」讲的全部内容，都挂在这三个方法和一个 exit 监听器上。
 
 ## 配置项
 
-**无配置项。** 它的行为完全由调用方在 spec 上给：超时、宽限、输出上限、spill 上限、终端行列数、工作目录、stdio disposition，一律来自各能力接缝自己的配置——shell 那侧就是 [bash-sandbox](./dsh-bash-sandbox.md) / [pwsh-sandbox](./dsh-pwsh-sandbox.md) 继承来的 `timeoutMs` / `maxOutputBytes` / `maxSpillBytes` / `graceMs`。`docs/config-catalog.md:3085` 也把它列在「Loadable plugins with no config」那一组（组标题在 3024 行）。
+**无配置项。**
+
+它的行为完全由调用方在 spec 上给：超时、宽限、输出上限、spill 上限、终端行列数、工作目录、stdio disposition，一律来自各能力接缝自己的配置。落到 shell 这一侧，就是 [bash-sandbox](./dsh-bash-sandbox.md) / [pwsh-sandbox](./dsh-pwsh-sandbox.md) 继承来的 `timeoutMs` / `maxOutputBytes` / `maxSpillBytes` / `graceMs`。
+
+`docs/config-catalog.md:3085` 也把它列在「Loadable plugins with no config」那一组（组标题在 3024 行）。
 
 ## 关键行为
 
-| 主题 | 事实 |
-|---|---|
-| 进程树 | POSIX 子进程 `detached`（自己一个进程组），用负 pgid 发信号，失败回落直接子进程；Windows 走 `taskkill /PID <pid> /T /F`（README.md:9） |
-| 终止 | `terminate()` 是句柄**唯一**的终止动词：SIGTERM → 等 spec 的 grace → SIGKILL；树已消失时是 no-op。`waitForExit()` 轮询整树存活，所以调用方拆解时确认的是真正的静默（README.md:9） |
+一句话地图：**分离进程树 → 整树终止 → 有界收集加 spill → 擦洗环境 → 偏移量读取 → 可执行查找 → 终端 → 两级清理。** 其中真正反直觉的只有三处：collect 模式保留的是尾部而不是头部、含分隔符的相对路径会被直接拒绝、宿主退出时的清理**不声称**已经静默。其余都是把平台差异抹平的例行工作。
+
+### 进程树与终止
+
+POSIX 上子进程按 `detached` 起，自己占一个进程组，发信号时用负 pgid 打整组，失败才回落到直接子进程；Windows 上走 `taskkill /PID <pid> /T /F`。
+
+`terminate()` 是句柄**唯一**的终止动词，没有第二个入口：
+
+```
+terminate(handle):
+    if 整树已消失:  return            // no-op，不报错
+    向 -pgid 发 SIGTERM               // Windows: taskkill /PID <pid> /T /F
+    等 spec 给的 grace
+    if 还活着:      发 SIGKILL
+```
+
+配套的 `waitForExit()` 轮询的是**整棵树**的存活，不是顶层进程——所以调用方拆解时确认到的是真正的静默，而不是「领头的死了、后代还在」。
+
+出处：进程树见 `README.md:9`，终止与 `waitForExit()` 同样在 `README.md:9`。
 
 `terminate()` 内部的状态流转：
 
@@ -57,32 +80,124 @@ stateDiagram-v2
     Gone --> [*]
     Exited --> [*]
 ```
-| 输出 | `'pipe'` 把原始流原样交给调用方（协议分帧归消费者）；`'inherit'` 透传父描述符；collect 模式保留超出上限的**尾部**（错误和结果都堆在末尾——pi/OpenCode 的理由），完整流在配置了 spill 上限时追加到私有临时文件（README.md:10） |
-| spill 文件 | `0600`，随机名，位于惰性创建的 `0700` per-process 目录下；超过 spill 上限的流会丢弃已不完整的 spill 只返回标记为截断的尾部；结算时封 fd，最终 close 失败则**不**给出路径而不是给一个不完整的文件（README.md:10） |
-| 环境 | `process.env` 减去凭据形状的名字与**所有** `DSH_*`，再合入 spec 的显式 `env`。凭据判据是 `SENSITIVE_ENV_PATTERN = /KEY\|PASSWORD\|SECRET\|TOKEN/i`（`packages/subprocess/subprocess/src/index.ts:44, 60-66`）；两种擦洗都大小写不敏感，因为 Windows 环境名大小写不敏感 |
-| 读取 | collect 模式的读是**基于偏移量**的，服务自己不持游标，所以「调用方持游标的增量读」（bash 后台读路径）与「整流重读」可以并存，结算前后都可以（README.md:12） |
-| 可执行查找 | 绝对路径直接校验，裸名走擦洗后的 PATH 加平台扩展名；**含分隔符的相对路径在接缝处直接拒绝**（`src/index.ts:113-117`），因为解析基准未定义，宁可炸也不猜 |
-| 终端 | `spawnTerminal` 分配 `node-pty`，桥接 UTF-8 文本，检查并向当前前台进程组发信号，终止时在杀掉顶层 shell 前后各扫一遍后代（README.md:14） |
-| 拆解 | 服务保留活句柄，自己 dispose 时对每棵仍在跑的树升级终止并 await 退出（`src/index.ts:79-102`） |
-| 宿主退出 | effect 活跃期间挂着的 `exit` 监听器会同步强杀所有还在活集合里的普通树与终端会话：POSIX 发 SIGKILL、Windows 跑 `taskkill /T /F`；**不创建任何 promise 或 timer**，保留宿主的退出码与诊断，逐个目标包住失败，且不声称已静默（README.md:16、`src/index.ts:62-77`） |
+
+### 输出：三种 disposition
+
+| disposition | 做什么 |
+|---|---|
+| `'pipe'` | 原始流原样交给调用方，协议分帧归消费者 |
+| `'inherit'` | 透传父进程的描述符 |
+| collect | 有界收集，超出上限保留**尾部**；配了 spill 上限时完整流另存私有临时文件 |
+
+collect 保留尾部而不是头部，理由是错误和结果都堆在末尾——这条是照搬 pi/OpenCode 的判断。出处 `README.md:10`。
+
+### spill 文件的四条规矩
+
+spill 文件是 `0600`、随机名，放在一个惰性创建的 `0700` per-process 目录下。
+
+```
+写入时:
+    if 流超过 spill 上限:
+        丢弃已经不完整的 spill 文件
+        只返回标记为截断的尾部
+结算时:
+    封 fd
+    if 最终 close 失败:
+        不给出路径          // 宁可什么都不给，也不给一个不完整的文件
+```
+
+最后那条是这段代码的态度：**给不出完整文件时，返回「没有」比返回「一个残缺的路径」安全。** 出处 `README.md:10`。
+
+### 环境：两轮擦洗
+
+```
+childEnv(spec):
+    env = process.env
+    删掉所有名字命中凭据形状的                 // SENSITIVE_ENV_PATTERN
+    删掉所有 DSH_* 开头的                      // 全部，一个不留
+    合入 spec 显式给的 env
+    return env
+```
+
+凭据判据就是一条正则：`SENSITIVE_ENV_PATTERN = /KEY|PASSWORD|SECRET|TOKEN/i`。
+
+两种擦洗都大小写不敏感，原因不是洁癖——Windows 的环境变量名本身大小写不敏感，只匹配大写会漏。
+
+出处：`packages/subprocess/subprocess/src/index.ts:44, 60-66`。
+
+### 读取是基于偏移量的
+
+collect 模式的读**基于偏移量**，服务自己不持游标。
+
+这带来一个具体的好处：「调用方持游标的增量读」（bash 的后台读路径走的就是这条）与「整流重读」可以并存，而且结算前后都可以。出处 `README.md:12`。
+
+### 可执行查找：宁可炸也不猜
+
+```
+resolveExecutable(name):
+    if 绝对路径:            直接校验
+    if 裸名:                走擦洗后的 PATH + 平台扩展名
+    if 含分隔符的相对路径:   直接拒绝            // 接缝处就拒，不往下走
+```
+
+第三条不是没实现，是刻意不做：相对路径的解析基准未定义，**宁可炸也不猜**。实现在 `src/index.ts:113-117`。
+
+### 终端
+
+`spawnTerminal` 分配 `node-pty`，桥接 UTF-8 文本，检查并向当前前台进程组发信号；终止时在杀掉顶层 shell 的**前后各扫一遍**后代。出处 `README.md:14`。
+
+### 两级清理
+
+第一级是正常拆解：服务保留着活句柄，自己 dispose 时对每棵仍在跑的树升级终止，并 await 它退出（`src/index.ts:79-102`）。
+
+第二级是宿主退出兜底。effect 活跃期间挂着的那个 `exit` 监听器会**同步**强杀所有还在活集合里的普通树与终端会话——POSIX 发 SIGKILL，Windows 跑 `taskkill /T /F`。
+
+这个监听器有三条自我约束：**不创建任何 promise 或 timer**（保留宿主的退出码与诊断）、逐个目标包住失败、**不声称已静默**。最后一条是关键——它只是尽力杀，不承诺杀干净。出处 `README.md:16`、`src/index.ts:62-77`。
 
 ## 模型看得见什么
 
-**没有直接可见面。** 它不注册工具、不注册 prompt 段、不产生任何模型可见文本。README 的 Model Experience 一节原文是「Indirectly, through Consumers (today the bash executor family behind `dsh-tool-bash`), which own all model-facing rendering of process output and lifecycle.」（README.md:20），KV cache 也是「No direct invalidation」（README.md:24）。模型看到的截断标记、spill 路径、退出码，全部是 [tool-bash](./dsh-tool-bash.md) / [tool-pwsh](./dsh-tool-pwsh.md) 渲染出来的。
+**没有直接可见面。** 它不注册工具、不注册 prompt 段、不产生任何模型可见文本。
+
+README 的 Model Experience 一节原文是「Indirectly, through Consumers (today the bash executor family behind `dsh-tool-bash`), which own all model-facing rendering of process output and lifecycle.」（`README.md:20`），KV cache 那一节写的是「No direct invalidation」（`README.md:24`）。
+
+所以模型看到的截断标记、spill 路径、退出码，全部是 [tool-bash](./dsh-tool-bash.md) / [tool-pwsh](./dsh-tool-pwsh.md) 渲染出来的。
 
 ## 什么时候你会想换掉它 / 怎么换
 
-基本不会。它是本地部署下 `ctx.subprocess` 的唯一实现，被 bash 执行器家族、LSP、PTY 后端、ACP subagent 后端共同依赖（`docs/subsystems/subprocess.md:5`），`tool-fs-search` 打包的 ripgrep 也走它（`docs/tool-catalog.md:27`）。真要换只有一种场景：把执行世界搬到远端——那需要一个自己实现 `resolveExecutable` / `spawn` / `spawnTerminal` 的 provider，并且要注意接缝的硬约束「可执行路径与挂载的文件系统 provider 属于同一个执行世界」（`docs/subsystems/subprocess.md:284`）。这一行的 `name` 换掉即可，因为消费者只 `inject: ['subprocess']`。
+基本不会。
+
+它是本地部署下 `ctx.subprocess` 的唯一实现，被 bash 执行器家族、LSP、PTY 后端、ACP subagent 后端共同依赖（`docs/subsystems/subprocess.md:5`），`tool-fs-search` 打包的 ripgrep 也走它（`docs/tool-catalog.md:27`）。
+
+真要换只有一种场景：**把执行世界搬到远端。** 那需要一个自己实现 `resolveExecutable` / `spawn` / `spawnTerminal` 的 provider，并且要注意接缝的硬约束——「可执行路径与挂载的文件系统 provider 属于同一个执行世界」（`docs/subsystems/subprocess.md:284`）。
+
+换法本身很轻：把配置里那一行的 `name` 换掉即可，因为消费者只 `inject: ['subprocess']`。
 
 ## 坑与边界
 
-- **Windows 整树支持是尽力而为**：终止走 `taskkill /PID <pid> /T /F` 且所有结果都被包住（树不存在、竞态、二进制缺失），存活性判断回落到直接子进程边界（README.md:28）。
-- **终端进程检查只有 Linux/macOS**：没有支持的平台实现时终端原语直接失败；Linux 精确探测覆盖 x64 与 arm64，macOS 用 `ps` 快照（README.md:29）。
-- **守护化的终端后代仍可能逃逸**：macOS 上在任何前台快照之前就 reparent 的子进程从 `node-pty` 根不可发现；Linux 上调用 `setsid` 的子进程同时离开进程树和被拥有的终端会话。本地 provider 不加持续的进程表监控（README.md:30）。
-- **进程内清理依赖「JavaScript 可观测的退出」**：`process.exit()`、默认的未捕获异常与未处理拒绝会触发 Node 的同步 `exit` 事件；未安装 handler 的 `SIGTERM`/`SIGINT`/`SIGHUP` 走 OS 默认处置，**绕过**该事件。`SIGKILL`、致命 OOM、`process.abort()`、原生崩溃、断电则必须靠外部 supervisor / 容器 init（README.md:31）。
-- **凭据擦洗是名字启发式**：只认 `*KEY*`/`*PASSWORD*`/`*SECRET*`/`*TOKEN*`，`*PASSPHRASE*` 之类会漏；被误擦的变量的白名单是待办（README.md:32）。
-- **完成的 spill 文件不删**：有界的完整输出恢复文件（以及那个私有 per-process 目录）会在系统临时目录里堆积，直到外部有人清理；超限的不完整 spill 会立刻尝试删除，但删除失败仍可能留下一个有界文件（README.md:33）。
+**Windows 整树支持是尽力而为。** 终止走 `taskkill /PID <pid> /T /F` 且所有结果都被包住（树不存在、竞态、二进制缺失），存活性判断回落到直接子进程边界（`README.md:28`）。
+
+**终端进程检查只有 Linux/macOS。** 没有支持的平台实现时，终端原语直接失败；Linux 的精确探测覆盖 x64 与 arm64，macOS 用 `ps` 快照（`README.md:29`）。
+
+**守护化的终端后代仍可能逃逸。** macOS 上在任何前台快照之前就 reparent 的子进程，从 `node-pty` 根不可发现；Linux 上调用 `setsid` 的子进程同时离开进程树和被拥有的终端会话。本地 provider 不加持续的进程表监控（`README.md:30`）。
+
+**进程内清理依赖「JavaScript 可观测的退出」。** 这句话不抽象，展开就是一张分类表：
+
+| 退出路径 | 结果 |
+|---|---|
+| `process.exit()`、默认的未捕获异常与未处理拒绝 | 触发 Node 的同步 `exit` 事件，清理生效 |
+| 未安装 handler 的 `SIGTERM` / `SIGINT` / `SIGHUP` | 走 OS 默认处置，**绕过**该事件 |
+| `SIGKILL`、致命 OOM、`process.abort()`、原生崩溃、断电 | 必须靠外部 supervisor / 容器 init |
+
+出处 `README.md:31`。
+
+**凭据擦洗是名字启发式。** 只认 `*KEY*`/`*PASSWORD*`/`*SECRET*`/`*TOKEN*`，`*PASSPHRASE*` 之类会漏；被误擦的变量的白名单是待办（`README.md:32`）。
+
+**完成的 spill 文件不删。** 有界的完整输出恢复文件（以及那个私有 per-process 目录）会在系统临时目录里堆积，直到外部有人清理；超限的不完整 spill 会立刻尝试删除，但删除失败仍可能留下一个有界文件（`README.md:33`）。
 
 ## 相关
 
-它是 [bash-sandbox](./dsh-bash-sandbox.md) 与 [pwsh-sandbox](./dsh-pwsh-sandbox.md) 的 `inject` 依赖（两者的 `static override inject = ['subprocess', 'sandbox', 'sandboxPolicy']`）；[shell-env](./dsh-shell-env.md) 收集的 `DSH_*` 快照最终由这里的 `childEnv()` 在擦洗之后合入（`src/spawn.ts:37-47`）；模型侧的呈现归 [tool-bash](./dsh-tool-bash.md) / [tool-pwsh](./dsh-tool-pwsh.md)。
+它是 [bash-sandbox](./dsh-bash-sandbox.md) 与 [pwsh-sandbox](./dsh-pwsh-sandbox.md) 的 `inject` 依赖，两者的声明都是 `static override inject = ['subprocess', 'sandbox', 'sandboxPolicy']`。
+
+[shell-env](./dsh-shell-env.md) 收集的 `DSH_*` 快照，最终由这里的 `childEnv()` 在擦洗之后合入（`src/spawn.ts:37-47`）。
+
+模型侧的呈现归 [tool-bash](./dsh-tool-bash.md) / [tool-pwsh](./dsh-tool-pwsh.md)。

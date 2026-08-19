@@ -15,7 +15,9 @@ README 开篇（`packages/typert/registry/README.md:5`）：“A contribution ca
       name: '@deepseek-ai/dsh-typert-registry'
 ```
 
-没有 `inject`、没有 `config`——`docs/config-catalog.md:3151` 把它列在 Loadable plugins with no config 里。它是本组另外两个插件的 provider：[typert-loader](./dsh-typert-loader.md) 往里写，[typert-gateway](./dsh-api-gateway.md) 从里读。
+两行，没别的：没有 `inject`、没有 `config`——`docs/config-catalog.md:3151` 把它列在 Loadable plugins with no config 里。
+
+它自己不干活，是本组另外两个插件的 provider：[typert-loader](./dsh-typert-loader.md) 往里写，[typert-gateway](./dsh-api-gateway.md) 从里读。
 
 ## 它注册了什么
 
@@ -23,7 +25,9 @@ README 开篇（`packages/typert/registry/README.md:5`）：“A contribution ca
 |---|---|---|
 | service | `ctx.typert` | `TypertRegistry extends Service`，`super(ctx, 'typert')`（`packages/typert/registry/src/service.ts:446`、`:455`） |
 
-没有事件监听（一个都没有），没有工具、prompt 段、命令。四个子注册表都是 getter：
+没有事件监听——一个都没有，也没有工具、prompt 段、命令。
+
+四个子注册表都是 getter：
 
 | 子表 | 装什么 | 源码 |
 |---|---|---|
@@ -32,7 +36,14 @@ README 开篇（`packages/typert/registry/README.md:5`）：“A contribution ca
 | `ctx.typert.lookups` | Host 对象查找：`register()` 由业务包给出稳定声明＋默认解析器，`configure()` 由 Host 组装层覆盖策略 | `packages/typert/registry/src/service.ts:483`、`:290`、`:263` |
 | `ctx.typert.contexts` | 作用域 Context：`registerHost()` / `configureHost()` / `registerClient()` | `packages/typert/registry/src/service.ts:488`、`:402` |
 
-加上包级 API：`register(contribution)`（`:499`）、`get` / `resolve` / `list`（`:527`、`:537`、`:558`）、`getPackage` / `listPackages`（`:568`、`:577`）、`toJSONSchema`（`:587`）。
+四张子表之外还有一层包级 API，挂在 `ctx.typert` 自己身上：
+
+| API | 干什么 | 源码（`packages/typert/registry/src/service.ts`） |
+|---|---|---|
+| `register(contribution)` | 写入一整批 contribution | `:499` |
+| `get` / `resolve` / `list` | 读 | `:527`、`:537`、`:558` |
+| `getPackage` / `listPackages` | 按包读 | `:568`、`:577` |
+| `toJSONSchema` | 把 Zod schema 投影成 JSON Schema | `:587` |
 
 三种身份格式，全是字符串拼的，别自己造：
 
@@ -44,7 +55,17 @@ README 开篇（`packages/typert/registry/README.md:5`）：“A contribution ca
 
 ## 配置项
 
-无配置项。它的内容 100% 由运行时调用方决定：默认树上写入者是 typert-loader（自动扫描 loader 条目），此外 `@deepseek-ai/dsh-agent` 与 `@deepseek-ai/dsh-session` 在构造函数里经 `ctx.inject(['typert'], ...)` 注册了 `agent` / `session` 两个 lookup（`packages/core/agent/src/index.ts:269`、`packages/core/session/src/index.ts:799`），`@deepseek-ai/dsh-api-remotes` 再用 `configure()` 覆盖它们的解析策略（`packages/api/remotes/src/agent-lookup.ts:205`）。谁写、谁读、谁改策略，画出来是这样：
+无配置项。它的内容 100% 由运行时调用方决定。
+
+默认树上有三方人在动它：
+
+| 谁 | 干了什么 | 出处 |
+|---|---|---|
+| typert-loader | 自动扫描 loader 条目后写入 | 见 [typert-loader](./dsh-typert-loader.md) |
+| `@deepseek-ai/dsh-agent` / `@deepseek-ai/dsh-session` | 构造函数里经 `ctx.inject(['typert'], ...)` 注册 `agent` / `session` 两个 lookup | `packages/core/agent/src/index.ts:269`、`packages/core/session/src/index.ts:799` |
+| `@deepseek-ai/dsh-api-remotes` | 用 `configure()` 覆盖这两个 lookup 的解析策略 | `packages/api/remotes/src/agent-lookup.ts:205` |
+
+谁写、谁读、谁改策略，画出来是这样：
 
 ```mermaid
 flowchart TD
@@ -69,6 +90,15 @@ flowchart TD
     class GATEWAY main
 ```
 
+`register` 和 `configure` 是两个角色的分工，不是同义词。业务包给声明和默认解析器，Host 组装层只换策略：
+
+```
+lookups.register(key, wire声明, 默认解析器)   // 业务包，一个 key 一辈子一次
+lookups.configure(key, 新解析器)              // Host 组装层，可以来覆盖
+    → effect 存活期间：resolve(key) 走新解析器
+    → effect 结束：自动退回业务包给的默认解析器
+```
+
 ## 模型看得见什么
 
 README 的 Model Experience 原文（`packages/typert/registry/README.md:24`）：
@@ -83,9 +113,11 @@ KV Cache effect（`packages/typert/registry/README.md:28`）：“No direct effe
 
 不建议换，也基本换不掉：Gateway 的 `static inject = ['typert']`，loader 的 `inject = ['typert', 'loader']`，关掉这一行会让两者一起停在 pending，`/api` 上的 Remote 调用全部落空。
 
-真正的可替换点在它内部而非这一行：lookup 解析策略用 `ctx.typert.lookups.configure(key, resolver)` 覆盖，effect 生命周期结束就恢复业务包的默认策略（`packages/typert/registry/src/service.ts:263`，README `packages/typert/registry/README.md:12`）。想换一个存储实现，`register()` 也一直是公开的——README 说 “direct `ctx.typert.register()` supports other composition owners”（`packages/typert/registry/README.md:20`）。
+真正的可替换点在它内部而非这一行。lookup 解析策略用 `ctx.typert.lookups.configure(key, resolver)` 覆盖，effect 生命周期结束就恢复业务包的默认策略（`packages/typert/registry/src/service.ts:263`，README `packages/typert/registry/README.md:12`）。
 
-浏览器侧另有一套：`./client` 子路径导出 `inject: []` 的同实现插件（`packages/typert/registry/src/client/index.ts:7`、`:13`），由 `dsh.client` 元数据声明（`packages/typert/registry/package.json:36`）——它和 base 这一行是两个进程里的两个实例，不共享内容。
+想换一个存储实现，`register()` 也一直是公开的——README 说 “direct `ctx.typert.register()` supports other composition owners”（`packages/typert/registry/README.md:20`）。
+
+浏览器侧另有一套：`./client` 子路径导出 `inject: []` 的同实现插件（`packages/typert/registry/src/client/index.ts:7`、`:13`），由 `dsh.client` 元数据声明（`packages/typert/registry/package.json:36`）。同实现不等于同一张表——它和 base 这一行是两个进程里的两个实例，不共享内容。
 
 ## 坑与边界
 
@@ -93,8 +125,29 @@ README 的 Known Limitations（`packages/typert/registry/README.md:32`、`:33`�
 
 读源码补充：
 
-- **全批次原子**：包面、schema、invocation id、endpoint 任一重复，整个 contribution 被拒，什么都不写（`packages/typert/registry/src/service.ts:499`、`:120`、`:615`）。
-- **`hasSeen` 是永不清空的历史集合**（`packages/typert/registry/src/service.ts:143`、`:169`）。端点撤销后它仍返回 true，Gateway 靠这个拒绝退化成 SRC（见 [typert-gateway](./dsh-api-gateway.md)）——这是有意的单向门，代价是这张表随进程生命周期只增不减。
+**全批次原子**。包面、schema、invocation id、endpoint 任一重复，整个 contribution 被拒，什么都不写：
+
+```
+register(contribution):
+    for 每个 包面/schema/invocation id/endpoint:
+        if 已存在: 抛错，退出          // 一处冲突 = 整批作废
+    真正写入                          // 走到这里才落表
+```
+
+没有"写进去一半"的中间态。出处 `packages/typert/registry/src/service.ts:499`、`:120`、`:615`。
+
+**`hasSeen` 是永不清空的历史集合**（`packages/typert/registry/src/service.ts:143`、`:169`）：
+
+```
+register(endpoint):   live.add(ep);  seen.add(ep)    // seen 只进不出
+withdraw(endpoint):   live.delete(ep)                // seen 不动
+hasSeen(ep) == true                                  // 撤销后依然 true
+```
+
+端点撤销后它仍返回 true，Gateway 靠这个拒绝退化成 SRC（见 [typert-gateway](./dsh-api-gateway.md)）——这是有意的单向门，代价是这张表随进程生命周期只增不减。
+
+其余几条：
+
 - **lookup 的 wire 声明在本次进程内不可改**：同一 key 第二次 `register()` 若声明不一致直接抛 “changed its wire declaration during this registry lifetime”（`packages/typert/registry/src/service.ts:306`）。
 - **`subscribe()` 不是 Cordis 事件**，是插件内部的 listener 集合（`packages/typert/registry/src/service.ts:83`）。监听器抛错只被 `ctx.logger.warn` 吞掉（`:456`），别指望用 Cordis 的事件工具观察它。
 - 名字校验很严：包名/schema 名不能为空、不能含 `#`（`packages/typert/registry/src/service.ts:711`）；wire 字段只允许 `[A-Za-z0-9_$.-]`，且不能是 `.` 或 `..`（`:705`）。

@@ -6,6 +6,8 @@
 
 ## 一、膨胀有多快：一次实测
 
+先看数字，比任何解释都直观。
+
 `labs/exp23_bloat.sql`：20 万行的表，`v` 列上有索引（所以 HOT 失效），关掉 autovacuum，全表 UPDATE 5 轮。
 
 ```
@@ -20,8 +22,12 @@ VACUUM FULL 之后     27 MB    4408 kB   1368 kB      ← 全部回到初始
 三个关键事实：
 
 1. **5 次 UPDATE 让表变成 6 倍大。** 每次 UPDATE 都产生一份完整的新行版本。
+
 2. **`VACUUM` 不缩小文件。** 它只是把死元组的空间标记为"可以被后续写入复用"。
+
 3. **只有 `VACUUM FULL` / `REINDEX` / `pg_repack` 能真正把空间还给操作系统**，而它们都要重写数据。
+
+第二条是最容易读错的地方——很多人第一次看这张表会以为 `VACUUM` 跑失败了。没有，它干的活跟"释放磁盘"从来就是两回事。
 
 把这三条事实串起来看，膨胀的根子还是第 2 篇讲过的 MVCC：UPDATE 不覆盖旧行，而是新开一份版本。
 
@@ -57,14 +63,18 @@ flowchart TD
 
 ## 二、`VACUUM` 到底做了什么、没做什么
 
+一句话：两者的名字只差一个词，代价差着一个数量级。
+
 | | `VACUUM` | `VACUUM FULL` |
 |---|---|---|
 | 死元组空间 | 标记为可复用 | 真正释放 |
-| 表文件大小 | **不变**（除非尾部整页都空，此时会截断——**这一步需要短暂的 AccessExclusiveLock**，可用 `VACUUM (TRUNCATE off)` 关掉） | 缩小到实际大小 |
+| 表文件大小 | **不变**（尾部有例外，见下） | 缩小到实际大小 |
 | 锁 | `ShareUpdateExclusiveLock`（**不阻塞读写**） | `AccessExclusiveLock`（**阻塞一切**） |
 | 额外磁盘 | 不需要 | **需要一份完整副本** |
 | 索引 | 清理索引项 | 全部重建 |
 | 能否在线跑 | ✅ 可以 | ❌ 生产上基本不能 |
+
+表里那个"不变"有一个例外：**尾部整页都空的时候 `VACUUM` 会截断文件**，而**这一步需要短暂的 `AccessExclusiveLock`**。不想要这个锁，可以用 `VACUUM (TRUNCATE off)` 关掉。
 
 两条路径的锁和代价差得这么远，落到生产上就是两条完全不同的操作路线：
 
@@ -110,7 +120,21 @@ pg_repack -d mydb -t usage_logs --no-superuser-check
 
 ## 三、什么在拖住 VACUUM：四个嫌疑人
 
-VACUUM 的回收水位线是**全局的**，被最老的活跃事务钉住。实测（`labs/exp15.py`）：
+这一节是全篇的重点。先给结论：**VACUUM 的回收水位线是全局的，被最老的活跃事务钉住。** 四个嫌疑人各有各的来路，钉的却是同一根线。
+
+回收判定大致是这样一个循环：
+
+```
+水位线 = 最老的那个活跃事务       // 全局唯一一根线，不是每张表一根
+
+for 死元组 in 表:
+    if 死元组比水位线还老:  标记为可复用        // 确定没人看得见它了
+    else:                   原样留着，一个字节都动不了
+```
+
+所以只要有任何一个东西把"最老的活跃事务"钉在原地，**整个库**的死元组都跟着回收不掉，跟那个事务碰没碰过这张表无关。
+
+实测（`labs/exp15.py`）：
 
 ```
   READ COMMITTED   有写入=False: VACUUM 后残留死元组 0      → 没有拖住
@@ -118,7 +142,14 @@ VACUUM 的回收水位线是**全局的**，被最老的活跃事务钉住。实
   REPEATABLE READ  有写入=False: VACUUM 后残留死元组 20000  → 拖住了回收
 ```
 
-这条水位线是全局唯一的一根线，四个嫌疑人钉的是同一个地方：
+四个嫌疑人：
+
+| 嫌疑人 | 特点 | 附带伤害 |
+|---|---|---|
+| ① 长事务 / idle in transaction | 最常见 | — |
+| ② 未消费的复制槽 | 最容易忘 | 还会撑爆 `pg_wal` |
+| ③ 残留的 prepared transaction | 最少见 | — |
+| ④ autovacuum 参数太保守 | 最容易调 | 追不上 |
 
 ```mermaid
 flowchart TD
@@ -153,6 +184,8 @@ flowchart TD
 UPDATE 3 轮 + 每轮 VACUUM（无长事务）:  3544 kB   ← 稳住了
 UPDATE 3 轮 + 每轮 VACUUM（有长事务）:  7088 kB   ← 翻倍
 ```
+
+同样的写入量、同样的 VACUUM 次数，只因为旁边挂着一个长事务，最终大小就翻了一倍。
 
 **排查**：
 
@@ -190,7 +223,14 @@ FROM pg_replication_slots;
 1. **无限累积 WAL** → `pg_wal` 目录撑爆磁盘 → 数据库直接停止服务；
 2. 如果槽带 `xmin`，**同时钉住用户表的回收水位线**。
 
-⚠️ 区分两个字段：**逻辑复制槽通常只设 `catalog_xmin`**，它钉住的是**系统目录**的清理（表现为 `pg_attribute`、`pg_class` 膨胀，DDL 变慢），只有在创建时导出快照或存在活跃 `xmin` 时才会钉住普通用户表。物理复制槽 + `hot_standby_feedback = on` 则会直接钉住用户表的 `xmin`。PG 14 起这两个 horizon 是分开计算的。
+⚠️ 上面查询里的最后两列不是一回事，别看混：
+
+| 槽的类型 | 设的字段 | 钉住的是 |
+|---|---|---|
+| 逻辑复制槽 | 通常只设 `catalog_xmin` | **系统目录**的清理 |
+| 物理复制槽 + `hot_standby_feedback = on` | `xmin` | **用户表** |
+
+被钉住系统目录的表现是 `pg_attribute`、`pg_class` 膨胀，DDL 变慢。逻辑复制槽只有在**创建时导出快照**或**存在活跃 `xmin`** 时，才会钉住普通用户表。PG 14 起这两个 horizon 是分开计算的。
 
 **❌ 不管会怎样**：见过太多"测试环境搭了个逻辑订阅，测完把订阅端删了，槽忘了删"，两周后生产库磁盘满了。
 
@@ -230,6 +270,20 @@ autovacuum_naptime              = 60s
 autovacuum_max_workers          = 3
 autovacuum_vacuum_cost_limit    = 200      ← 限速：干一点就歇一会儿，避免影响业务
 ```
+
+这五个参数拼起来就是一个巡逻循环：
+
+```
+每隔 naptime（60s）巡一遍所有表:
+    触发线 = threshold + scale_factor × 表行数
+           = 50        + 0.2          × 表行数
+
+    if n_dead_tup > 触发线:
+        交给一个 worker 去清理          // 最多 3 个 worker 同时干活
+        清理过程按 cost_limit = 200 限速：干一点就歇一会儿
+```
+
+注意触发线里有个 `× 表行数`——表越大，这条线抬得越高。下面这一节讲的就是它。
 
 ### ❓ 问题：为什么默认参数对大表不合适？
 
@@ -308,6 +362,8 @@ maintenance_work_mem = 1GB           # VACUUM 收集死元组 tid 的内存，�
 
 ## 四、怎么量化膨胀
 
+两条路：糙的一条零成本、随时能跑；准的一条要装扩展、还要挑时间跑。
+
 ### 简单版：跟自己比
 
 ```sql
@@ -351,6 +407,8 @@ SELECT * FROM pgstatindex('usage_logs_pkey');
 
 ## 五、写放大：一次 UPDATE 到底写了多少
 
+你以为改了 8 个字节，实际可能写了 8 KB 还多。
+
 一次改动 `balance` 列的 UPDATE，实际发生的写入：
 
 ```
@@ -392,9 +450,22 @@ flowchart TD
 
 为了防止"页写到一半断电"（torn page），Postgres 在每次 checkpoint 之后**第一次**修改某个页时，会把整个 8KB 页写进 WAL。
 
+判定只有一行：
+
+```
+写一个页时:
+    if 这一页在本轮 checkpoint 之后还没被改过:
+        WAL += 整个 8KB 页        // FPI，防 torn page
+    else:
+        WAL += 只写改动的增量     // 小得多
+```
+
 推论：
 
 - **checkpoint 越频繁，FPI 越多，WAL 量越大。** 所以 `checkpoint_timeout` 调小（比如 5 分钟）反而会显著增加 WAL 写入。
+
+这一条是反直觉的：调小 checkpoint 间隔听起来像"更勤快、更安全"，实际是让每个页在更多轮里各挨一次全页写。
+
 - 常见的调优方向是**增大** `max_wal_size` 和 `checkpoint_timeout`（比如 15~30 分钟），让 checkpoint 更稀疏：
 
 ```
@@ -453,6 +524,17 @@ EXPLAIN (ANALYZE, BUFFERS, WAL) UPDATE users SET balance = balance - 1 WHERE id 
 ## 六、TOAST：大字段的另一套存储
 
 一行数据不能跨页（8 KB）。所以当一行超过约 2 KB 时，Postgres 会把大字段**压缩**，还放不下就**切片存到一张影子表（TOAST 表）里**，主表只留一个指针。
+
+写入时的分岔就三步：
+
+```
+if 行大小 <= 约 2KB:
+    正常存主表                      // 不触发 TOAST
+else:
+    压缩大字段                      // 默认 STORAGE EXTENDED
+    if 压缩后放得下:  存主表
+    else:             切片存进 TOAST 表，主表只留一个指针
+```
 
 这条路径走下来，`SELECT *` 为什么贵、贵在哪一步，看图就清楚了：
 
@@ -554,7 +636,18 @@ SELECT pg_size_pretty(pg_relation_size(reltoastrelid)) FROM pg_class WHERE relna
   pg_class.reltuples 估算值     3000000   0.0008s
 ```
 
-**根因是 MVCC**：不同事务看到的行数可能不同（有些行对你可见、对我不可见），所以**不存在一个"全局行数"可以维护**。`count(*)` 必须逐行做可见性判断。
+**根因是 MVCC**：不同事务看到的行数可能不同（有些行对你可见、对我不可见），所以**不存在一个"全局行数"可以维护**。
+
+换句话说，`count(*)` 只能老老实实这么干：
+
+```
+n = 0
+for 行 in 表:
+    if 这一行对当前这个事务可见:  n += 1     // 逐行做可见性判断，没有捷径
+return n
+```
+
+`count(*)` 必须逐行做可见性判断。
 
 VACUUM 之后快了一倍，因为 VM 让它可以走 Index Only Scan，跳过整页全可见的数据。
 
@@ -586,6 +679,8 @@ SELECT * FROM logs WHERE id < $last_seen_id ORDER BY id DESC LIMIT 20;
 ---
 
 ## 八、一份可以直接用的健康检查脚本
+
+八段查询，从"谁钉住了水位线"一路查到"缓存还剩多少命中率"。
 
 ```sql
 \echo '=== 1. 长事务（> 5 分钟）==='

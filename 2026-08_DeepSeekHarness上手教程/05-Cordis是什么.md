@@ -4,7 +4,9 @@
 
 前四章你一直在跟 `ctx` 打交道：配置里写一行插件，它就活了；插件函数的第一个参数叫 `ctx`，你从它身上取 `ctx.tools`、`ctx.llm`。这一章解释这个 `ctx` 到底是什么东西。
 
-值得先花这个力气，因为它不是一个普通的对象。它是个 Proxy，而且**每个插件手里的那个都不是同一个**。这一点没建立起来，后面几章的行为在你眼里会全是玄学：为什么我 `ctx.tools` 读出来直接抛异常而不是 `undefined`；为什么我从没写过清理代码，插件卸载后注册的工具却真的消失了；为什么两个插件读同一个 `ctx.fs` 拿到的是两份不同实现。
+值得先花这个力气，因为它不是一个普通的对象。它是个 Proxy，而且**每个插件手里的那个都不是同一个**。
+
+这一点没建立起来，后面几章的行为在你眼里会全是玄学：为什么我 `ctx.tools` 读出来直接抛异常而不是 `undefined`；为什么我从没写过清理代码，插件卸载后注册的工具却真的消失了；为什么两个插件读同一个 `ctx.fs` 拿到的是两份不同实现。
 
 这些问题的答案都在同一个地方。
 
@@ -12,13 +14,23 @@
 
 ## 先看一个反常的事实：这个项目没有"核心"
 
-两个当场数出来的数字。`packages/` 下有 226 个 `package.json`，其中 219 个把 `@deepseek-ai/cordis` 写进了 `peerDependencies`（同时也在 `devDependencies` 里）；剩下 7 个全在 `packages/typert/generator/tests/fixtures/` 下，是测试夹具。`vendor/README.md:5` 也是这么说的："every harness package declares `cordis` as a peer dependency"。
+两个当场数出来的数字。`packages/` 下有 226 个 `package.json`，其中 219 个把 `@deepseek-ai/cordis` 写进了 `peerDependencies`（同时也在 `devDependencies` 里）。
+
+剩下 7 个全在 `packages/typert/generator/tests/fixtures/` 下，是测试夹具。`vendor/README.md:5` 也是这么说的："every harness package declares `cordis` as a peer dependency"。
 
 也就是说，**dsh 的每一个真实包都是 Cordis 插件**——模型适配器是，工具注册表是，会话日志是，连 agent 主循环本身也是（`docs/architecture.md:11`）。口号写在 README 第一屏："everything is a plugin"（`README.md:7`），架构文档说得更硬：
 
 > There is no privileged core to patch: you extend dsh by mounting a plugin beside the others, and registrations are effects that unwind when their plugin unloads.（`docs/architecture.md:13`）
 
-这句话有个直接后果，你翻启动代码就能看见：里面根本没有"依次初始化各模块"那一段。`packages/boot/app-boot/src/index.ts` 的启动函数总共干三件事——`new Context()`（`:764`）、`ctx.plugin(Loader)`（`:771`）、把一份 YAML 挂成根 Include（`:774` → `:518-523`）。完了。`apps/cli/src/profile-boot.ts:1-6` 的模块说明也只讲"把各层 patch 叠出这份 YAML"，压根不提模块初始化顺序。
+这句话有个直接后果，你翻启动代码就能看见：里面根本没有"依次初始化各模块"那一段。`packages/boot/app-boot/src/index.ts` 的启动函数总共干三件事，完了：
+
+| 第几件 | 干什么 | 行号 |
+|---|---|---|
+| 1 | `new Context()` | `:764` |
+| 2 | `ctx.plugin(Loader)` | `:771` |
+| 3 | 把一份 YAML 挂成根 Include | `:774` → `:518-523` |
+
+`apps/cli/src/profile-boot.ts:1-6` 的模块说明也只讲"把各层 patch 叠出这份 YAML"，压根不提模块初始化顺序。
 
 那顺序谁定？配置清单开头专门写了一句提醒，防止你想歪（`packages/bundle/base/cordis.patch.yml:12-13`）：
 
@@ -30,7 +42,17 @@
 
 ## 它为什么被抄进了 `vendor/`
 
-Cordis 的上游是 `cordiverse/cordis` 的 `packages/core`，快照在 commit `56b3d4f7`（`vendor/README.md:17`）。设计论文叫 _A Programming Paradigm for Spatiotemporal Composability_，链接在 `README.md:7`。dsh 把它整体 rescope 进了 `@deepseek-ai` 域，包名是 `@deepseek-ai/cordis`（`vendor/cordis/package.json:2`、`vendor/README.md:5`）。源码在 `vendor/cordis/src/`，9 个文件共 2693 行（当场 `wc -l`）——一个下午读得完的量。
+一张档案卡先摆着：
+
+| 项 | 内容 | 出处 |
+|---|---|---|
+| 上游 | `cordiverse/cordis` 的 `packages/core` | — |
+| 快照 commit | `56b3d4f7` | `vendor/README.md:17` |
+| 设计论文 | _A Programming Paradigm for Spatiotemporal Composability_ | 链接在 `README.md:7` |
+| rescope 后的包名 | `@deepseek-ai/cordis` | `vendor/cordis/package.json:2`、`vendor/README.md:5` |
+| 源码位置与体量 | `vendor/cordis/src/`，9 个文件共 2693 行（当场 `wc -l`） | — |
+
+2693 行是一个下午读得完的量。
 
 （"Cordis 出自 Koishi 生态"这句是背景常识，仓库里没有写，别当成核对过的事实。）
 
@@ -44,7 +66,9 @@ Cordis 的上游是 `cordiverse/cordis` 的 `packages/core`，快照在 commit `
 
 ## 五个对象，一张图
 
-官方 primer 用五句话概括 Cordis（`docs/cordis-primer.md:9-13`），挑的是 plugin / context / `inject` / typed events / reversible effects。本章的词表跟它不完全重合：`inject`、事件、effect 分别留给 07 / 10 / 08 章，这里先把承载它们的五个对象摆出来。
+官方 primer 用五句话概括 Cordis（`docs/cordis-primer.md:9-13`），挑的是 plugin / context / `inject` / typed events / reversible effects。
+
+本章的词表跟它不完全重合：`inject`、事件、effect 分别留给 07 / 10 / 08 章，这里先把承载它们的五个对象摆出来。
 
 | 词 | 一句话 | 出处 |
 |---|---|---|
@@ -69,7 +93,9 @@ Cordis 的上游是 `cordiverse/cordis` 的 `packages/core`，快照在 commit `
                └── fiber #2 / #3 / …  每个都有自己的 ctx，同样是 Object.create 出来的
 ```
 
-看清楚这里的错位：三张表是**平的**，都挂在根上那三个服务实例里；fiber 是**树的**。"表平树竖"是 Cordis 全部表达力的来源，后面讲 isolate 时你会看到它被用到极致。
+看清楚这里的错位：三张表是**平的**，都挂在根上那三个服务实例里；fiber 是**树的**。
+
+"表平树竖"是 Cordis 全部表达力的来源，后面讲 isolate 时你会看到它被用到极致。
 
 ---
 
@@ -110,27 +136,37 @@ flowchart TD
 
 ## 你写下 `ctx.tools` 那一刻，逐行发生了什么
 
-子 ctx 上没有 `tools` 这个属性，查找沿原型链上溯，撞到根 Proxy 的 `get` trap。
+一句话：查找沿原型链上溯撞到根 Proxy 的 `get` trap → 用**根**的表把名字换成 Symbol → 从**你的** fiber 起往上爬着找实现，找不到就抛。
 
-这里有个 ES 语义要先说清，否则下面看不懂：Proxy 的 `get` trap 第三个参数 `receiver` 是**最初被访问的那个对象**——也就是你的 ctx，不是根。Cordis 干脆把它命名为 `ctx`（`reflect.ts:136` 的 `get: (target, prop, ctx: Context) => {`）。而第一个参数 `target` 恒等于根 Context 实例，所以下面第 154 行取的 `key` 是**根**那张 isolate 表里的标签。这一"你的 ctx + 根的表"的组合，是后面 isolate 那节的全部机关所在。
+这里有个 ES 语义要先说清，否则下面看不懂：Proxy 的 `get` trap 第三个参数 `receiver` 是**最初被访问的那个对象**——也就是你的 ctx，不是根。Cordis 干脆把它命名为 `ctx`（`reflect.ts:136` 的 `get: (target, prop, ctx: Context) => {`）。
 
-解析过程（`reflect.ts:144-167`）：
+而第一个参数 `target` 恒等于根 Context 实例，所以下面取的 `key` 是**根**那张 isolate 表里的标签。这一"你的 ctx + 根的表"的组合，是后面 isolate 那节的全部机关所在。
+
+解析过程摊开来是一个爬链循环：
 
 ```
-ctx.tools
- ├─ :144  先造好错误对象：cannot get property "tools" without inject
- ├─ :152  你在根 ctx 上（fiber.runtime === null）？→ 直接查表，不要求 inject
- ├─ :153  否则进 internal/get waterfall（一种可被插件层层包住的派发方式，第 11 章专讲）
- ├─ :154  key = 根 ctx 的 isolate 表里 'tools' 那一格的 Symbol
- └─ :155  从你的 ctx（带 shadow 时用 shadow 的）的 fiber 开始往上爬：
-       :157  fiber.store['tools'] 有 → :158 返回 getTraceable(你的ctx, 值)
-       :159  在 fiber.inject 里但 store 没有 → 抛 cannot get required service "tools" in inactive context
-       :163  爬到根 fiber（runtime === null）→ 抛 without inject
-       :164  父 ctx 的 isolate['tools'] ≠ key（也就是进了别的 realm）→ 抛
-       :165  否则 fiber = fiber.parent.fiber，继续
+err = 错误对象「cannot get property "tools" without inject」   // :144 就造好
+
+if 你在根 ctx 上（fiber.runtime === null）:
+    直接查表返回，不要求 inject                                // :152
+进 internal/get waterfall                                     // :153（可被插件层层包住的派发方式，第 11 章专讲）
+
+key = 根 ctx 的 isolate 表里 'tools' 那一格的 Symbol            // :154
+fiber = 你的 ctx（带 shadow 时用 shadow 的）的 fiber            // :155
+
+loop:
+    if fiber.store['tools'] 有:                                // :157
+        return getTraceable(你的ctx, 值)                        // :158
+    if 'tools' 在 fiber.inject 里:                              // :159
+        throw 「cannot get required service "tools" in inactive context」
+    if fiber 已是根 fiber（runtime === null）:                   // :163
+        throw err
+    if 父 ctx 的 isolate['tools'] ≠ key:                        // :164（进了别的 realm）
+        throw err
+    fiber = fiber.parent.fiber                                  // :165
 ```
 
-这个循环摊开来只有四个出口：一个正常返回，三个抛，而且抛的理由各不相同。
+四个出口：一个正常返回，三个抛，而且抛的理由各不相同。完整实现在 `reflect.ts:144-167`。
 
 ```mermaid
 flowchart TD
@@ -172,9 +208,12 @@ flowchart TD
 
 排障时你会反复看到这两句，它们区分的是两种完全不同的失败，别弄混：
 
-**`cannot get property "x" without inject`** —— 你压根没声明。`inject` 数组里没有 `'x'`，爬到根 fiber 都没人给你，于是抛这句。**改法在你自己的插件里**：把 `'x'` 加进 `inject`。
+| 报错 | 判据 | 病根 | 改法在哪 |
+|---|---|---|---|
+| `cannot get property "x" without inject` | `inject` 数组里没有 `'x'`，爬到根 fiber 都没人给你 | 你压根没声明 | **你自己的插件里**：把 `'x'` 加进 `inject` |
+| `cannot get required service "x" in inactive context` | `'x'` 在 `fiber.inject` 里，`fiber.store` 却没有对应实现 | 提供方那个 fiber 现在不是 ACTIVE | **别人那里**：去查提供 `x` 的插件为什么没起来 |
 
-**`cannot get required service "x" in inactive context`** —— 你声明了，但提供方此刻不在。`'x'` 在 `fiber.inject` 里，`fiber.store` 却没有对应实现，说明提供方那个 fiber 现在不是 ACTIVE。**改法在别人那里**：去查提供 `x` 的插件为什么没起来（多半它自己卡在 `PENDING` 等更上游的依赖）。
+第二种多半是提供方自己卡在 `PENDING` 等更上游的依赖。
 
 一句话记法：**没写 inject 是你的问题，写了还报错是上游的问题。** 第 25 章会把这两条接进诊断流程。
 
@@ -182,7 +221,9 @@ flowchart TD
 
 **不 `inject` 就读不到，而且是抛，不是返回 `undefined`。** `fiber.store` 是 fiber 激活时对"我声明的依赖"的快照（`fiber.ts:647` 建、`:687` 清），自己 `provide` 的服务随后补写进去（`reflect.ts:293`）。没声明的名字爬到根就抛。
 
-**另有一条不检查 inject 的旁路**：`ctx.get(name)`（`reflect.ts:233`，混入见 `:219`）。它按 isolate 键直查表，`strict` 默认 `true`，只返回提供方 fiber 处于 ACTIVE 的实现（`reflect.ts:237-243`）。`packages/` 里有 376 处 `ctx.get('…')`（当场 grep），dsh 里"有就用、没有算了"的可选依赖走的就是它——例如 `packages/core/tools/src/index.ts:1020` 读 `codeRuntime`、`packages/core/agent-loop/src/index.ts:359` 读 `sessionPersistence`。
+**另有一条不检查 inject 的旁路**：`ctx.get(name)`（`reflect.ts:233`，混入见 `:219`）。它按 isolate 键直查表，`strict` 默认 `true`，只返回提供方 fiber 处于 ACTIVE 的实现（`reflect.ts:237-243`）。
+
+`packages/` 里有 376 处 `ctx.get('…')`（当场 grep），dsh 里"有就用、没有算了"的可选依赖走的就是它——例如 `packages/core/tools/src/index.ts:1020` 读 `codeRuntime`、`packages/core/agent-loop/src/index.ts:359` 读 `sessionPersistence`。
 
 ---
 
@@ -190,7 +231,17 @@ flowchart TD
 
 上面第 158 行返回的不是 `impl.value` 本身，而是 `getTraceable(ctx, impl.value)`。这一层包装是整个模型闭合的地方。
 
-`Service` 基类构造时造了 tracker `{ associate: name, property: 'ctx' }`（`service.ts:46-49`）并挂到实例上（`:55`），于是 `getTraceable` 会给它套一层 Proxy（`utils.ts:117-125` → `:165`），里面有决定性的一行（`utils.ts:176`）：
+`Service` 基类构造时造了 tracker `{ associate: name, property: 'ctx' }`（`service.ts:46-49`）并挂到实例上（`:55`），于是 `getTraceable` 会给它套一层 Proxy（`utils.ts:117-125` → `:165`）。这层 Proxy 只做一件事：
+
+```
+Proxy(服务实例, {
+    get(实例, prop):
+        if prop === tracker.property:   return 调用方的 ctx    // 不是服务自己的
+        else:                           return 实例[prop]
+})
+```
+
+决定性的那一行是（`utils.ts:176`）：
 
 ```ts
 if (prop === tracker.property) return ctx
@@ -236,7 +287,9 @@ flowchart LR
     class A,E entry
 ```
 
-事件监听同理，`ctx.on()`（`events.ts:288`）走到 `register()`，里面就是 `this.ctx.fiber.effect(...)`（`events.ts:254-260`）。这就是"注册即 effect、卸载即逆序回滚"的物理基础——不是靠约定，是靠 `ctx` 的身份被 Proxy 全程携带。`packages/` 下有 189 处 `ctx.effect(` 调用点，算上 `apps/` 与 `vendor/` 共 212 处（当场 grep），怎么写见第 08 章。
+事件监听同理，`ctx.on()`（`events.ts:288`）走到 `register()`，里面就是 `this.ctx.fiber.effect(...)`（`events.ts:254-260`）。
+
+这就是"注册即 effect、卸载即逆序回滚"的物理基础——不是靠约定，是靠 `ctx` 的身份被 Proxy 全程携带。`packages/` 下有 189 处 `ctx.effect(` 调用点，算上 `apps/` 与 `vendor/` 共 212 处（当场 grep），怎么写见第 08 章。
 
 ---
 
@@ -255,9 +308,23 @@ fiber 有六个状态，枚举顺序如下（`fiber.ts:147-154`）：
 | `DISPOSED` | 已移除，不能再起 | — |
 | `UNLOADING` | disposers 正在跑 | 此时再建 effect 会被拒（`fiber.ts:419-422`） |
 
-状态之间的迁移不靠调度器，靠一个 epoch 字符串（`fiber.ts:611-639`）。`_refresh()` 把每个依赖的提供方 fiber uid 拼成 `":3:7"` 这样的串，任一依赖缺失就整串写成 `__INACTIVE__`。`_setEpoch()` 拿新旧两串一比：从 `__INACTIVE__` 变成别的就 `_reload()`（`:631-633`）；其余任何变化——**包括从一个非 `__INACTIVE__` 串变成另一个**——都走 `_unload()`（`:634-637`），而 `_unload()` 收尾时若 epoch 已不是 `__INACTIVE__`，会再自动 `_reload()` 回来（`fiber.ts:688-694`）。
+状态之间的迁移不靠调度器，靠一个 epoch 字符串（`fiber.ts:611-639`）：
 
-括号里那句是重点：**依赖的提供方换了一个 fiber（uid 变了），epoch 就变，你的插件会被完整卸载重装。** 这不是 bug，正是热重载能干净工作的原因（第 08 章）。
+```
+_refresh():
+    epoch = 每个依赖的提供方 fiber uid 拼起来，形如 ":3:7"
+    任一依赖缺失 → 整串写成 "__INACTIVE__"
+
+_setEpoch(新, 旧):
+    if 旧 == "__INACTIVE__" 且 新 != "__INACTIVE__":  _reload()   // :631-633
+    else 任何其它变化:                                 _unload()   // :634-637
+        // 「其它变化」包括：从一个非 __INACTIVE__ 串变成另一个非 __INACTIVE__ 串
+
+_unload() 收尾:
+    if epoch 已不是 "__INACTIVE__":  自动 _reload() 回来           // :688-694
+```
+
+注释里那句是重点：**依赖的提供方换了一个 fiber（uid 变了），epoch 就变，你的插件会被完整卸载重装。** 这不是 bug，正是热重载能干净工作的原因（第 08 章）。
 
 把六个状态和 epoch 的两条规则接起来，迁移图就闭合了——`UNLOADING` 有两个出口，是"卸载完发现依赖又回来了就自动重装"这句话的机制形态：
 
@@ -279,7 +346,9 @@ stateDiagram-v2
     end note
 ```
 
-顺带澄清一个容易读反的细节。`effect()` 自己的 disposer 是严格**逆序串行**执行的（`fiber.ts:431` 的 `.reverse()`）；但 fiber 整体 `_unload()` 时，把 `_disposables.clear()` 拿到的逆序列表（`utils.ts:27-31` 的 `values.reverse()`）交给了 `Promise.all` 并发跑（`fiber.ts:676`）——这里逆序决定的是启动顺序，不是串行等待。
+顺带澄清一个容易读反的细节。`effect()` 自己的 disposer 是严格**逆序串行**执行的（`fiber.ts:431` 的 `.reverse()`）。
+
+但 fiber 整体 `_unload()` 时，把 `_disposables.clear()` 拿到的逆序列表（`utils.ts:27-31` 的 `values.reverse()`）交给了 `Promise.all` 并发跑（`fiber.ts:676`）——这里逆序决定的是启动顺序，不是串行等待。
 
 ---
 
@@ -287,9 +356,13 @@ stateDiagram-v2
 
 Cordis 本体不认识 YAML。是 loader 插件把配置翻译成 `ctx.plugin()` 调用。
 
-上游那个最小启动器统共 16 行，值得打开看一眼（`vendor/cordis/bin.js:1-16`）：去掉 import 与 `baseUrl` 赋值，剩下的就是 `new Context()` → `ctx.plugin(Loader)` → `ctx.loader.create({ name: '@deepseek-ai/cordis-plugin-include', config: { path: './cordis.yml' } })`。dsh 的启动是同一个形状，只是 Include 那一行换成了内置 id（`packages/boot/app-boot/src/index.ts:764`、`:771`、`:518-523`）。
+上游那个最小启动器统共 16 行，值得打开看一眼（`vendor/cordis/bin.js:1-16`）：去掉 import 与 `baseUrl` 赋值，剩下的就是 `new Context()` → `ctx.plugin(Loader)` → `ctx.loader.create({ name: '@deepseek-ai/cordis-plugin-include', config: { path: './cordis.yml' } })`。
 
-配置里每一行叫一个 **Entry**（`vendor/loader/src/config/entry.ts:52`）。它自己也 `extend` 出一个 ctx（`entry.ts:67`），再把插件挂上去（`entry.ts:296` 的 `this.ctx.registry.plugin(...)`）。字段就那么几个（`entry.ts:9-22`）：`id` / `name` / `config` / `group` / `disabled` / `inject`，另加 loader 的 isolate 插件补的 `intercept` / `isolate`（`vendor/loader/src/config/isolate.ts:6-9`）。
+dsh 的启动是同一个形状，只是 Include 那一行换成了内置 id（`packages/boot/app-boot/src/index.ts:764`、`:771`、`:518-523`）。
+
+配置里每一行叫一个 **Entry**（`vendor/loader/src/config/entry.ts:52`）。它自己也 `extend` 出一个 ctx（`entry.ts:67`），再把插件挂上去（`entry.ts:296` 的 `this.ctx.registry.plugin(...)`）。
+
+字段就那么几个（`entry.ts:9-22`）：`id` / `name` / `config` / `group` / `disabled` / `inject`，另加 loader 的 isolate 插件补的 `intercept` / `isolate`（`vendor/loader/src/config/isolate.ts:6-9`）。
 
 一行配置到一个运行实例，中间只有三跳；`disabled` 的那一行连 fiber 都不会有：
 
@@ -347,7 +420,15 @@ root Context                                             app-boot/src/index.ts:7
 | 谁写进去 | `ctx.plugin()`（`registry.ts:316`） | `ctx.provide()`（`reflect.ts:277`） |
 | 何时清 | 最后一个 fiber 销毁时触发（`fiber.ts:270-274`）→ `registry.delete()`（`registry.ts:258-267`） | 提供方 fiber 卸载时（`reflect.ts:297-303`） |
 
-服务表的键是 Symbol 而不是字符串，这是下一节的全部前提。`provide()` 里 `reflect.ts:286-287` 两行先在根上给服务名分配一个 Symbol，再从**当前 ctx 的 isolate 映射**里取键。换句话说：服务名 `'fs'` 只是用来查那张映射表的字符串，真正的键是表给出的 Symbol。默认情况下大家共用根上那一个，所以全进程看到同一份 `ctx.fs`。
+服务表的键是 Symbol 而不是字符串，这是下一节的全部前提。`provide()` 里那两行是这么走的：
+
+```
+provide('fs'):
+    先在根上给服务名 'fs' 分配一个 Symbol          // reflect.ts:286
+    再从「当前 ctx 的 isolate 映射」里取键          // reflect.ts:287
+```
+
+换句话说：服务名 `'fs'` 只是用来查那张映射表的字符串，真正的键是表给出的 Symbol。默认情况下大家共用根上那一个，所以全进程看到同一份 `ctx.fs`。
 
 ——除非有人把那张表换了。
 
@@ -370,7 +451,9 @@ root Context                                             app-boot/src/index.ts:7
         cwd: !!js process.env.DSH_CWD ?? process.cwd()
 ```
 
-处理在 `vendor/loader/src/config/isolate.ts`。写 `true` 就是 entry 本地 realm（`LocalRealm`，后缀 `#<entry id>`，`isolate.ts:48-57`）；写成字符串就是具名 realm（`GlobalRealm`，后缀 `@<label>`，`isolate.ts:59-68`），**同 label 的多个 entry 共享一个 realm**（`isolate.ts:77-89`）。realm 只干一件事：给这个名字发一个新 Symbol（`isolate.ts:31-37`），塞进这棵子树的 isolate 映射（`isolate.ts:98-101`，新表的原型指向父表）。
+处理在 `vendor/loader/src/config/isolate.ts`。写 `true` 就是 entry 本地 realm（`LocalRealm`，后缀 `#<entry id>`，`isolate.ts:48-57`）；写成字符串就是具名 realm（`GlobalRealm`，后缀 `@<label>`，`isolate.ts:59-68`），**同 label 的多个 entry 共享一个 realm**（`isolate.ts:77-89`）。
+
+realm 只干一件事：给这个名字发一个新 Symbol（`isolate.ts:31-37`），塞进这棵子树的 isolate 映射（`isolate.ts:98-101`，新表的原型指向父表）。
 
 ```
 root:  isolate = { fs: Symbol(fs), tools: Symbol(tools) }
@@ -415,15 +498,23 @@ flowchart TD
 
 **一次 isolate 只切一个名字**，其余服务照旧继承。"给某个 agent 换掉文件系统、同时保留全局工具表"能一行配置搞定，就是这么来的。
 
-回头看解析过程里那条看起来最古怪的第 164 行：父 ctx 上这个名字的标签一旦不等于根表里的那个（也就是你已经进了某个 realm），上爬就停。现在它有意义了——**这是防止子树里的插件顺着 fiber 链爬到父作用域去偷宿主那份实现。** realm 如果只能挡住写、挡不住读，那它就白设了。
+回头看解析过程里那条看起来最古怪的第 164 行：父 ctx 上这个名字的标签一旦不等于根表里的那个（也就是你已经进了某个 realm），上爬就停。
 
-最后纠正一个容易想歪的地方：**这棵 preset 子树不是启动清单里的兄弟节点**。它由 `dsh-agent-presets` 在运行时直接挂在 agent 的 scope 上下文下——`packages/preset/agent-presets/src/mount.ts:350` 的 `agentCtx.plugin(PresetTree, config)`，其中 `PresetTree` 是 `Include` 的子类，roster 自己那一行则在 `packages/bundle/web-app/cordis.patch.yml:421`。同一个 preset 文件里还有另一个 realm（`persistent-shell` 组 `isolate: { terminals: true }`，`:18-22`），机制完全一样。
+现在它有意义了——**这是防止子树里的插件顺着 fiber 链爬到父作用域去偷宿主那份实现。** realm 如果只能挡住写、挡不住读，那它就白设了。
+
+最后纠正一个容易想歪的地方：**这棵 preset 子树不是启动清单里的兄弟节点**。它由 `dsh-agent-presets` 在运行时直接挂在 agent 的 scope 上下文下——`packages/preset/agent-presets/src/mount.ts:350` 的 `agentCtx.plugin(PresetTree, config)`，其中 `PresetTree` 是 `Include` 的子类，roster 自己那一行则在 `packages/bundle/web-app/cordis.patch.yml:421`。
+
+同一个 preset 文件里还有另一个 realm（`persistent-shell` 组 `isolate: { terminals: true }`，`:18-22`），机制完全一样。
 
 ---
 
 ## 那普通 DI 容器或洋葱中间件为什么不够
 
-两个词先说清楚。**DI 容器**（dependency injection，依赖注入）：你不自己 `new` 依赖，而是声明"我要一个 X"，由容器在启动时把实例塞给你——Spring、NestJS 那一类。**洋葱中间件**：把一串处理函数套成同心圆，每个函数拿到 `next()`，可以在调用它前后各做点事，也可以不调用它从而截断后面所有层——Koa、Express 那一类。
+两个词先说清楚。
+
+**DI 容器**（dependency injection，依赖注入）：你不自己 `new` 依赖，而是声明"我要一个 X"，由容器在启动时把实例塞给你——Spring、NestJS 那一类。
+
+**洋葱中间件**：把一串处理函数套成同心圆，每个函数拿到 `next()`，可以在调用它前后各做点事，也可以不调用它从而截断后面所有层——Koa、Express 那一类。
 
 | 维度 | 传统 DI 容器 | 洋葱中间件 | Cordis |
 |---|---|---|---|
@@ -459,7 +550,9 @@ flowchart TD
 
 ## 三个最容易踩的坑
 
-**把 `ctx` 存进模块级变量再共享。** 服务方法读的是调用方 ctx，你把自己的 `ctx` 传给别的模块去注册东西，等于把注册的归属也送出去了——那些注册记在**你的** fiber 上，你卸载时它们跟着消失，而对方毫不知情；反过来拿别人的 ctx 注册，你自己卸载时东西还在。规矩很简单：**谁的生命周期，用谁的 ctx**。
+**把 `ctx` 存进模块级变量再共享。** 服务方法读的是调用方 ctx，你把自己的 `ctx` 传给别的模块去注册东西，等于把注册的归属也送出去了。
+
+那些注册记在**你的** fiber 上，你卸载时它们跟着消失，而对方毫不知情；反过来拿别人的 ctx 注册，你自己卸载时东西还在。规矩很简单：**谁的生命周期，用谁的 ctx**。
 
 **以为读不到的服务会返回 `undefined`。** 不会，会抛（`reflect.ts:144` / `:163`）。想要"有就用"的语义必须显式走 `ctx.get(name)`（`reflect.ts:233`）。
 

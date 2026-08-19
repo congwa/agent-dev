@@ -6,7 +6,11 @@
 
 **一句话**：把「计划模式」做成一条从会话日志折叠出来的 per-agent 状态——开着时往系统提示插一段部署方写死的 guidance，靠 `exit_plan_mode` 走人工审批退出；它只劝导，不强制。
 
-README 开门见山就把边界划清了：`Plan mode is soft guidance; sandbox mode and approval policy enforce restrictions independently and do not read or write plan state.`（`packages/plan/plan-mode/README.md:5`）。真正拦得住写操作的是 sandbox 和 approval，不是这个插件。
+「只劝导，不强制」这句不是我的评价，是 README 开门见山自己划的边界：
+
+> `Plan mode is soft guidance; sandbox mode and approval policy enforce restrictions independently and do not read or write plan state.`
+
+真正拦得住写操作的是 sandbox 和 approval，不是这个插件。出处 `packages/plan/plan-mode/README.md:5`。
 
 ## 它在树上长什么样
 
@@ -18,11 +22,19 @@ README 开门见山就把边界划清了：`Plan mode is soft guidance; sandbox 
               You are in plan mode. Stay in plan mode until exit_plan_mode succeeds or the user switches the session mode. Imperative language to implement changes means plan the implementation, not execute it. A user's conversational agreement — including an answer confirming something you asked — approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.
 ```
 
-`packages/bundle/base/cordis.patch.yml:265-279`。`section` 在 YAML 里是个 7 段的块标量，上面只贴了第 1 段（269 行）；其余 6 段分别讲「先探查、别改文件」「工具目录跨模式不变，这些规则压倒后面任何鼓励用变更工具的说明」「能查的别问用户」「计划要 decision-complete」「exit_plan_mode 必须是那一轮唯一且最后一个工具调用」。
+上面贴的只是开头一小截。`section` 在 YAML 里是个 7 段的块标量，这里只有第 1 段（269 行），其余 6 段分别讲：
 
-这一行**没写 `inject`**：依赖声明在源码里，`static inject = ['tools', 'systemPrompt']`（`packages/plan/plan-mode/src/index.ts:185`）。
+- 先探查、别改文件
+- 工具目录跨模式不变，这些规则压倒后面任何鼓励用变更工具的说明
+- 能查的别问用户
+- 计划要 decision-complete
+- `exit_plan_mode` 必须是那一轮唯一且最后一个工具调用
 
-`web-app` bundle 在宿主平面把它关掉（`packages/bundle/web-app/cordis.patch.yml:348-349`，`disabled: true`），改由各个 agent preset 自己挂一份，配置文案略有差异（`apps/cli/config/agent-presets/code/agent.cordis.yml:117-125`）。
+整段出处 `packages/bundle/base/cordis.patch.yml:265-279`。
+
+这一行**没写 `inject`**，第一眼会以为它不依赖任何服务。其实依赖声明写在源码里：`static inject = ['tools', 'systemPrompt']`（`packages/plan/plan-mode/src/index.ts:185`）。
+
+还有一处容易看漏：`web-app` bundle 在宿主平面把它整个关掉了（`disabled: true`），改由各个 agent preset 自己挂一份，配置文案略有差异。分别见 `packages/bundle/web-app/cordis.patch.yml:348-349` 和 `apps/cli/config/agent-presets/code/agent.cordis.yml:117-125`。
 
 ## 它注册了什么
 
@@ -37,6 +49,19 @@ README 开门见山就把边界划清了：`Plan mode is soft guidance; sandbox 
 | projection unit | `plan` → `{ active, pending }`，`stateVersion: 1` | `src/index.ts:244-266`，仅当 `ctx.sessionProjections` 已挂载 |
 | 伴生插件 | `./invariant`（`plan-mode-invariant`） | `src/invariant.ts:20-26`，只校验 `plan/mode.active` 是不是 boolean；默认 bundle 的 patch.yml 里没有这一行 |
 
+表里最值得停一下的是那个 waterfall 监听。它的顺序是反直觉的——不是「先记状态再放行」，而是「先放行、下游认了才记」：
+
+```
+on agent/pre-step (waterfall):
+    await next()                        // 先把下游跑完
+    if 下游没 accept 这一步:  return     // 这一步作废，什么都不记
+    if 有挂起的 plan/mode 选择:
+        session.append('plan/mode', 挂起的值)
+        可能往 decision.messages 追加一条切换通知
+```
+
+也就是说，挂起的模式切换是搭这一步的便车落地的，没有被接受的步就没有落地机会。实现在 `src/index.ts:205`（注册）、`src/index.ts:209-221`（落地）。
+
 `agent/pre-step` 的 waterfall 派发方与消费方名单见 `docs/event-producer-consumer.md:18`。派发模式的通用讲法见 [11 章 waterfall 专章](../11-waterfall专章.md)。
 
 ## 配置项
@@ -45,11 +70,23 @@ README 开门见山就把边界划清了：`Plan mode is soft guidance; sandbox 
 |---|---|---|---|
 | `section` | `string` | **无默认，必填** | 激活时渲染成 `plan:policy` 段的原文 |
 
-`resolveConfig`（`src/index.ts:106-119`）在插件加载期就把非字符串、空白串、以及任何多余 key 抛错，不做静默忽略。README:38 原文：`section is required and non-empty. Unknown keys fail at load. The package does not accept arbitrary named modes, tool filters, sandbox settings, or approval policy.`
+只有一个字段，而且校验很凶。`resolveConfig`（`src/index.ts:106-119`）在插件加载期就把非字符串、空白串、以及任何多余 key 抛错，不做静默忽略。
+
+README:38 原文：`section is required and non-empty. Unknown keys fail at load. The package does not accept arbitrary named modes, tool filters, sandbox settings, or approval policy.`
 
 ## 状态什么时候真正落日志
 
-`set(agent, active)` 的四种返回值（`src/index.ts:425-445`）：
+调 `set(agent, active)` 不等于状态就变了。四个判据依次过一遍：
+
+```
+set(agent, active):
+    if 目标态 == 当前态 或 == 已挂起态:      return 'noop'
+    if 存在一个方向相反的挂起选择:            撤销它 → return 'cancelled'
+    if hasOpenTurn(agent):                  挂起 → return 'queued'
+    session.append('plan/mode', { active })  return 'committed'
+```
+
+四种返回值的官方说法（`src/index.ts:425-445`）：
 
 | 返回 | 触发条件 |
 |---|---|
@@ -58,7 +95,7 @@ README 开门见山就把边界划清了：`Plan mode is soft guidance; sandbox 
 | `cancelled` | 撤销了一个反向的挂起选择，日志态本来就对 |
 | `noop` | 目标态等于当前态或已挂起态 |
 
-`hasOpenTurn`（`src/index.ts:158-165`）是那个 idle 判据：agent 的 status 在 post-turn checkpoint 期间仍是 `running`，所以不能用 status 判断。
+这里有个坑：判断「现在闲不闲」用的是 `hasOpenTurn`（`src/index.ts:158-165`），**不能用 agent 的 status**——agent 的 status 在 post-turn checkpoint 期间仍然是 `running`，看 status 会把 idle 误判成忙。
 
 四种返回值本质是同一个状态机在 idle / 挂起两种处境下的落地方式：
 
@@ -76,10 +113,21 @@ stateDiagram-v2
 
 ## 模型看得见什么
 
-- **激活时**：order 50 位置多出 `section` 全文；非激活时一个 token 都不加（README:48、58）。
-- **`exit_plan_mode` schema 常驻**：README:82 原文 `The stable schema is available in both states` 的对应表述是 `remains available in both states; execution outside plan mode fails`。批准时返回 `{ approved: true }`，渲染成 `Plan approved — plan mode exited; carry out the plan starting with your next step.`（`src/index.ts:319`）。
-- **拒绝 = 失败调用**：`The user chose to keep planning; revise the plan and present it again.`，带反馈时换成 `The user chose to keep planning; their feedback: <feedback>`（`src/index.ts:372-374`）。
-- **用户中途关掉审批框**去说别的（`ASK_CANCELLED`），单独报 `The user dismissed the plan review to speak instead; stay in plan mode, stop here, and wait for their message.`（`src/index.ts:357-359`）——README:17 特意解释了为什么不能复用通用消息：那条消息会提到模型压根没调过的 `ask_user_question`。
+**激活时**，order 50 的位置多出 `section` 全文；非激活时一个 token 都不加（README:48、58）。
+
+**`exit_plan_mode` 的 schema 是常驻的**。README:82 原文 `The stable schema is available in both states` 的对应表述是 `remains available in both states; execution outside plan mode fails`——schema 一直在，但计划模式之外执行会失败。
+
+调用之后有三条分支，模型收到的东西完全不同：
+
+| 分支 | 模型收到什么 |
+|---|---|
+| 批准 | 返回 `{ approved: true }`，渲染成 `Plan approved — plan mode exited; carry out the plan starting with your next step.` |
+| 拒绝（继续计划） | 失败调用：`The user chose to keep planning; revise the plan and present it again.`；带反馈时换成 `The user chose to keep planning; their feedback: <feedback>` |
+| 用户中途关掉审批框去说别的（`ASK_CANCELLED`） | 失败调用：`The user dismissed the plan review to speak instead; stay in plan mode, stop here, and wait for their message.` |
+
+出处依次是 `src/index.ts:319`、`src/index.ts:372-374`、`src/index.ts:357-359`。
+
+第三条为什么不复用通用的取消消息，README:17 特意解释过：那条通用消息会提到 `ask_user_question`，而模型压根没调过这个工具。
 
 三条分支的落点差别很大，批准是唯一走到「日志变更 + 无失败」的路径：
 
@@ -109,17 +157,45 @@ flowchart TD
     class F data
     class G,H danger
 ```
-- **`/plan` 命令本身不进模型历史**（README:68）；`/plan xxx` 的 `xxx` 会经 `agent.steer()` 变成下一步一条普通的 user 文本块（`src/index.ts:294`）。
-- **切换旁白**：只有当「上一条 `request/header` 描述的是另一个模式」时才追加一句 `The user switched this session to plan mode.` / `The user switched this session back to the default mode.`（`src/index.ts:463-474`），避免重复告知。
 
-默认 `section` 里有两条跟同组插件直接相关的硬话（`packages/bundle/base/cordis.patch.yml:273`）：`Do not use todo_write to track this planning phase: it tracks implementation after an approved plan, while the plan itself belongs in exit_plan_mode.` —— 也就是说 [tool-todo](./dsh-tool-todo.md) 的 `todo_write` 在计划期是被提示层显式禁用的。同一段还写明 `The tool catalog stays the same across modes for request-cache stability.`，这是为什么 `exit_plan_mode` 不激活也注册。
+**`/plan` 命令本身不进模型历史**（README:68）。但 `/plan xxx` 里的 `xxx` 会经 `agent.steer()` 变成下一步的一条普通 user 文本块（`src/index.ts:294`）——命令消失了，你说的话还在。
+
+**切换旁白只在真的换了模式时才追加**：
+
+```
+if 上一条 request/header 描述的是另一个模式:
+    追加 "The user switched this session to plan mode."
+         或 "The user switched this session back to the default mode."
+else:
+    什么都不加            // 避免重复告知
+```
+
+实现在 `src/index.ts:463-474`。
+
+最后有一处跨插件的硬约束。默认 `section` 里有两条跟同组插件直接相关的硬话（`packages/bundle/base/cordis.patch.yml:273`）。第一条：
+
+> `Do not use todo_write to track this planning phase: it tracks implementation after an approved plan, while the plan itself belongs in exit_plan_mode.`
+
+也就是说 [tool-todo](./dsh-tool-todo.md) 的 `todo_write` 在计划期是被提示层显式禁用的。
+
+第二条：`The tool catalog stays the same across modes for request-cache stability.` —— 这就是为什么 `exit_plan_mode` 在不激活时也照样注册。
 
 ## 什么时候你会想换掉它 / 怎么换
 
-- **只想改文案**：覆盖 `section` 即可，这是唯一配置面。preset 各自挂一份就是这个用法。
-- **想让它真能拦住写操作**：换不了——README:94 明说 `Plan mode guides rather than enforces`。要硬拦得去配 sandbox（`docs/subsystems/sandbox.md`）和 approval（`docs/subsystems/approval.md`），那两套不读也不写 plan 状态。
-- **想整个关掉**：patch 里写 `- id: plan-mode` + `disabled: true`，web-app bundle 就是这么干的（`packages/bundle/web-app/cordis.patch.yml:348-349`）。关掉之后 `exit_plan_mode` 和 `/plan` 一起消失，`plan` projection key 缺席——`src/types.ts:11-17` 明确 `Capability absence (plan-mode not composed) is the key's absence, never a value.`
-- **想加多个命名模式 / 工具过滤**：这个包不收（README:38），得另写插件。
+| 诉求 | 能不能 | 怎么办 |
+|---|---|---|
+| 只想改文案 | 能 | 覆盖 `section` |
+| 想让它真能拦住写操作 | 不能 | 去配 sandbox 和 approval |
+| 想整个关掉 | 能 | patch 里写 `disabled: true` |
+| 想加多个命名模式 / 工具过滤 | 不能 | 另写插件 |
+
+`section` 是唯一配置面，preset 各自挂一份就是这个用法。
+
+「真能拦住」这条换不了：README:94 明说 `Plan mode guides rather than enforces`。要硬拦得去配 sandbox（`docs/subsystems/sandbox.md`）和 approval（`docs/subsystems/approval.md`），那两套不读也不写 plan 状态。
+
+关掉的写法是 patch 里写 `- id: plan-mode` 加 `disabled: true`，web-app bundle 就是这么干的（`packages/bundle/web-app/cordis.patch.yml:348-349`）。关掉之后 `exit_plan_mode` 和 `/plan` 一起消失，`plan` projection key 直接缺席——注意不是变成某个空值，`src/types.ts:11-17` 写得很明确：`Capability absence (plan-mode not composed) is the key's absence, never a value.`
+
+命名模式和工具过滤这个包不收（README:38），只能另写插件。
 
 ## 坑与边界
 

@@ -21,6 +21,10 @@ RETURNING balance
 
 ## 二、8 个阶段
 
+一句话地图：发 SQL → fork 出专属进程 → Parse / Rewrite / Plan → **在数据页上追加新版本、顺手写 WAL** → COMMIT 时 fsync WAL → 返回结果，数据文件另有人在后台慢慢刷。
+
+八步里只有第 ⑥⑦ 步值得停下来看，其余都是模板。
+
 ```
 你的程序
    │  ① 通过连接发送 SQL 文本 + 参数（简单查询协议 / 扩展查询协议）
@@ -82,10 +86,13 @@ MySQL 是"一个连接一个线程"，Postgres 是 **"一个连接一个进程"*
   后端进程数: 51
 ```
 
-进程比线程贵得多：每个 backend 有自己的私有内存（`work_mem`、catalog cache、plan cache），大概几 MB 起步；进程切换成本也更高。所以：
+进程比线程贵得多。每个 backend 有自己的私有内存（`work_mem`、catalog cache、plan cache），大概几 MB 起步；进程切换成本也更高。
 
-- **Postgres 的连接数上限比你想象的低。** 一般经验值是 `CPU 核数 × 2 ~ 4`，而不是几千。
-- **必须用连接池**（应用层的 `SetMaxOpenConns`，或者 PgBouncer）。sub2api 在 `internal/repository/db_pool.go` 里就老老实实做了这件事：
+于是有两条直接后果。
+
+第一，**Postgres 的连接数上限比你想象的低。** 一般经验值是 `CPU 核数 × 2 ~ 4`，而不是几千。
+
+第二，**必须用连接池**（应用层的 `SetMaxOpenConns`，或者 PgBouncer）。sub2api 在 `internal/repository/db_pool.go` 里就老老实实做了这件事：
 
 ```go
 db.SetMaxOpenConns(settings.MaxOpenConns)
@@ -132,7 +139,16 @@ flowchart TD
 
 这是生产事故里最难受的一种：**数据库还活着，但你连不进去看它为什么活得不好。**
 
-（Postgres 有 `superuser_reserved_connections`，默认给超级用户留 3 个位置。PG 16 起还有 `reserved_connections` 给带特定角色的普通用户留位置。别把这当护身符——留 3 个连接，配合一个 `psql` 就没了。）
+几个数字放一起，方便照着算预算：
+
+| 项 | 值 |
+|---|---|
+| 应用侧池上限 × 应用实例数 | 要 < `max_connections` × 0.8 |
+| 连接数经验上限 | `CPU 核数 × 2 ~ 4` |
+| `superuser_reserved_connections` | 默认给超级用户留 3 个位置 |
+| `reserved_connections`（PG 16 起） | 给带特定角色的普通用户留位置 |
+
+别把预留位当护身符——留 3 个连接，配合一个 `psql` 就没了。
 
 ---
 
@@ -159,6 +175,17 @@ SELECT ctid, xmin, xmax, balance FROM acct;
 ```sql
 UPDATE acct SET balance = balance - 1 WHERE id = 1;   -- ctid 变成 (0,2), xmin=1055
 UPDATE acct SET balance = balance - 1 WHERE id = 1;   -- ctid 变成 (0,3), xmin=1056
+```
+
+每一次 UPDATE 在页上做的事，示意成伪代码是这样：
+
+```
+执行一次 UPDATE:
+    定位到目标行当前的那个版本
+    在同一页上追加一个新版本          // 拿到一个新的 ctid
+    旧版本写上 xmax = 本事务号        // 旧版本并不删掉，还占着位置
+    旧版本的 t_ctid 指向新版本        // 于是版本被串成一条链
+    把上面这些改动写进 WAL 缓冲区
 ```
 
 从 SQL 层面看，表里始终只有 1 行。但用 `pageinspect` 扩展绕过可见性判断，直接看物理页：
@@ -207,7 +234,19 @@ flowchart LR
 | `ctid` | 自己的物理位置；在旧版本上，`t_ctid` 指向新版本，形成版本链 |
 | `infomask` | 一堆标志位，缓存"xmin 对应的事务是否已提交"等信息，避免反复查 clog |
 
-一个版本对当前事务可见的判断，简化后就是：
+那么一个版本对当前事务到底可不可见？简化后的判断是：
+
+```
+对每个版本 v:
+    if not (v.xmin 已提交 and v.xmin 在我的快照里算"已完成"):
+        不可见                                  // 造它的事务还没算数
+    elif v.xmax == 0 or v.xmax 未提交 or v.xmax 在我快照里算"未完成":
+        可见                                    // 没人删它，或删它的人还没算数
+    else:
+        不可见                                  // 已经被删掉且删除已生效
+```
+
+一句话版本，也就是原来那条判据：
 
 > `xmin` 对应的事务已提交 **且** 在我的快照里算"已完成" **且** （`xmax` 为 0 或 `xmax` 对应事务未提交/在我快照里算"未完成"）
 
@@ -323,21 +362,33 @@ flowchart TD
 
 ## 五、关键点 3：COMMIT 的耐久性来自 WAL，不是数据文件
 
-你 `COMMIT` 的那一刻，被修改的数据页**可能还在内存里没落盘**。真正保证"断电也不丢"的是 **WAL（Write-Ahead Log，预写日志）**：
+你 `COMMIT` 的那一刻，被修改的数据页**可能还在内存里没落盘**。真正保证"断电也不丢"的是 **WAL（Write-Ahead Log，预写日志）**。
 
-1. 改数据页之前，先把"我要怎么改"写进 WAL 缓冲区；
-2. `COMMIT` 时把 WAL 缓冲区 `fsync` 到磁盘；
-3. fsync 成功 → 才告诉客户端"提交成功"；
-4. 数据页由 checkpointer/bgwriter 在后台慢慢刷；
-5. 崩溃重启时，从上一个 checkpoint 开始重放 WAL，把数据文件追平。
+顺序是固定的：
+
+```
+改一个数据页:
+    先把"我要怎么改"写进 WAL 缓冲区    // 永远在改页之前
+    再改内存里的数据页
+
+COMMIT:
+    fsync(WAL 缓冲区 → 磁盘)
+    fsync 成功 → 才告诉客户端"提交成功"
+    // 数据页此刻可能还没落盘，由 checkpointer/bgwriter 在后台慢慢刷
+
+崩溃重启:
+    从上一个 checkpoint 开始重放 WAL，把数据文件追平
+```
 
 这就是 **WAL 的核心规则：日志先于数据落盘（Write-Ahead）**。
 
-由此推出几件事：
+由此推出几件事。
 
-- **每个 COMMIT 至少一次 fsync。** 所以在机械盘/慢盘上，逐条 `COMMIT` 的循环插入慢得离谱，而把 1000 条包进一个事务快几十倍。
-- **`synchronous_commit = off`** 可以让 COMMIT 不等 fsync 直接返回，吞吐立刻上一大截，代价是崩溃时可能丢最近几百毫秒的已提交事务（**注意：不会损坏数据，只会丢事务**）。计费、订单不能开；埋点日志可以考虑。
-- **流复制、时间点恢复（PITR）、逻辑复制、`pg_basebackup`** 全都建立在 WAL 之上。WAL 不只是崩溃恢复的日志，它是 Postgres 整个高可用体系的地基。
+**每个 COMMIT 至少一次 fsync。** 所以在机械盘/慢盘上，逐条 `COMMIT` 的循环插入慢得离谱，而把 1000 条包进一个事务快几十倍。
+
+**`synchronous_commit = off`** 可以让 COMMIT 不等 fsync 直接返回，吞吐立刻上一大截，代价是崩溃时可能丢最近几百毫秒的已提交事务（**注意：不会损坏数据，只会丢事务**）。计费、订单不能开；埋点日志可以考虑。
+
+**流复制、时间点恢复（PITR）、逻辑复制、`pg_basebackup`** 全都建立在 WAL 之上。WAL 不只是崩溃恢复的日志，它是 Postgres 整个高可用体系的地基。
 
 ### ❓ 问题：为什么"批量插入要包在一个事务里"？
 
@@ -360,7 +411,7 @@ COMMIT;
 
 它依据的是 `pg_statistic` 里的统计信息——列的 distinct 值个数、最常见值（MCV）、直方图、null 比例等，这些由 `ANALYZE`（以及 autovacuum 顺手做的 analyze）收集。
 
-实测同一条查询，只因为索引不同，执行时间差了 1000 倍（`labs/exp9_index.sql`，100 万行）：
+猜得准不准，差距不是百分之几。实测同一条查询，只因为索引不同，执行时间差了 1000 倍（`labs/exp9_index.sql`，100 万行）：
 
 ```
 无索引，走 Parallel Seq Scan     Execution Time: 77.805 ms   读了 9352 个 buffer
@@ -373,9 +424,11 @@ COMMIT;
 EXPLAIN (ANALYZE, BUFFERS) SELECT ...;
 ```
 
-- 不加 `ANALYZE` 只是"优化器打算怎么干"，加了才是"实际怎么干的、花了多久"。
-- `BUFFERS` 告诉你到底读了多少个 8KB 页——**这个数字比时间更稳定、更可比**，因为时间受缓存冷热影响很大。
-- 重点看 **估算行数（rows=）和实际行数（actual rows=）差多少**。差几十倍以上，通常就是统计信息过期或者相关性假设失效，计划大概率是错的。
+不加 `ANALYZE` 只是"优化器打算怎么干"，加了才是"实际怎么干的、花了多久"。
+
+`BUFFERS` 告诉你到底读了多少个 8KB 页——**这个数字比时间更稳定、更可比**，因为时间受缓存冷热影响很大。
+
+重点看 **估算行数（rows=）和实际行数（actual rows=）差多少**。差几十倍以上，通常就是统计信息过期或者相关性假设失效，计划大概率是错的。
 
 ### ❓ 问题：大批量导入数据后为什么要立刻 ANALYZE？
 

@@ -4,7 +4,11 @@
 
 你大概率是带着一份现成的 `hooks.json` 来的——Claude Code 或 Codex 用了很久，里面攒着几条拦 `bash` 的规则、几条编辑后跑格式化的规则，你不想重写。dsh 给了两个桥接插件让它直接跑起来。
 
-好消息是真能跑，那份文件一个字都不用改。坏消息是翻译过程中会掉东西：有些事件根本没接，`matcher` 的语义换个桥就变了，`{"continue": false}` 只记录不生效，`permissionDecision: "allow"` 也不能预先批准任何东西。这一章把能跑的部分、走样的部分、以及"到这儿该放弃兼容层直接写插件"的分界线一次讲清楚。
+好消息是真能跑，那份文件一个字都不用改。
+
+坏消息是翻译过程中会掉东西：有些事件根本没接，`matcher` 的语义换个桥就变了，`{"continue": false}` 只记录不生效，`permissionDecision: "allow"` 也不能预先批准任何东西。
+
+这一章把能跑的部分、走样的部分、以及"到这儿该放弃兼容层直接写插件"的分界线一次讲清楚。
 
 ---
 
@@ -15,7 +19,9 @@
 > The key reframe driving this design is that **"native hooks" are not a package** — a native hook is just an ordinary Cordis plugin subscribing to the canonical lifecycle events.
 > —— `.agents/notes/implemented/feature/2026-06-30-interception-extension-points.md:9`
 
-同一句话在另外两处又说了一遍，措辞几乎一致：`packages/hooks/README.md:5` 写 "a 'native hook' is just an ordinary Cordis plugin on those extension points"，`docs/cookbook/extension-cookbook.md:13` 写 "A 'native hook' is an ordinary Cordis plugin on an interception point; it needs no external protocol."。重复三遍，是怕你误会。
+同一句话在另外两处又说了一遍，措辞几乎一致：`packages/hooks/README.md:5` 写 "a 'native hook' is just an ordinary Cordis plugin on those extension points"，`docs/cookbook/extension-cookbook.md:13` 写 "A 'native hook' is an ordinary Cordis plugin on an interception point; it needs no external protocol."。
+
+重复三遍，是怕你误会。
 
 所以在 dsh 里想往生命周期上插一脚，默认答案永远是前面两章那套：写个插件，监听 `tools/pre-execute` 之类的拦截点，返回一个 typed Decision（事件机制见 [10 章](./10-事件系统.md)，waterfall 拦截点见 [11 章](./11-waterfall专章.md)）。
 
@@ -58,7 +64,9 @@ flowchart TD
 
 ## 先看它真的拦住一次 bash
 
-讲机制之前先看结果。仓库里有 15 份端到端快照测试跟 hook 有关（`examples/acp-agent/tests/snapshots/hook-cc-*` 与 `hook-codex-*`），每份都自带一个真实 `hooks.json` 工作区。最简单的那份是全文如下的六行（`examples/acp-agent/tests/snapshots/hook-cc-pretool-deny/workspace/hooks.json:1`）：
+讲机制之前先看结果。
+
+仓库里有 15 份端到端快照测试跟 hook 有关（`examples/acp-agent/tests/snapshots/hook-cc-*` 与 `hook-codex-*`），每份都自带一个真实 `hooks.json` 工作区。最简单的那份是全文如下的六行（`examples/acp-agent/tests/snapshots/hook-cc-pretool-deny/workspace/hooks.json:1`）：
 
 ```json
 {
@@ -106,6 +114,8 @@ sequenceDiagram
 
 ## 挂上去要动三个地方
 
+一句话：装包 → 在 profile 的 `cordis.patch.yml` 里写一行 insert → 填 `configPath`。三步里只有第三步有讲究，前两步是模板。
+
 ### 装包，然后忍受一条 warning
 
 两个桥都不在任何出厂 bundle 里。`packages/bundle/` 下只有 base / web-app / headless 三份 `cordis.patch.yml`，全文搜不到 `dsh-hooks`。得自己装：
@@ -116,7 +126,9 @@ dsh plugin --profile web add @deepseek-ai/dsh-hooks-claude-code
 
 `dsh plugin --profile <name> <pnpm args>` 就是个 pnpm 转发器，工作目录是 profile 目录（`apps/cli/README.md:14`）。
 
-装完你会在 stderr 上看到一条 warning，别慌。dsh 装完包会去看 `package.json` 里有没有声明 `dsh.bundle.patch`，判据是 `apps/cli/src/plugin.ts:44` 的 `manifest.dsh?.bundle?.patch !== undefined`；两个桥都没有声明——`packages/hooks/hooks-*/package.json` 全文没有 `dsh` 这个 key——于是它以「普通依赖」身份留下，并打一次性 warning（`apps/cli/src/plugin.ts:71`，行为描述见 `apps/cli/reference/README.md:43`）。这是正常的，挂载行接下来你自己写。
+装完你会在 stderr 上看到一条 warning，别慌。dsh 装完包会去看 `package.json` 里有没有声明 `dsh.bundle.patch`，判据是 `apps/cli/src/plugin.ts:44` 的 `manifest.dsh?.bundle?.patch !== undefined`。
+
+两个桥都没有声明——`packages/hooks/hooks-*/package.json` 全文没有 `dsh` 这个 key——于是它以「普通依赖」身份留下，并打一次性 warning（`apps/cli/src/plugin.ts:71`，行为描述见 `apps/cli/reference/README.md:43`）。这是正常的，挂载行接下来你自己写。
 
 顺带一提，桥的一堆 `@deepseek-ai/dsh-*` 是 peer 依赖，而 profile 的 `pnpm-workspace.yaml` 写着 `autoInstallPeers: false`；缺的 peer 靠 hoisted node_modules 回落到安装目录解决，设计说明在 `packages/boot/app-boot/src/profile.ts:133`。
 
@@ -149,7 +161,11 @@ profile 目录是 `$DSH_HOME/profiles/<name>`（`apps/cli/README.md:11`），里
 
 `configPath` 指向的既可以是裸的事件表，也可以是把它包在 `hooks` key 下的文件（settings 形态），两个桥都接受这两种——因为两边读的都是同一行 `asObject(root.hooks) ?? root`（`hooks-claude-code/src/config.ts:83`、`hooks-codex/src/config.ts:47`）。
 
-`pluginRoot` 用来替换命令串里的 `${CLAUDE_PLUGIN_ROOT}`（`hooks-claude-code/src/config.ts:59`）。`projectDir` 干两件事：替换 `${CLAUDE_PROJECT_DIR}`（`config.ts:60`），以及作为 `CLAUDE_PROJECT_DIR` 环境变量导出；不填则逐次回落到会话工作区（`index.ts:150`）。Codex 侧没有这两个，取而代之的是 `model`，一个静态字符串（`hooks-codex/src/index.ts:53`），盖在每个 Codex payload 的 `model` 字段上（`index.ts:300`）。
+`pluginRoot` 用来替换命令串里的 `${CLAUDE_PLUGIN_ROOT}`（`hooks-claude-code/src/config.ts:59`）。
+
+`projectDir` 干两件事：替换 `${CLAUDE_PROJECT_DIR}`（`config.ts:60`），以及作为 `CLAUDE_PROJECT_DIR` 环境变量导出；不填则逐次回落到会话工作区（`index.ts:150`）。
+
+Codex 侧没有这两个，取而代之的是 `model`，一个静态字符串（`hooks-codex/src/index.ts:53`），盖在每个 Codex payload 的 `model` 字段上（`index.ts:300`）。
 
 `defaultTimeoutMs` 在单个 hook 没写 `timeout` 时兜底，默认值 `DEFAULT_HOOK_TIMEOUT_MS` = `600_000`（`hook-protocol/src/runner.ts:20`）。注意单位对不上：单 hook 的 `timeout` 单位是**秒**，`runner.ts:74` 乘了 1000 才用；Codex 额外接受 `timeoutSec` 这个别名（`hooks-codex/src/config.ts:70`）。
 
@@ -158,6 +174,12 @@ profile 目录是 `$DSH_HOME/profiles/<name>`（`apps/cli/README.md:11`），里
 ### 三个必踩的坑
 
 三个坑长在同一个位置：插件 `apply()` 那一次性的加载动作上。
+
+| 坑 | 后果 |
+|---|---|
+| `configPath` 是进程级的，只读一次 | 相对路径按启动 cwd 解析，无 per-session 发现，无热重载 |
+| 读失败或 JSON 坏 | 静默降级，一个 hook 都不注册 |
+| 非 `command` 的 `type` | 跳过并 warn，配了等于没配 |
 
 ```mermaid
 flowchart TD
@@ -198,7 +220,14 @@ flowchart TD
 
 ## 两种方言各接了哪些事件
 
-看表之前先记住两个待会儿要反复出现的动作，它们的差别决定了 hook 能不能改变 agent 的走向。`agent.inject(msg)` 是「给下一次 pre-step 排一条模型可见的上下文，但**不唤醒** driver」（`packages/core/agent/src/runtime-types.ts:143`）；`agent.steer(msg)` 是「给最近的一步塞进 steering，driver 空闲就直接开一个 turn」（`runtime-types.ts:133`）。前者只是加料，后者能把停下来的循环推着再跑一步。
+看表之前先记住两个待会儿要反复出现的动作，它们都定义在 `packages/core/agent/src/runtime-types.ts`，差别决定了 hook 能不能改变 agent 的走向：
+
+| | `agent.inject(msg)` | `agent.steer(msg)` |
+|---|---|---|
+| 做什么 | 给下一次 pre-step 排一条模型可见的上下文 | 给最近的一步塞进 steering |
+| 对 driver | **不唤醒** | 空闲就直接开一个 turn |
+| 净效果 | 只是加料 | 把停下来的循环推着再跑一步 |
+| 出处 | `runtime-types.ts:143` | `runtime-types.ts:133` |
 
 派发模式决定了 hook 有多大话语权：能不能被 await，返回值有没有人要。
 
@@ -235,15 +264,34 @@ flowchart LR
 
 派发模式那一列不是我归纳的，每个事件声明上都挂着 `@mode` 标签：`packages/core/agent/src/runtime-types.ts` 里 `agent/session-start` 是 emit、`agent/pre-step` 是 waterfall、`agent/turn-stopping` 是 serial；两个工具侧的 waterfall 在 `packages/core/tools/src/index.ts:150` 和 `:173`；两个子 agent 的 emit 在 `packages/subagent/subagent/src/index.ts:155` 和 `:164`。
 
-CC 支持 7 个点（`hooks-claude-code/src/config.ts:11` 的 `CLAUDE_EVENTS`），Codex 支持 5 个（`hooks-codex/src/config.ts:11` 的 `CODEX_EVENTS`）。不在名单里的事件在解析阶段就被丢掉，所以你配了也不会报错——它只是永远不响。这个失败模式最难查，因为一切看起来都正常。
+CC 支持 7 个点（`hooks-claude-code/src/config.ts:11` 的 `CLAUDE_EVENTS`），Codex 支持 5 个（`hooks-codex/src/config.ts:11` 的 `CODEX_EVENTS`）。
+
+不在名单里的事件在解析阶段就被丢掉，所以你配了也不会报错——它只是永远不响。这个失败模式最难查，因为一切看起来都正常。
 
 Codex 有一条 CC 没有的路：`SessionStart` 和 `UserPromptSubmit` 的 hook 如果干净退出、且吐的是非 JSON 的纯文本，那段文本直接被当成 `additionalContext`（`hooks-codex/src/index.ts:152`–`:156`）。CC 桥不认纯 stdout，README 明确把它列为未支持（`hooks-claude-code/README.md:90`、`:91`）。
 
-表里三个 emit 点是 detached 的，没有任何拦截点 await 它们：CC 有三个（`hooks-claude-code/README.md:47`），Codex 只有 `SessionStart`（`hooks-codex/README.md:55`）。插件卸载时 `createDetachedRuns().drain()` 先 abort 掉还在跑的 hook 进程、再等续作跑完（`hook-protocol/src/detached.ts:53`）。副作用是 `SessionStart` 注入的 context **可能赶不上第一次请求**——源码里挂着 `TODO(session-start-gating)`（`index.ts:205`）。
+表里三个 emit 点是 detached 的，没有任何拦截点 await 它们：CC 有三个（`hooks-claude-code/README.md:47`），Codex 只有 `SessionStart`（`hooks-codex/README.md:55`）。插件卸载时 `createDetachedRuns().drain()` 先 abort 掉还在跑的 hook 进程、再等续作跑完（`hook-protocol/src/detached.ts:53`）。
+
+副作用是 `SessionStart` 注入的 context **可能赶不上第一次请求**——源码里挂着 `TODO(session-start-gating)`（`index.ts:205`）。
 
 ---
 
 ## 同一份文件换个桥，matcher 语义就变了
+
+先把判定规则摊开，一段伪代码就能背下来：
+
+```
+命中(matcher, query):
+    if matcher 缺省 或 '' 或 '*':
+        return true                                  // 两个方言都全匹配
+
+    if 方言 == claude-code 且 matcher 全由 [A-Za-z0-9_|] 组成:
+        return matcher.split('|').includes(query)     // 字面量精确分支，| 是精确分支
+
+    return 非锚定正则(matcher).test(query)             // 其余一律当正则
+```
+
+也就是说，只有 CC 方言多长出中间那条字面量捷径：
 
 | | Claude Code 模式 | Codex 模式 |
 |---|---|---|
@@ -251,13 +299,15 @@ Codex 有一条 CC 没有的路：`SessionStart` 和 `UserPromptSubmit` 的 hook
 | 纯 `[A-Za-z0-9_\|]+` | **字面量**，`\|` 是精确分支 | 仍然当正则 |
 | 其它 | 非锚定正则 | 非锚定正则 |
 
-CC 模式下那个字面量分支实现成 `pattern.split('|').includes(query)`，规则本体在 `hook-protocol/src/matcher.ts:57`，字面量判别式是 `matcher.ts:18` 的 `CLAUDE_LITERAL`。
+规则本体在 `hook-protocol/src/matcher.ts:57`，字面量判别式是 `matcher.ts:18` 的 `CLAUDE_LITERAL`。
 
 于是 `"matcher": "bash"` 在 CC 下只命中名字**恰好是** `bash` 的工具，在 Codex 下会命中任何名字里含 `bash` 的工具。仓库自己也不敢复用：`examples/acp-agent/cordis.yml:186` 的注释直接写着 Codex "cannot share Claude's file"。
 
 matcher 拿什么去比，也要看事件。`PreToolUse` / `PostToolUse` 比的是工具名，`SessionStart` 比的是 session source，CC 的 `SubagentStart` / `SubagentStop` 比的是写死的 `general-purpose`（`hooks-claude-code/src/index.ts:304`）。`UserPromptSubmit` 和 `Stop` 没有可比的对象，配置里的 `matcher` 在解析时就被丢弃（CC `config.ts:109`、Codex `config.ts:75`）。
 
-写错正则的后果比想象的重：不是「这条不生效」，而是**整份配置作废**。解析器 `throw new SyntaxError`（`config.ts:113`），桥的 catch 接住之后一个 hook 都不注册。仓库里专门有这个场景的快照，`hook-cc-invalid-matcher/workspace/hooks.json:12` 那个孤零零的 `"["`，把同文件里第 3–9 行那条本该生效的 `UserPromptSubmit` 也一起带走了。
+写错正则的后果比想象的重：不是「这条不生效」，而是**整份配置作废**。解析器 `throw new SyntaxError`（`config.ts:113`），桥的 catch 接住之后一个 hook 都不注册。
+
+仓库里专门有这个场景的快照，`hook-cc-invalid-matcher/workspace/hooks.json:12` 那个孤零零的 `"["`，把同文件里第 3–9 行那条本该生效的 `UserPromptSubmit` 也一起带走了。
 
 ---
 
@@ -309,9 +359,25 @@ hook 进程
 | 其它 | 非阻塞错误，只留在记录里 |
 | `undefined` | 进程被信号打死（`runner.ts:91`），或执行器基础设施故障——`runHook` **永不抛**，转成一条无 exitCode 的非阻塞错误（`runner.ts:96`） |
 
-结构化 stdout 里有两条互不相同的 decision 通道，这是整章最容易配错的地方。顶层 `decision` 的合法值**只有** `approve` 和 `block`，你写 `{"decision":"deny"}` 会被当成无效值静默忽略（`codec.ts:38`）。精细权限得走 `hookSpecificOutput.permissionDecision`，合法值是 `allow` / `deny` / `ask`（`codec.ts:43`），而且它**覆盖**顶层 decision（`codec.ts:126`）。
+结构化 stdout 里有两条互不相同的 decision 通道，这是整章最容易配错的地方。
 
-`hookSpecificOutput` 上还有一道守卫，专治拼写错误。桥每次调用都传 `expectedEventName = point`（CC `index.ts:172`、Codex `index.ts:148`），块里的 `hookEventName` 对不上（或者压根没写）时，只丢弃事件域的那几个字段——`permissionDecision` / `permissionDecisionReason` / `additionalContext` / `updatedInput`——顶层字段和那个声明值仍然保留下来进日志（`codec.ts:120` 记下声明值，`:122` 提前 return）。所以给 `PreToolUse` 写的 hook 里把 `hookEventName` 拼成 `PreToolUSe`，症状是：exit 0、一切正常、决定就是没生效。
+顶层 `decision` 的合法值**只有** `approve` 和 `block`，你写 `{"decision":"deny"}` 会被当成无效值静默忽略（`codec.ts:38`）。精细权限得走 `hookSpecificOutput.permissionDecision`，合法值是 `allow` / `deny` / `ask`（`codec.ts:43`），而且它**覆盖**顶层 decision（`codec.ts:126`）。
+
+`hookSpecificOutput` 上还有一道守卫，专治拼写错误。桥每次调用都传 `expectedEventName = point`（CC `index.ts:172`、Codex `index.ts:148`），然后：
+
+```
+if 块里的 hookEventName != 本次触发的 point:      // 对不上，或者压根没写
+    把声明值原样记进日志                          // 顶层字段照常保留
+    丢弃 permissionDecision
+       + permissionDecisionReason
+       + additionalContext
+       + updatedInput                          // 事件域的四个字段全没了
+    提前 return
+```
+
+出处：记下声明值在 `codec.ts:120`，提前 return 在 `:122`。
+
+所以给 `PreToolUse` 写的 hook 里把 `hookEventName` 拼成 `PreToolUSe`，症状是：exit 0、一切正常、决定就是没生效。
 
 两条通道加上这道守卫，一次结构化输出的去向分成这么几股。
 
@@ -350,7 +416,9 @@ flowchart TD
 | `ask` | — | CC：`{ kind:'ask' }`；Codex：无此路径 | — | — |
 | `allow` / `none` | `next()` | `next()` | `next()` | 不动 |
 
-`allow` 那一格要看仔细。桥**从不返回** `PreToolDecision` 的 `{ kind: 'allow' }`——该分支确实存在（`packages/core/tools/src/index.ts:589`），桥只是 `return next()` 继续往下走。也就是说 CC hook 里写 `permissionDecision: "allow"` 不能预先批准任何东西，后面的 guard 和审批照旧拦（`hooks-claude-code/README.md:92`）。想预批准，只能写原生插件。
+`allow` 那一格要看仔细。桥**从不返回** `PreToolDecision` 的 `{ kind: 'allow' }`——该分支确实存在（`packages/core/tools/src/index.ts:589`），桥只是 `return next()` 继续往下走。
+
+也就是说 CC hook 里写 `permissionDecision: "allow"` 不能预先批准任何东西，后面的 guard 和审批照旧拦（`hooks-claude-code/README.md:92`）。想预批准，只能写原生插件。
 
 hook 没给 reason 时的兜底文案有三条，分别是 `blocked by PreToolUse hook`、`blocked by PostToolUse hook`、`continue: blocked by Stop hook`（`index.ts:241`、`:252`、`:274`）。
 
@@ -358,7 +426,26 @@ hook 没给 reason 时的兜底文案有三条，分别是 `blocked by PreToolUs
 
 ## 多个 hook 同时命中，谁说了算
 
-同一个点上命中的 hook **串行执行、按配置顺序**——`index.ts:152` 那个双层循环里老老实实 `await`——跑完之后一次性折叠（`merge.ts:62`）。折叠的形状是一次打分，加几路各走各的累积。
+同一个点上命中的 hook **串行执行、按配置顺序**——`index.ts:152` 那个双层循环里老老实实 `await`——跑完之后一次性折叠（`merge.ts:62`）。
+
+折叠的形状是一次打分，加几路各走各的累积：
+
+```
+分值 = { deny: 3, block: 3, ask: 2, approve: 1, allow: 1, 没表态: 0 }
+
+best   = max(每个 hook 的分值)                      // 取最严的那一档
+reason = 所有分值 == best 的 hook 的 reason，用 "\n\n" 连接
+                                                   // 低档位的理由一律不进来
+
+for h in 命中的 hook（配置顺序）:
+    if h.continue == false 且 尚未置位:
+        continue_false = true
+        stopReason     = h.stopReason              // 只取第一个
+    additionalContext.push(h.additionalContext)    // 数组，不拼字符串
+    systemMessage.push(h.systemMessage)
+```
+
+出处：打分与取最高分在 `merge.ts:35`，reason 只收胜出档位见 `merge.ts:74`、`:91`、`:94`，`continue:false` 首个置位后黏住、`stopReason` 取第一个在 `:79`，`additionalContext` 累积成数组在 `:83`，`systemMessage` 累积在 `:86`。
 
 ```mermaid
 flowchart TD
@@ -388,9 +475,9 @@ flowchart TD
     class R1,R0 entry
 ```
 
-权限维度取最严：`deny`/`block` 记 3 分，`ask` 记 2 分，`approve`/`allow` 记 1 分，没表态记 0 分，最高分胜出（`merge.ts:35`）。reason 只收**胜出档位**的那些，多条用 `\n\n` 连接（`merge.ts:74`、`:91`、`:94`）——有人 deny 时，ask 的理由不会混进去，免得模型收到互相矛盾的解释。
+reason 只收胜出档位这条有实际用处：有人 deny 时，ask 的理由不会混进去，免得模型收到互相矛盾的解释。
 
-`continue:false` 是首个置位后就黏住，`stopReason` 取第一个（`merge.ts:79`）。`additionalContext` 全部按顺序累积成数组，不合并成字符串（`merge.ts:83`）。`systemMessage` 同样累积（`merge.ts:86`），但两个桥都只是打条 warn，压根不呈现给模型（CC `index.ts:178`、Codex `index.ts:161`）。
+`systemMessage` 虽然被累积下来了，但两个桥都只是打条 warn，压根不呈现给模型（CC `index.ts:178`、Codex `index.ts:161`）。
 
 串行不是性能上没想清楚，是为了让每个 hook 的 `hook/invoked` / `hook/result` 在日志里相邻；而且折叠对决定本身是顺序无关的，跑的先后不影响结论（`hooks-claude-code/README.md:49`）。代价 README 自己也写了：Claude Code 原生是并行跑、且对相同 handler 去重的，桥这两样都没有（`hooks-claude-code/README.md:97`）。
 
@@ -407,17 +494,42 @@ flowchart TD
 
 `handlerId` 形如 `claude-code:<point>:<序号>`，序号来自一个进程内全局自增的计数器（`hooks-claude-code/src/index.ts:81`–`:84`，Codex 同构在 `:67`–`:70`）。别把它读成「这个点的第几次」——它只保证一对 invoked/result 能配上。
 
-`decision` 字段的取值规则在 `events.ts:99`：有解析出的 decision 就用它，否则 `continue:false` 记成 `stop`，再否则记 `pass`。那份只吐 context 的 hook 快照记的就是 `"decision":"pass"`（`hook-cc-posttool-context/session.jsonl:22`）。`stderrSummary` 为空则整个字段省略，超长则截断加省略号（`events.ts:64`）。
+`decision` 字段自己也有取值规则，三行说完：
+
+```
+if 解析出了 decision:      decision = 那个值
+elif continue == false:    decision = 'stop'
+else:                      decision = 'pass'
+```
+
+实现在 `events.ts:99`。那份只吐 context 的 hook 快照记的就是 `"decision":"pass"`（`hook-cc-posttool-context/session.jsonl:22`）。`stderrSummary` 为空则整个字段省略，超长则截断加省略号（`events.ts:64`）。
 
 有一条运行时不变量在盯着这对事件（`hook-protocol/src/invariant.ts`）：两条记录必须落在**已开启的 turn 内**（`:37`），turn 号必须和当前开启的一致（`:38`），`hook/result` 必须能找到配对的 `hook/invoked`（`:52`），`durationMs` 必须是非负有限数（`:55`）。违反就 fail。
 
-由此得出一条推论，第一次排查时很容易撞上：**detached 的那几个点不会有任何 `hook/*` 记录。** 桥只在 `opts.turn !== undefined` 时才写这对事件（`index.ts:157`、`:181`），而 `SessionStart` / `SubagentStart` / `SubagentStop` 三个调用都没传 turn（`index.ts:207`、`:284`、`:294`）。`SessionStart` 的理由 `hook-protocol/README.md:32` 讲得很清楚：它在第 1 个 turn 之前跑，没有开启的 turn 可挂。想知道 SessionStart hook 跑没跑，只能看它注入的那条 context 消息——source 是 `{ kind: 'plugin', plugin: 'hooks-claude-code' }`（`index.ts:87`），所以也不会被误当成用户输入。
+由此得出一条推论，第一次排查时很容易撞上：**detached 的那几个点不会有任何 `hook/*` 记录。** 桥只在 `opts.turn !== undefined` 时才写这对事件（`index.ts:157`、`:181`），而 `SessionStart` / `SubagentStart` / `SubagentStop` 三个调用都没传 turn（`index.ts:207`、`:284`、`:294`）。
+
+`SessionStart` 的理由 `hook-protocol/README.md:32` 讲得很清楚：它在第 1 个 turn 之前跑，没有开启的 turn 可挂。
+
+想知道 SessionStart hook 跑没跑，只能看它注入的那条 context 消息——source 是 `{ kind: 'plugin', plugin: 'hooks-claude-code' }`（`index.ts:87`），所以也不会被误当成用户输入。
 
 ---
 
 ## 什么时候该扔掉桥，直接写插件
 
 README 把损失列得很完整，这里挑最会咬人的说。边界画出来是这样，右边那几格不是配错了，是根本没接。
+
+| 能力 | 经桥 | 原生插件 |
+|---|---|---|
+| 拦下调用（deny，以及 CC 独有的 ask） | 能 | 能 |
+| 追加上下文 `additionalContext` | 能 | 能 |
+| Stop 点强制续跑（steer 一条消息） | 能 | 能 |
+| 预批准 | 不能，只是不拦 | 能 |
+| 改写工具输出 | 不能 | 能 |
+| `continue:false` 停机 | 不能，只记录 | 得自己实现 |
+| 改写工具入参 | 不能 | 也不能 |
+| 事件覆盖 | CC 7/30，Codex 5/10 | 全部拦截点 |
+| 配置发现 | 进程级单个 `configPath` | `cordis.yml` 四层叠加 |
+| 并发与去重 | 串行、不去重 | 自己说了算 |
 
 ```mermaid
 flowchart LR
@@ -458,7 +570,9 @@ flowchart LR
 
 **改写工具入参谁都做不到。** `PreToolDecision` 明确排除了改写（`tools/src/index.ts:585`），`updatedInput` 只解析不生效，设计还停在 proposed 状态（`hook-protocol/README.md:44`）。区别只在提示：CC 桥会为此打一条 warn（`index.ts:176`），Codex 桥连 warn 都不打。
 
-**`systemMessage` 模型看不到**，只在日志里 warn 一声。**`{"continue": false}` 只记录，不停止运行**，源码里挂着 `TODO(hook-continue-false)`（CC `index.ts:189`、Codex `index.ts:172`）；原生插件想停就自己实现。
+**`systemMessage` 模型看不到**，只在日志里 warn 一声。
+
+**`{"continue": false}` 只记录，不停止运行**，源码里挂着 `TODO(hook-continue-false)`（CC `index.ts:189`、Codex `index.ts:172`）；原生插件想停就自己实现。
 
 **Stop 循环没有护栏。** `stop_hook_active` 恒为 `false`（CC `index.ts:346`、Codex `index.ts:261`），意味着一个无条件阻塞的 Stop hook 会让每一步都被强制续跑，停不下来（`TODO(stop-loop-guard)`，`index.ts:269`）。官方 fixture 也只能靠 `.stop_fired` 标记文件自限（`hook-cc-stop-continue/workspace/hooks.json:6`）。
 
@@ -516,7 +630,9 @@ dsh plugin --profile web add @deepseek-ai/dsh-hooks-claude-code
 dsh web
 ```
 
-按快照推断应该看到：让模型跑任何 bash 命令，工具结果是 `Error: bash is disabled by policy in this session`，会话日志里出现一对 `hook/invoked` + `hook/result`，后者 `decision: "block"`、`exitCode: 2`，即 `hook-cc-pretool-deny/session.jsonl:21`–`:23`。把 `PreToolUse` 那组删掉再试，bash 就正常执行了，`hook/result` 记 `"decision":"pass"`，那句 `Note: command output has been verified against the audit log.` 以 `{"kind":"plugin","plugin":"hooks-claude-code"}` 的身份进 inbox，再变成一条 user 消息（`hook-cc-posttool-context/session.jsonl:22`、`:24`、`:28`）。
+按快照推断应该看到：让模型跑任何 bash 命令，工具结果是 `Error: bash is disabled by policy in this session`，会话日志里出现一对 `hook/invoked` + `hook/result`，后者 `decision: "block"`、`exitCode: 2`，即 `hook-cc-pretool-deny/session.jsonl:21`–`:23`。
+
+把 `PreToolUse` 那组删掉再试，bash 就正常执行了，`hook/result` 记 `"decision":"pass"`，那句 `Note: command output has been verified against the audit log.` 以 `{"kind":"plugin","plugin":"hooks-claude-code"}` 的身份进 inbox，再变成一条 user 消息（`hook-cc-posttool-context/session.jsonl:22`、`:24`、`:28`）。
 
 Codex 侧结构对称：换成 `@deepseek-ai/dsh-hooks-codex`，另起一个 `codex-hooks.json`（不要复用 CC 那份，matcher 语义不同），配置里 `pluginRoot`/`projectDir` 换成 `model`。语义不对称的地方前面都点过：没有 `ask`，`tool_input` 只剩 `{ command }`，也不注入任何环境变量。
 
