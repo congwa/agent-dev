@@ -1,8 +1,8 @@
 # subagent
 
-> `@deepseek-ai/dsh-subagent` · bundle：`base` · 配置树 id：`subagent` · v0.1.0-rc.5（commit `47f9438`）2026-08-14 核对
+> `@deepseek-ai/dsh-subagent` · bundle：`base` · 配置树 id：`subagent` · v0.1.0-rc.5（commit `47f9438`）2026-08-14 核对。出处收在文末脚注，点角标可跳转。
 
-> ⚠️ **本篇未通过对抗式引用核验**：起草已完成，但逐条打开源码比对行号/字段名/英文引文的那一遍因会话额度耗尽未执行。文中 `path:line` 与配置字段请以源码为准，核验后本行会被移除。
+> ⚠️ **本篇未通过对抗式引用核验**：起草已完成，但逐条打开源码比对行号/字段名/英文引文的那一遍因会话额度耗尽未执行。脚注坐标与配置字段请以源码为准，核验后本行会被移除。
 
 **一句话**：子 agent 能力缝本体——按名字注册的 provider registry，加上一次性子 agent 的 `start()`、可续子 agent 的 continuation manager、写进子会话日志的持久 descriptor，以及不依赖任何 query 服务的子/后代枚举。
 
@@ -13,7 +13,7 @@
       name: '@deepseek-ai/dsh-subagent'
 ```
 
-配置树里就这两行，出处 `packages/bundle/base/cordis.patch.yml:292-293`。
+配置树里就这两行[^1]。
 
 没有 `config`，YAML 里也没有 `inject`——模块本身不导出 `inject`，服务无条件挂载。
 
@@ -30,37 +30,37 @@
         拿到 → 注册 subagentTiming、subagent 两个 projection 单元
 ```
 
-两个判定各走各的，缺一个不影响另一个。出处：continuation manager 见 `packages/subagent/subagent/src/index.ts:186-196`，projection 单元见 `:197-200`；base 里 `session-projection` 那行在 `packages/bundle/base/cordis.patch.yml:126`。
+两个判定各走各的，缺一个不影响另一个[^2]。
 
-与 [bash 那种「一个 context 只能有一个执行器」的缝](./dsh-tool-bash.md) 不同，这里**多个 provider 共存**，按名字取用。base 里同时注册了 [`spawn`](./dsh-subagent-spawn-in-process.md) 和 [`fork`](./dsh-subagent-fork-in-process.md) 两个。取用逻辑在 `packages/subagent/subagent/src/index.ts:6-10`。
+与 [bash 那种「一个 context 只能有一个执行器」的缝](./dsh-tool-bash.md) 不同，这里**多个 provider 共存**，按名字查表取用[^3]。base 里同时注册了 [`spawn`](./dsh-subagent-spawn-in-process.md) 和 [`fork`](./dsh-subagent-fork-in-process.md) 两个。
 
 ## 它注册了什么
 
 | 类型 | 名字 | 说明 |
 |---|---|---|
-| service | `ctx.subagents` | `SubagentRuntime`，`packages/subagent/subagent/src/index.ts:129-133`、`:171` |
-| 事件（发） | `subagent/provider-added`（emit） | provider 进注册表，声明在 `src/index.ts:140` |
-| 事件（发） | `subagent/provider-removed`（emit） | provider 出注册表，`src/index.ts:146`；走 contained dispatch |
-| 事件（发） | `subagent/start`（emit，按委派父 agent 作用域过滤） | 子已发布，`src/index.ts:157` |
-| 事件（发） | `subagent/end`（emit，同一 carrier） | 子已落定，`src/index.ts:166` |
-| 事件（收） | `agent/disposed`（emit） | 清理 closingScopes，`src/continuation.ts:379` |
-| 事件（收） | `agent/inbox/claimed`（emit） | 子 inbox 认领即唤醒 Activation，`src/continuation.ts:1053` |
-| 事件（收） | `agent/inbox/discarded`（emit） | 同上，`src/continuation.ts:1058` |
-| projection 单元 | `subagentTiming`、`subagent` | `src/projection.ts:44-46`、`:142-144` |
-| 会话事件词表 | `subagent/descriptor` | 版本 2，log-only、无 `surfaceOp`、不进模型历史，`src/descriptor.ts:37`、`:47` |
-| 子作用域 prompt | `subagent:delegation`（context，order 120） | 每个进程内子 agent 都带，`src/child-agent.ts:170` |
+| service | `ctx.subagents` | `SubagentRuntime`[^4] |
+| 事件（发） | `subagent/provider-added`（emit） | provider 进注册表[^5] |
+| 事件（发） | `subagent/provider-removed`（emit） | provider 出注册表，走 contained dispatch[^6] |
+| 事件（发） | `subagent/start`（emit，按委派父 agent 作用域过滤） | 子已发布[^7] |
+| 事件（发） | `subagent/end`（emit，同一 carrier） | 子已落定[^8] |
+| 事件（收） | `agent/disposed`（emit） | 清理 closingScopes[^9] |
+| 事件（收） | `agent/inbox/claimed`（emit） | 子 inbox 认领即唤醒 Activation[^10] |
+| 事件（收） | `agent/inbox/discarded`（emit） | 同上[^11] |
+| projection 单元 | `subagentTiming`、`subagent` | 两个 projection 单元[^12] |
+| 会话事件词表 | `subagent/descriptor` | 版本 2，log-only、无 `surfaceOp`、不进模型历史[^13] |
+| 子作用域 prompt | `subagent:delegation`（context，order 120） | 每个进程内子 agent 都带[^14] |
 
-派发模式全部是 `emit`，**没有 waterfall**：这个包不拦截任何东西。四个 `subagent/*` 的生产者与消费者记在 `docs/event-producer-consumer.md:48-51`。
+派发模式全部是 `emit`，**没有 waterfall**：这个包不拦截任何东西，四个 `subagent/*` 事件的生产者与消费者能在全仓事件总表里查到[^15]。
 
-服务 API 的主要面，行号都在 `src/index.ts`：
+服务 API 分成五个面，方法都挂在同一份实现上[^16]：
 
-| 面 | 方法 | 行号 |
-|---|---|---|
-| provider 注册表 | `registerProvider` / `getProvider` / `list` | `:369`、`:392`、`:400` |
-| 一次性 | `start` | `:414` |
-| 可续三件套 | `startContinuable` / `followup` / `reportFrom` | `:212`、`:231`、`:270` |
-| 其余单件 | `interrupt` / `registerContinuableSetup` / `drainContinuableDescendants` | `:255`、`:286`、`:304` |
-| 枚举 | `listChildren` / `listDescendants` | `:339`、`:358` |
+| 面 | 方法 |
+|---|---|
+| provider 注册表 | `registerProvider` / `getProvider` / `list` |
+| 一次性 | `start` |
+| 可续三件套 | `startContinuable` / `followup` / `reportFrom` |
+| 其余单件 | `interrupt` / `registerContinuableSetup` / `drainContinuableDescendants` |
+| 枚举 | `listChildren` / `listDescendants` |
 
 ## 配置项
 
@@ -68,10 +68,10 @@
 
 两块可选能力各自独立判定，缺了各有各的报法：
 
-| 缺什么 | 后果 | 出处 |
-|---|---|---|
-| 没有 `ctx.agents` | 没有 continuation manager，所有可续操作以 `CONTINUATION_UNAVAILABLE` 失败 | `src/index.ts:458-465` |
-| 没有 projection registry | `listChildren()` 以 `SUBAGENT_CONTROL_PROJECTIONS_UNAVAILABLE` 失败 | README「Collection model」一节 |
+| 缺什么 | 后果 |
+|---|---|
+| 没有 `ctx.agents` | 没有 continuation manager，所有可续操作以 `CONTINUATION_UNAVAILABLE` 失败[^17] |
+| 没有 projection registry | `listChildren()` 以 `SUBAGENT_CONTROL_PROJECTIONS_UNAVAILABLE` 失败[^18] |
 
 ```mermaid
 flowchart TD
@@ -125,9 +125,7 @@ flowchart TD
     来源标 { kind: 'subagent-settled', form: 'notice', senderSessionId: <child-id> }
 ```
 
-那个来源标记是有用途的：它把这条消息与子自己写的 `subagent-report` 区分开，「a transcript never credits the child with words the runtime wrote」。
-
-这是本服务在父侧唯一的直接贡献。首行文案见 `src/continuation.ts:291-311`。
+那个来源标记是有用途的：它把这条消息与子自己写的 `subagent-report` 区分开，「a transcript never credits the child with words the runtime wrote」。这是本服务在父侧唯一的直接贡献[^19]。
 
 这条链路谁先谁后：
 
@@ -153,7 +151,7 @@ sequenceDiagram
 
 要调整行为，动的是它下面的 provider 和上面的工具：
 
-- 想换传输：加载别的 provider 包（`-acp`、`-codex`、`-claude-code`、`-dsh-sdk`，见 `packages/subagent/README.md:13-16`），再给 [tool-subagent](./dsh-tool-subagent.md) 起一个新 `toolName` 实例指过去。
+- 想换传输：加载别的 provider 包（`-acp`、`-codex`、`-claude-code`、`-dsh-sdk`）[^20]，再给 [tool-subagent](./dsh-tool-subagent.md) 起一个新 `toolName` 实例指过去。
 - 想给可续子加能力：用 `registerContinuableSetup()`，[tool-subagent-report](./dsh-tool-subagent-report.md) 就是这么把 `report` 装进每个可续子作用域的。
 - 想关掉发现能力但保留投递：只禁用 [list-agents](./dsh-tool-subagent-control--list-agents.md) 那一行。
 
@@ -168,13 +166,37 @@ sequenceDiagram
 - **report 没有持久 mailbox**——只保证「被接受」的身份，不是恰好一次投递，也没有读回执。
 - **生命周期事件只能观察**——`subagent/end` 上没有可以影响 run 的续接或决策 API。
 
-源码侧还有两处直接抛错的地方：
+源码侧还有两处直接抛错的地方[^21]：
 
 ```
 registerProvider(name, provider):
-    if name 已在注册表:  throw DUPLICATE_PROVIDER        // src/index.ts:373-375
+    if name 已在注册表:  throw DUPLICATE_PROVIDER
 
 start(...):
     先做能力检查                                          // 在子创建之前做
-    缺任何一个           →  throw UNSUPPORTED_CAPABILITY  // src/index.ts:481-496
+    缺任何一个           →  throw UNSUPPORTED_CAPABILITY
 ```
+
+## 出处
+
+[^1]: 配置树声明两行：`packages/bundle/base/cordis.patch.yml:292-293`。
+[^2]: continuation manager 判定：`packages/subagent/subagent/src/index.ts:186-196`；projection 判定：`:197-200`；base 里 `session-projection` 服务注册行：`packages/bundle/base/cordis.patch.yml:126`。
+[^3]: provider 按名字查找的实现：`packages/subagent/subagent/src/index.ts:6-10`。
+[^4]: `SubagentRuntime` 类型定义：`packages/subagent/subagent/src/index.ts:129-133`；挂载点：`:171`。
+[^5]: `subagent/provider-added` 声明：`packages/subagent/subagent/src/index.ts:140`。
+[^6]: `subagent/provider-removed` 声明：`packages/subagent/subagent/src/index.ts:146`。
+[^7]: `subagent/start` 声明：`packages/subagent/subagent/src/index.ts:157`。
+[^8]: `subagent/end` 声明：`packages/subagent/subagent/src/index.ts:166`。
+[^9]: `agent/disposed` 监听：`packages/subagent/subagent/src/continuation.ts:379`。
+[^10]: `agent/inbox/claimed` 监听：`packages/subagent/subagent/src/continuation.ts:1053`。
+[^11]: `agent/inbox/discarded` 监听：`packages/subagent/subagent/src/continuation.ts:1058`。
+[^12]: 两个 projection 单元：`packages/subagent/subagent/src/projection.ts:44-46`、`:142-144`。
+[^13]: `subagent/descriptor` 版本与字段：`packages/subagent/subagent/src/descriptor.ts:37`、`:47`。
+[^14]: `subagent:delegation` prompt 段：`packages/subagent/subagent/src/child-agent.ts:170`。
+[^15]: 四个 `subagent/*` 事件的生产者与消费者：`docs/event-producer-consumer.md:48-51`。
+[^16]: 服务 API 方法与行号（均在 `packages/subagent/subagent/src/index.ts`）：`registerProvider` `:369`、`getProvider` `:392`、`list` `:400`；`start` `:414`；`startContinuable` `:212`、`followup` `:231`、`reportFrom` `:270`；`interrupt` `:255`、`registerContinuableSetup` `:286`、`drainContinuableDescendants` `:304`；`listChildren` `:339`、`listDescendants` `:358`。
+[^17]: `packages/subagent/subagent/src/index.ts:458-465`。
+[^18]: README「Collection model」一节。
+[^19]: 来源标记与首行文案实现：`packages/subagent/subagent/src/continuation.ts:291-311`。
+[^20]: provider 包清单：`packages/subagent/README.md:13-16`。
+[^21]: `registerProvider` 重复注册报错：`packages/subagent/subagent/src/index.ts:373-375`；`start()` 能力检查报错：`:481-496`。

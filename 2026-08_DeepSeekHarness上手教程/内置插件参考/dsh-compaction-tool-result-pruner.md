@@ -1,8 +1,8 @@
 # compaction-tool-result-pruner
 
-> `@deepseek-ai/dsh-compaction-tool-result-pruner` · bundle：`base` · 配置树 id：`tool-result-pruner` · v0.1.0-rc.5（commit `47f9438`）2026-08-14 核对
+> `@deepseek-ai/dsh-compaction-tool-result-pruner` · bundle：`base` · 配置树 id：`tool-result-pruner` · v0.1.0-rc.5（commit `47f9438`）2026-08-14 核对。出处收在文末脚注。
 
-> ⚠️ **本篇未通过对抗式引用核验**：起草已完成，但逐条打开源码比对行号/字段名/英文引文的那一遍因会话额度耗尽未执行。文中 `path:line` 与配置字段请以源码为准，核验后本行会被移除。
+> ⚠️ **本篇未通过对抗式引用核验**：起草已完成，但逐条打开源码比对行号/字段名/英文引文的那一遍因会话额度耗尽未执行。文中脚注里的 `path:line` 与配置字段请以源码为准，核验后本行会被移除。
 
 **一句话**：不调模型的确定性剪枝服务——把 surface 上超预算的 `tool/result` 节点重写成「头部 + 固定省略标记 + 尾部」，原始事件仍完整留在 append-only 会话日志里。
 
@@ -19,19 +19,17 @@
         tailChars: 1024
 ```
 
-这三个值和代码里的 `DEFAULTS` 完全一致，bundle 只是把它们写明。web profile 里同样被关掉。
+这三个值和代码里的 `DEFAULTS` 完全一致，bundle 只是把它们写明；web profile 里同样被关掉[^1]。
 
-出处：bundle 片段见 `packages/bundle/base/cordis.patch.yml:358-365`；`DEFAULTS` 见 `packages/compaction/compaction-tool-result-pruner/src/config.ts:10-14`；web profile 见 `packages/bundle/web-app/cordis.patch.yml:364-365`。
-
-这里有个看着像 bug 的地方：它在 base 里排在第 360 行，**在 `compaction-basic`（第 284 行）后面**。按常理后加载的服务应该拿不到，但这不影响可用性——[compaction-basic](./dsh-compaction-basic.md) 是运行时用 `ctx.get('toolResultPruner')` 软查的，不是 `inject`。
+这里有个看着像 bug 的地方：它在 base 这份 bundle 里排在 compaction-basic 后面。按常理，后加载的服务应该拿不到先加载的服务——但这不影响可用性：[compaction-basic](./dsh-compaction-basic.md) 找它的方式是运行时用 `ctx.get('toolResultPruner')` 软查一次，不是声明式的 `inject`[^2]。软查不要求对方已经就绪，找不到就是 `undefined`，跳过而已。
 
 ## 它注册了什么
 
 | 类型 | 名字 | 说明 |
 |---|---|---|
-| service | `ctx.toolResultPruner` | `super(ctx, 'toolResultPruner')`（`packages/compaction/compaction-tool-result-pruner/src/index.ts:59`），Context 声明合并在 `:32-36` |
-| inject | `tokenMeter` | `static inject = ['tokenMeter']`（`packages/compaction/compaction-tool-result-pruner/src/index.ts:47`），用来给被影子化的节点定价 |
-| 会话事件 | `compaction/prune` | log-only 的影子定价事件，紧跟其后同步追加替换用的 `tool/result`（`packages/compaction/compaction-tool-result-pruner/src/index.ts:162-173`；事件定义 `packages/compaction/compaction/src/types.ts:81-88`） |
+| service | `ctx.toolResultPruner` | 由 `super(ctx, 'toolResultPruner')` 完成注册，`Context` 声明就近合并[^3] |
+| inject | `tokenMeter` | 声明为 `static inject = ['tokenMeter']`，用来给被影子化的节点定价[^4] |
+| 会话事件 | `compaction/prune` | log-only 的影子定价事件，紧跟其后同步追加替换用的 `tool/result`[^5] |
 
 **没有事件监听、没有工具、没有 prompt 段。**
 
@@ -64,7 +62,7 @@ pruneContent(blocks):
 | `headChars` | number | `4096` | 保留的前导码点数 |
 | `tailChars` | number | `1024` | 保留的尾部码点数 |
 
-全部是整数，阈值为正、头尾非负。还有一条跨字段约束，不满足就在构造期直接抛错；未知键同样在插件构造期失败（`packages/compaction/compaction-tool-result-pruner/src/config.ts:55-63`）：
+全部是整数，阈值为正、头尾非负。还有一条跨字段约束，不满足就在构造期直接抛错；未知键同样在插件构造期失败[^6]：
 
 ```
 headChars + len(MARKER) + tailChars <= thresholdChars
@@ -80,9 +78,9 @@ headChars + len(MARKER) + tailChars <= thresholdChars
 \n\n[... tool result middle pruned ...]\n\n
 ```
 
-非文本块按原相对位置保留，模型不会看到原文的第二份副本（标记定义见 `packages/compaction/compaction-tool-result-pruner/src/config.ts:7`）。
+非文本块按原相对位置保留，模型不会看到原文的第二份副本[^7]。
 
-剪枝本身**不产生任何模型调用**。compaction-basic 重新计量后如果压力已经降到线下，就直接跳过摘要（`packages/compaction/compaction-basic/src/index.ts:310-312`）——也就是说，运气好的话整轮压缩一次模型都不用调。
+剪枝本身**不产生任何模型调用**。compaction-basic 重新计量后如果压力已经降到线下，就直接跳过摘要[^8]——也就是说，运气好的话整轮压缩一次模型都不用调。
 
 KV cache 方面：替换一条更早的结果会从第一个改变的 token 起让复用失效，剪过的前缀在路由、envelope 和更早历史不变时仍可复用。
 
@@ -124,7 +122,7 @@ flowchart LR
 
 **可能切断字形簇。** 按码点切保护了代理对，但不做本地化的 grapheme 分段。
 
-最后一条最容易忽略：`pruneSession` 在 session 拒绝某次替换时**同步抛出**，而本轮更早提交的替换仍然是持久的（`packages/compaction/compaction-tool-result-pruner/src/index.ts:136` 的文档注释）。也就是说失败不是原子回滚：
+最后一条最容易忽略：`pruneSession` 在 session 拒绝某次替换时**同步抛出**，而本轮更早提交的替换仍然是持久的[^9]。也就是说失败不是原子回滚：
 
 ```
 for 每个超预算节点:
@@ -132,4 +130,17 @@ for 每个超预算节点:
     if session 拒绝: throw   // 直接抛出，前面那些替换照样生效
 ```
 
-compaction-basic 把这种「剪枝已落地但后续摘要失败」的情况当作有效的重试凭据（`packages/compaction/compaction-basic/src/index.ts:201-208`）。
+compaction-basic 把这种「剪枝已落地但后续摘要失败」的情况当作有效的重试凭据[^10]。
+
+## 出处
+
+[^1]: bundle 片段：`packages/bundle/base/cordis.patch.yml:358-365`；`DEFAULTS` 默认值：`packages/compaction/compaction-tool-result-pruner/src/config.ts:10-14`；web profile 关闭：`packages/bundle/web-app/cordis.patch.yml:364-365`。
+[^2]: 同一份 base bundle 内的位置：本插件条目在 `packages/bundle/base/cordis.patch.yml:360`，compaction-basic 条目在 `:284`。
+[^3]: `super(ctx, 'toolResultPruner')` 完成注册：`packages/compaction/compaction-tool-result-pruner/src/index.ts:59`；`Context` 声明合并处：`:32-36`。
+[^4]: `static inject = ['tokenMeter']`：`packages/compaction/compaction-tool-result-pruner/src/index.ts:47`。
+[^5]: `compaction/prune` 事件的派发处：`packages/compaction/compaction-tool-result-pruner/src/index.ts:162-173`；事件定义：`packages/compaction/compaction/src/types.ts:81-88`。
+[^6]: 跨字段约束与未知键校验：`packages/compaction/compaction-tool-result-pruner/src/config.ts:55-63`。
+[^7]: 标记定义：`packages/compaction/compaction-tool-result-pruner/src/config.ts:7`。
+[^8]: compaction-basic 重新计量后跳过摘要：`packages/compaction/compaction-basic/src/index.ts:310-312`。
+[^9]: `pruneSession` 同步抛出、已提交替换不回滚：`packages/compaction/compaction-tool-result-pruner/src/index.ts:136` 的文档注释。
+[^10]: compaction-basic 把「剪枝已落地但摘要失败」当作有效重试凭据：`packages/compaction/compaction-basic/src/index.ts:201-208`。

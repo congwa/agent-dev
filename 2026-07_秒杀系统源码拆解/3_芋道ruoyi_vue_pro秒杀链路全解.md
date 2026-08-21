@@ -57,7 +57,7 @@
 
 先把结论放在这里，免得你读到一半跑偏：
 
-> 🔴 **芋道 ruoyi-vue-pro 用的是第一种——纯粹的「数据库乐观扣减」。**
+> **芋道 ruoyi-vue-pro 用的是第一种——纯粹的「数据库乐观扣减」。**
 > 它的秒杀链路里**没有 Redis 预减库存、没有 Lua 脚本、没有分布式锁、没有消息队列异步下单**。
 > 全部防超卖的重担，压在一句 `UPDATE ... SET stock = stock - n WHERE id = ? AND stock >= n` 上。
 >
@@ -86,7 +86,7 @@ ruoyi-vue-pro/
 ├── yudao-module-infra/       ← 定时任务、文件、代码生成器
 ├── yudao-module-pay/         ← 支付
 ├── yudao-module-member/      ← C 端会员
-├── yudao-module-mall/        ← 🎯 商城大模块（本文主角）
+├── yudao-module-mall/        ← 商城大模块（本文主角）
 ├── yudao-module-bpm/         ← 工作流
 ├── yudao-module-crm/         ← 客户管理
 ├── yudao-module-erp/  wms/ mes/ iot/ ai/ im/ ...
@@ -141,7 +141,7 @@ yudao-module-mall/
 │       │
 │       ├── service/seckill/                 ★ 真正的业务逻辑
 │       │   ├── SeckillActivityService.java          ← 接口
-│       │   ├── SeckillActivityServiceImpl.java      ← 🔥 扣库存、校验参加资格都在这
+│       │   ├── SeckillActivityServiceImpl.java      ← 扣库存、校验参加资格都在这
 │       │   ├── SeckillConfigService.java
 │       │   └── SeckillConfigServiceImpl.java
 │       │
@@ -151,23 +151,23 @@ yudao-module-mall/
 │       │   └── SeckillConfigDO.java                 ← 表 promotion_seckill_config
 │       │
 │       └── dal/mysql/seckill/seckillactivity/
-│           ├── SeckillActivityMapper.java           ← 🔥 防超卖那句 SQL 在这
-│           └── SeckillProductMapper.java            ← 🔥 防超卖那句 SQL 也在这
+│           ├── SeckillActivityMapper.java           ← 防超卖那句 SQL 在这
+│           └── SeckillProductMapper.java            ← 防超卖那句 SQL 也在这
 │
 ├── yudao-module-trade/              ← 【交易模块】负责下单，秒杀时来「调用」promotion
 │   └── src/main/java/cn/iocoder/yudao/module/trade/
 │       ├── controller/app/order/AppTradeOrderController.java   ← POST /trade/order/create
-│       ├── service/order/TradeOrderUpdateServiceImpl.java      ← 🔥 下单主流程
+│       ├── service/order/TradeOrderUpdateServiceImpl.java      ← 下单主流程
 │       ├── service/order/handler/
 │       │   ├── TradeOrderHandler.java                ← ★ 订单生命周期「扩展点」接口
-│       │   ├── TradeSeckillOrderHandler.java         ← 🔥 秒杀专属：扣库存 / 回补库存
+│       │   ├── TradeSeckillOrderHandler.java         ← 秒杀专属：扣库存 / 回补库存
 │       │   ├── TradeProductSkuOrderHandler.java      ← 商品 SKU 库存
 │       │   └── TradeCombinationOrderHandler.java 等  ← 拼团、砍价、优惠券……
 │       └── service/price/
 │           ├── TradePriceServiceImpl.java            ← ★ 价格计算责任链的「发动机」
 │           └── calculator/
 │               ├── TradePriceCalculator.java         ← ★ 计算器接口 + 顺序常量
-│               ├── TradeSeckillActivityPriceCalculator.java  ← 🔥 秒杀价怎么算的
+│               ├── TradeSeckillActivityPriceCalculator.java  ← 秒杀价怎么算的
 │               └── TradeCouponPriceCalculator.java 等 ← 优惠券、运费、积分……
 │
 └── yudao-module-trade-api/          ← 只放枚举和 DTO，用来打破 promotion ↔ trade 的循环依赖
@@ -205,7 +205,7 @@ yudao-module-mall/
    │ yudao-module-trade-api│  只有枚举 + DTO，谁也不依赖
    └───────────────────────┘
 
-   ✅ 单向，无环。这就是为什么 promotion 不能反过来调 trade 的 Service。
+   单向，无环。这就是为什么 promotion 不能反过来调 trade 的 Service。
 ```
 
 这个约束会在第 2 章反复出现——**为什么「单次限购」在 promotion 里校验，而「总限购」却在 trade 里校验？** 答案就藏在这张图里。
@@ -283,9 +283,9 @@ yudao-module-mall/
  ║        ├─ 现在在活动时间范围内吗？                                                   ║
  ║        ├─ 现在在「秒杀时段」（10:00 场）里吗？                                        ║
  ║        ├─ 一次买的数量超过 singleLimitCount 了吗？                                   ║
- ║        └─ 库存够吗？（⚠️只是「看一眼」，不是真扣）                                    ║
+ ║        └─ 库存够吗？（只是「看一眼」，不是真扣）                                    ║
  ║                                                                                    ║
- ║   ● updateSeckillStockDecr(activityId, skuId, count)  「真扣库存」🔥                 ║
+ ║   ● updateSeckillStockDecr(activityId, skuId, count)  「真扣库存」                ║
  ║        ├─ SeckillProductMapper#updateStockDecr                                     ║
  ║        │     UPDATE promotion_seckill_product SET stock = stock - N                ║
  ║        │     WHERE id = ? AND stock >= N        ← 防超卖的真正防线                   ║
@@ -338,7 +338,7 @@ private final LoadingCache<String, AppSeckillActivityNowRespVO> nowSeckillActivi
 
 小白比喻：奶茶店门口挂了块小黑板写「今日特价：珍珠奶茶」。店员不会每来一个客人就跑进后厨问一遍今天特价是啥，他每 10 秒去问一次，中间来的客人都看黑板。而且「去问」这个动作还是让另一个店员去跑腿的（异步），当前店员继续招呼客人，不会卡住。
 
-⚠️ 这里有个容易忽略的细节：这个缓存是 **JVM 内存级别**的，不是 Redis。如果你部署了 3 台服务器，就有 3 块各自独立的小黑板，它们可能显示不一样的内容（最多差 10 秒）。
+这里有个容易忽略的细节：这个缓存是 **JVM 内存级别**的，不是 Redis。如果你部署了 3 台服务器，就有 3 块各自独立的小黑板，它们可能显示不一样的内容（最多差 10 秒）。
 
 对首页展示来说无所谓，但这也说明——**这里的库存数字是「大概齐」的，绝对不能拿来做扣减依据**。
 
@@ -387,7 +387,7 @@ if (config == null) {
    │  configIds        参加哪几个时段                          │
    │  totalLimitCount  一个人总共最多买几件                     │
    │  singleLimitCount 一个人一单最多买几件                     │
-   │  stock            剩余库存 🔥                             │
+   │  stock            剩余库存                             │
    │  totalStock       总库存                                  │
    └───────────────────────┬──────────────────────────────────┘
                            │ 一个活动下有多个 SKU（规格）
@@ -396,16 +396,16 @@ if (config == null) {
    │ SeckillProductDO（秒杀商品）表 promotion_seckill_product  │
    │  ────────────────────────────────────────────────────    │
    │  skuId           具体哪个规格（比如「红色 / XL 码」）      │
-   │  seckillPrice    秒杀价，单位是「分」🔥                    │
-   │  stock           这个规格的剩余库存 🔥                     │
+   │  seckillPrice    秒杀价，单位是「分」                   │
+   │  stock           这个规格的剩余库存                     │
    └──────────────────────────────────────────────────────────┘
 ```
 
 小白比喻：`Config` 是「场次」（就像电影院的 14:00 场、19:00 场），`Activity` 是「这部电影」，`Product` 是「这部电影的不同座位区（VIP 区 / 普通区）」，每个区有自己的价格和余票。
 
-⚠️ 特别注意：**库存有两份**——`SeckillActivityDO.stock`（活动总剩余）和 `SeckillProductDO.stock`（单个 SKU 剩余）。这两份都要扣，第 3 章会详细讲这个设计带来的后果。
+特别注意：**库存有两份**——`SeckillActivityDO.stock`（活动总剩余）和 `SeckillProductDO.stock`（单个 SKU 剩余）。这两份都要扣，第 3 章会详细讲这个设计带来的后果。
 
-⚠️ 还要注意：`seckillPrice` 单位是**分**。9.9 元存的是 `990`。整个项目所有金额都用 `Integer` 存分，**不用 `double`**，因为浮点数算钱会算出 `0.1 + 0.2 = 0.30000000000000004` 这种鬼东西。
+还要注意：`seckillPrice` 单位是**分**。9.9 元存的是 `990`。整个项目所有金额都用 `Integer` 存分，**不用 `double`**，因为浮点数算钱会算出 `0.1 + 0.2 = 0.30000000000000004` 这种鬼东西。
 
 ### 2.3 第三步：点「立即购买」→ 结算预览
 
@@ -636,7 +636,7 @@ public interface TradePriceCalculator {
 **为什么这么设计？这是「工程化」和「demo」的分水岭。** 一个教学型秒杀 demo 里，价格计算长这样：
 
 ```java
-// ❌ demo 写法（本项目没有这么写，这是我为了对比编的反面例子）
+// demo 写法（本项目没有这么写，这是我为了对比编的反面例子）
 if (isSeckill) {
     price = seckillPrice;
 } else if (isGroupBuy) {
@@ -725,7 +725,7 @@ public class SeckillActivityApiImpl implements SeckillActivityApi {
 
 ```
   ┌──────────────────────────────────────────────────────────────────────┐
-  │  ❌ 如果没有 Api 层，trade 直接 @Resource SeckillActivityService      │
+  │  如果没有 Api 层，trade 直接 @Resource SeckillActivityService      │
   │                                                                      │
   │   trade ──────────────> SeckillActivityService（30 多个方法）         │
   │                          ↑                                           │
@@ -734,7 +734,7 @@ public class SeckillActivityApiImpl implements SeckillActivityApi {
   └──────────────────────────────────────────────────────────────────────┘
 
   ┌──────────────────────────────────────────────────────────────────────┐
-  │  ✅ 有了 Api 层                                                       │
+  │  有了 Api 层                                                       │
   │                                                                      │
   │   trade ──> SeckillActivityApi（3 个方法）──> SeckillActivityService  │
   │              └── 这是 promotion 对外的「服务窗口」                     │
@@ -810,7 +810,7 @@ public SeckillValidateJoinRespDTO validateJoinSeckill(Long activityId, Long skuI
    返回 SeckillValidateJoinRespDTO { name, totalLimitCount, seckillPrice }
 ```
 
-🔴 **划重点，这里有个非常容易误解的地方。**
+**划重点，这里有个非常容易误解的地方。**
 
 第 ⑤ 步的「库存够吗」，是一次**普通的查询**（`SELECT`），它**完全不具备并发安全性**。100 个人同时打到这里，只剩 1 件库存，**100 个人全都会通过这一关**。
 
@@ -896,7 +896,7 @@ public int getActivityProductCount(Long userId, Long activityId, TradeOrderTypeE
 }
 ```
 
-⚠️ **诚实提醒**：这个总限购校验**同样不是并发安全的**。它是「先查再判断」，两个并发请求可能都查到「已买 4 件」，然后都通过。
+**诚实提醒**：这个总限购校验**同样不是并发安全的**。它是「先查再判断」，两个并发请求可能都查到「已买 4 件」，然后都通过。
 
 所以严格来说，一个手速极快的用户在极端并发下有可能买超总限购。这是个真实存在的缺陷，但它**不会导致超卖**（库存那关还是死死的），最多是某个用户多买了一件。第 7 章会汇总这类问题。
 
@@ -994,7 +994,7 @@ public String generate(String prefix) {
 
 生成的订单号形如 `o202607311230451`（前缀 o + 年月日时分秒 + 当秒内自增号）。用 Redis 的 `INCR` 是因为它是原子的——**多台服务器同时生成也不会撞号**。
 
-### 2.10 第十步：beforeOrderCreate —— 🔥 真正扣库存的地方
+### 2.10 第十步：beforeOrderCreate —— 真正扣库存的地方
 
 ```java
 // 2. 订单创建前的逻辑
@@ -1113,7 +1113,7 @@ public class TradeSeckillOrderHandler implements TradeOrderHandler {
 
 **这里是第二次跨模块调用**，方向依然是 trade ──> promotion，走的还是 `SeckillActivityApi` 那扇门。
 
-⚠️ **一个诚实的观察**：`TradeSeckillOrderHandler`、`TradeProductSkuOrderHandler` 等 handler 类上**都没有 `@Order` 注解**（和价格计算器不同）。也就是说，**它们的执行顺序取决于 Spring 扫描 Bean 的顺序，是不确定的**。
+**一个诚实的观察**：`TradeSeckillOrderHandler`、`TradeProductSkuOrderHandler` 等 handler 类上**都没有 `@Order` 注解**（和价格计算器不同）。也就是说，**它们的执行顺序取决于 Spring 扫描 Bean 的顺序，是不确定的**。
 
 好在它们各自扣的是不同的表（`product_sku` vs `promotion_seckill_*`），且都在同一个事务里，任何一个失败都会整体回滚，所以顺序不影响正确性。但这确实是个「隐含依赖」，如果哪天有两个 handler 需要严格先后，就得补 `@Order` 了。
 
@@ -1262,7 +1262,7 @@ private void afterCreateTradeOrder(TradeOrderDO order, List<TradeOrderItemDO> or
 
 到这里，`@Transactional` 事务提交，接口返回订单 ID 和支付单 ID 给 App，App 拉起微信/支付宝收银台。
 
-**⚠️ 注意一个重要事实：库存是在「下单时」扣的，不是「支付时」扣的。**
+**注意一个重要事实：库存是在「下单时」扣的，不是「支付时」扣的。**
 
 也就是说，**只要你抢到了，哪怕不付钱，这件商品也被你锁住了**（直到订单超时取消）。这叫「**下单减库存**」，是电商的两大流派之一：
 
@@ -1270,7 +1270,7 @@ private void afterCreateTradeOrder(TradeOrderDO order, List<TradeOrderItemDO> or
 |---|---|---|
 | 规则 | 抢到就锁住，慢慢付钱 | 付了钱才算数 |
 | 好处 | 用户体验好，不会白高兴 | 库存周转快，不会被恶意占用 |
-| 代价 | ⚠️ 会被恶意下单占库存（要靠超时取消兜底） | ⚠️ 用户可能「抢到了却付不了」，体验极差 |
+| 代价 | 会被恶意下单占库存（要靠超时取消兜底） | 用户可能「抢到了却付不了」，体验极差 |
 
 ### 2.13 第十三步：付款成功 / 超时取消 —— 库存怎么还回去
 
@@ -1446,7 +1446,7 @@ sequenceDiagram
         PS-->>H: void
         TS->>DB: INSERT trade_order + trade_order_item
         TS->>TS: 清购物车 / 创建支付单
-        Note over TS: 事务提交 ✅
+        Note over TS: 事务提交
         TS-->>U: {orderId, payOrderId}
     end
 ```
@@ -1491,9 +1491,9 @@ sequenceDiagram
 | 2 | 开启事务 | 保证 2.1 和 2.2 两次 UPDATE **要么都成功，要么都回滚**。这一行如果去掉，就可能出现「商品库存扣了，活动库存没扣」的数据不一致 |
 | 5-8 | 查活动，看总库存够不够 | **快速失败**。不是防超卖，纯粹是省资源：库存明显不够就别浪费后面两次 UPDATE 了 |
 | 10-13 | 查这个 SKU 的秒杀商品记录，看它的库存够不够 | 同上，快速失败。顺便把 `product.getId()` 拿到手，下一步 UPDATE 要用 |
-| 16 | 🔥 **真正的防超卖第一道**：`UPDATE ... SET stock=stock-N WHERE id=? AND stock>=N` | 数据库对同一行的 UPDATE 是**串行**的（行锁），所以 100 个并发只能一个一个来 |
+| 16 | **真正的防超卖第一道**：`UPDATE ... SET stock=stock-N WHERE id=? AND stock>=N` | 数据库对同一行的 UPDATE 是**串行**的（行锁），所以 100 个并发只能一个一个来 |
 | 17-19 | 影响行数为 0 就抛异常 | 影响行数 = 0 唯一的可能就是 `stock >= N` 不成立，即**库存在你查完之后、改之前被别人抢光了** |
-| 22 | 🔥 **防超卖第二道**：同样的 SQL 打在活动表上 | 因为库存在两张表各存了一份，都要扣 |
+| 22 | **防超卖第二道**：同样的 SQL 打在活动表上 | 因为库存在两张表各存了一份，都要扣 |
 | 23-25 | 同上 | 如果活动总库存不够而 SKU 库存够（配置错误导致），也会失败并**回滚掉第 16 行的扣减** |
 
 **为什么库存要存两份？**
@@ -1580,7 +1580,7 @@ default int updateStockDecr(Long id, Integer incrCount) {
 | config_ids | varchar | 参加哪些时段，用 `LongListTypeHandler` 存成逗号分隔 |
 | total_limit_count | int | 总限购 |
 | single_limit_count | int | 单次限购 |
-| **stock** | int | 🔥 **剩余库存** |
+| **stock** | int | **剩余库存** |
 | total_stock | int | 总库存 |
 
 **表 `promotion_seckill_product`（秒杀商品）** ← `SeckillProductDO`
@@ -1591,14 +1591,14 @@ default int updateStockDecr(Long id, Integer incrCount) {
 | activity_id | bigint | 属于哪个活动 |
 | config_ids | varchar | 冗余的时段 |
 | spu_id / sku_id | bigint | 具体商品规格 |
-| seckill_price | int | 🔥 秒杀价，**单位分** |
-| **stock** | int | 🔥 **这个 SKU 的剩余库存** |
+| seckill_price | int | 秒杀价，**单位分** |
+| **stock** | int | **这个 SKU 的剩余库存** |
 | activity_status | int | 冗余的活动状态 |
 | activity_start_time / activity_end_time | datetime | 冗余的活动时间 |
 
 另外所有表都继承 `BaseDO`，自带 `create_time`、`update_time`、`creator`、`updater`、`deleted`（逻辑删除）这 5 个字段。
 
-⚠️ **`deleted` 是逻辑删除**：MyBatis-Plus 会给所有查询/更新自动加 `AND deleted = 0`。这意味着我们前面写的那句防超卖 SQL，实际执行时是：
+**`deleted` 是逻辑删除**：MyBatis-Plus 会给所有查询/更新自动加 `AND deleted = 0`。这意味着我们前面写的那句防超卖 SQL，实际执行时是：
 
 ```sql
 UPDATE promotion_seckill_product
@@ -1707,7 +1707,7 @@ public interface RedisKeyConstants {
       UPDATE ... WHERE id=2048               UPDATE ... WHERE id=2048
                 AND stock >= 1                         AND stock >= 1
                                     │
-                                    │   💥 两个人抢同一行的锁
+                                    │   两个人抢同一行的锁
                                     │      MySQL 说：一个一个来！
                                     ▼
    ┌──────────────────────────────────────────────────────────────────────┐
@@ -1731,7 +1731,7 @@ public interface RedisKeyConstants {
                                               → 事务回滚
                                               → 返回「秒杀失败，原因：秒杀库存不足」
 
-   ✅ 库存 1 件，只生成 1 张订单。不会超卖。
+   库存 1 件，只生成 1 张订单。不会超卖。
 ```
 
 **核心洞察：`WHERE stock >= N` 这个条件，是在 MySQL 拿到行锁**之后**才求值的，用的是那一刻最新的数据。这就把「查」和「改」焊成了一个不可分割的原子操作。**
@@ -1751,7 +1751,7 @@ public interface RedisKeyConstants {
    │  ── 活动关了？时间过了？时段不对？→ 大部分请求死在这   │
    │  ── 库存 0 了？→ 后到的请求也死在这                  │
    │                                                    │
-   │  ⚠️ 但在库存刚好用完的那个瞬间，                     │
+   │  但在库存刚好用完的那个瞬间，                     │
    │     可能有 50 个请求同时查到「还剩 5」，全部放行      │
    └───────────────────────┬────────────────────────────┘
                            │ 50 个漏网之鱼
@@ -1759,7 +1759,7 @@ public interface RedisKeyConstants {
    ┌────────────────────────────────────────────────────┐
    │  第二道筛子：UPDATE ... WHERE stock >= N（行锁）     │
    │                                                    │
-   │  ✅ 这道筛子是绝对的：50 个请求排队进来，            │
+   │  这道筛子是绝对的：50 个请求排队进来，            │
    │     前 5 个拿到货（影响行数=1），                    │
    │     后 45 个全部「影响行数=0」被打回                  │
    └────────────────────────────────────────────────────┘
@@ -1778,16 +1778,16 @@ public interface RedisKeyConstants {
 |---|---|---|---|---|
 | 1 | 必须登录 | `AppTradeOrderController#createOrder` 无 `@PermitAll` | 认证 | — |
 | 2 | 活动单只能 1 个商品项 | `AppTradeOrderSettlementReqVO#isValidActivityItems` | 参数校验 | — |
-| 3 | 活动存在 / 已开启 | `validateJoinSeckill` 1.1 | 只读 | ❌ 不需要 |
-| 4 | 在活动时间内 | `validateJoinSeckill` 1.2 | 只读 | ❌ 不需要 |
-| 5 | 在秒杀时段内 | `validateJoinSeckill` 1.2 | 只读 | ❌ 不需要 |
-| 6 | 单次限购 | `validateJoinSeckill` 1.3 | 只读 | ✅ 只看参数，天然安全 |
-| 7 | 库存够（看一眼） | `validateJoinSeckill` 2.2 | 只读 | ⚠️ **不安全，只是快速失败** |
-| 8 | 总限购 | `TradeSeckillActivityPriceCalculator#validateJoinSeckill` | 查订单表 | ⚠️ **不安全，存在竞态** |
-| 9 | **SKU 库存扣减** | `ProductSkuMapper#updateStockDecr` | 🔥 带条件 UPDATE | ✅ **绝对安全** |
-| 10 | **秒杀商品库存扣减** | `SeckillProductMapper#updateStockDecr` | 🔥 带条件 UPDATE | ✅ **绝对安全** |
-| 11 | **秒杀活动库存扣减** | `SeckillActivityMapper#updateStockDecr` | 🔥 带条件 UPDATE | ✅ **绝对安全** |
-| 12 | 整体事务 | `createOrder` 上的 `@Transactional` | 事务 | ✅ 任何一步失败全部回滚 |
+| 3 | 活动存在 / 已开启 | `validateJoinSeckill` 1.1 | 只读 | 不需要 |
+| 4 | 在活动时间内 | `validateJoinSeckill` 1.2 | 只读 | 不需要 |
+| 5 | 在秒杀时段内 | `validateJoinSeckill` 1.2 | 只读 | 不需要 |
+| 6 | 单次限购 | `validateJoinSeckill` 1.3 | 只读 | 只看参数，天然安全 |
+| 7 | 库存够（看一眼） | `validateJoinSeckill` 2.2 | 只读 | **不安全，只是快速失败** |
+| 8 | 总限购 | `TradeSeckillActivityPriceCalculator#validateJoinSeckill` | 查订单表 | **不安全，存在竞态** |
+| 9 | **SKU 库存扣减** | `ProductSkuMapper#updateStockDecr` | 带条件 UPDATE | **绝对安全** |
+| 10 | **秒杀商品库存扣减** | `SeckillProductMapper#updateStockDecr` | 带条件 UPDATE | **绝对安全** |
+| 11 | **秒杀活动库存扣减** | `SeckillActivityMapper#updateStockDecr` | 带条件 UPDATE | **绝对安全** |
+| 12 | 整体事务 | `createOrder` 上的 `@Transactional` | 事务 | 任何一步失败全部回滚 |
 
 **结论：库存这件事上，芋道是安全的。总限购这件事上，有极小概率的漏洞（但不造成超卖）。**
 
@@ -1800,7 +1800,7 @@ flowchart TD
     B -->|"影响行数 = 0"| X["抛 SECKILL_ACTIVITY_UPDATE_STOCK_FAIL<br/>事务回滚，订单不存在<br/>stock 保持不变"]
 
     C --> D{"用户在 payExpireTime 内付款了吗？"}
-    D -->|"付了"| E["updateOrderPaid<br/>订单：待发货<br/>⚠️ 秒杀 handler 不做任何事<br/>stock 保持 99"]
+    D -->|"付了"| E["updateOrderPaid<br/>订单：待发货<br/>秒杀 handler 不做任何事<br/>stock 保持 99"]
     D -->|"超时没付"| F["TradeOrderAutoCancelJob 扫到<br/>cancelOrderBySystem"]
     D -->|"用户主动取消"| F2["cancelOrderByMember"]
 
@@ -1829,23 +1829,23 @@ flowchart TD
 
 | 手段 | 有没有 | 代码位置 |
 |---|---|---|
-| 必须登录才能下单 | ✅ 有 | `AppTradeOrderController#createOrder` 用 `getLoginUserId()`，且没有 `@PermitAll` |
-| 单次限购 `singleLimitCount` | ✅ 有 | `SeckillActivityServiceImpl#validateJoinSeckill` 1.3 |
-| 总限购 `totalLimitCount` | ✅ 有（但有并发缝隙） | `TradeSeckillActivityPriceCalculator#validateJoinSeckill` |
-| 活动单只能买一种规格 | ✅ 有 | `AppTradeOrderSettlementReqVO#isValidActivityItems` + handler 里的 `Assert.isTrue(orderItems.size() == 1, ...)` |
-| 严格的时段校验 | ✅ 有 | 必须同时满足「活动日期范围内」+「当前秒杀时段内」+「该活动参加了这个时段」 |
-| 记录下单 IP 和终端 | ✅ 有 | `order.setUserIp(getClientIP()).setTerminal(getTerminal())`，事后可追溯 |
+| 必须登录才能下单 | 有 | `AppTradeOrderController#createOrder` 用 `getLoginUserId()`，且没有 `@PermitAll` |
+| 单次限购 `singleLimitCount` | 有 | `SeckillActivityServiceImpl#validateJoinSeckill` 1.3 |
+| 总限购 `totalLimitCount` | 有（但有并发缝隙） | `TradeSeckillActivityPriceCalculator#validateJoinSeckill` |
+| 活动单只能买一种规格 | 有 | `AppTradeOrderSettlementReqVO#isValidActivityItems` + handler 里的 `Assert.isTrue(orderItems.size() == 1, ...)` |
+| 严格的时段校验 | 有 | 必须同时满足「活动日期范围内」+「当前秒杀时段内」+「该活动参加了这个时段」 |
+| 记录下单 IP 和终端 | 有 | `order.setUserIp(getClientIP()).setTerminal(getTerminal())`，事后可追溯 |
 
 ### 6.2 它没做什么（诚实清单）
 
 | 手段 | 有没有 | 说明 |
 |---|---|---|
-| 接口限流（每人每秒最多 N 次） | ❌ **没有** | 框架里有 `@RateLimiter` 注解（`yudao-spring-boot-starter-protection`），但 **promotion 和 trade 的 pom.xml 都没有引入这个 starter**，秒杀链路上一个 `@RateLimiter` 都没有 |
-| 接口幂等（重复点击只算一次） | ❌ **没有** | 同上，`@Idempotent` 注解存在但没用在秒杀上 |
-| 验证码 / 滑块 | ❌ 没有 | 代码里没有 |
-| 秒杀链接加密 / 延迟暴露 | ❌ 没有 | 活动 ID 就是明文自增 ID |
-| 黑名单 / 风控 | ❌ 没有 | 无 |
-| 排队令牌 | ❌ 没有 | 无 |
+| 接口限流（每人每秒最多 N 次） | **没有** | 框架里有 `@RateLimiter` 注解（`yudao-spring-boot-starter-protection`），但 **promotion 和 trade 的 pom.xml 都没有引入这个 starter**，秒杀链路上一个 `@RateLimiter` 都没有 |
+| 接口幂等（重复点击只算一次） | **没有** | 同上，`@Idempotent` 注解存在但没用在秒杀上 |
+| 验证码 / 滑块 | 没有 | 代码里没有 |
+| 秒杀链接加密 / 延迟暴露 | 没有 | 活动 ID 就是明文自增 ID |
+| 黑名单 / 风控 | 没有 | 无 |
+| 排队令牌 | 没有 | 无 |
 
 ### 6.3 这意味着什么
 
@@ -1853,9 +1853,9 @@ flowchart TD
 
 | | 结果 | 为什么 |
 |---|---|---|
-| ✅ 他可以 1 秒钟发 1000 次 `POST /trade/order/create` | 服务可能被拖垮（可用性问题） | 没有限流拦他，1000 个请求全部打到数据库，数据库要执行 1000 次「查活动 + 查商品 + 2 次 UPDATE」 |
-| ❌ 但他买不到超过限购的商品 | 被卡住 | `singleLimitCount` 卡住单笔，`totalLimitCount` 卡住累计（虽然有小缝隙） |
-| ❌ 也不会造成超卖 | 数据仍然正确 | `UPDATE ... WHERE stock >= N` 是死的 |
+| 他可以 1 秒钟发 1000 次 `POST /trade/order/create` | 服务可能被拖垮（可用性问题） | 没有限流拦他，1000 个请求全部打到数据库，数据库要执行 1000 次「查活动 + 查商品 + 2 次 UPDATE」 |
+| 但他买不到超过限购的商品 | 被卡住 | `singleLimitCount` 卡住单笔，`totalLimitCount` 卡住累计（虽然有小缝隙） |
+| 也不会造成超卖 | 数据仍然正确 | `UPDATE ... WHERE stock >= N` 是死的 |
 
 一句话：**芋道保住了「数据正确」，但没有保住「不被打垮」。**
 
@@ -1956,9 +1956,9 @@ flowchart TD
 
 | 判断 | 场景 |
 |---|---|
-| ✅ 非常适合 | 中小型电商 / 企业内购 / 会员日活动；峰值并发在几百 QPS 以内；团队规模小、运维能力有限（不想维护 Redis 集群 + MQ）；商品种类多、单品库存少（几十到几百件），热点不集中；更看重「业务功能全 + 好改」而不是「峰值性能」 |
-| ⚠️ 需要改造后再用 | 单场活动预计并发 > 1000 QPS；有真黄牛盯着的爆款（茅台、显卡、演唱会票） |
-| ❌ 不适合直接用 | 双十一级别的大促；单品库存少 + 参与人数十万级（极端热点） |
+| 非常适合 | 中小型电商 / 企业内购 / 会员日活动；峰值并发在几百 QPS 以内；团队规模小、运维能力有限（不想维护 Redis 集群 + MQ）；商品种类多、单品库存少（几十到几百件），热点不集中；更看重「业务功能全 + 好改」而不是「峰值性能」 |
+| 需要改造后再用 | 单场活动预计并发 > 1000 QPS；有真黄牛盯着的爆款（茅台、显卡、演唱会票） |
+| 不适合直接用 | 双十一级别的大促；单品库存少 + 参与人数十万级（极端热点） |
 
 **如果要改造，建议的演进路线（按投入产出排序）：**
 
@@ -1990,7 +1990,7 @@ flowchart TD
    │    git clone https://github.com/YunaiV/ruoyi-vue-pro.git           │
    │                                                                     │
    │ ② 建数据库，导入 sql/mysql/ruoyi-vue-pro.sql                        │
-   │    ⚠️ 注意：这个文件里只有 system/infra 的表（48 张）。               │
+   │    注意：这个文件里只有 system/infra 的表（48 张）。               │
    │       商城（mall）的建表 SQL 不在开源仓库里，                        │
    │       需要看官方文档 https://doc.iocoder.cn/ 获取商城模块的 SQL。     │
    │       —— 我实际翻过仓库确认了这一点，不是猜的。                       │
@@ -2034,7 +2034,7 @@ flowchart TD
       因为真正起作用的是那句 SQL 里的 WHERE stock >= N，不是前面的 SELECT。
 ```
 
-⚠️ 注意：因为总限购 `totalLimitCount` 是按用户算的，用同一个账号压测会先撞上限购。测试时把 `totalLimitCount` 和 `singleLimitCount` 设大一点，或者用多个账号。
+注意：因为总限购 `totalLimitCount` 是按用户算的，用同一个账号压测会先撞上限购。测试时把 `totalLimitCount` 和 `singleLimitCount` 设大一点，或者用多个账号。
 
 ---
 

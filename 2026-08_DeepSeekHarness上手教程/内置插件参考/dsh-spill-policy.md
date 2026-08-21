@@ -1,8 +1,8 @@
 # spill-policy
 
-> `@deepseek-ai/dsh-spill-policy` · bundle：`base` · 配置树 id：`spill-policy` · v0.1.0-rc.5（commit `47f9438`）2026-08-14 核对
+> `@deepseek-ai/dsh-spill-policy` · bundle：`base` · 配置树 id：`spill-policy` · v0.1.0-rc.5（commit `47f9438`）2026-08-14 核对。出处收在文末脚注。
 
-> ⚠️ **本篇未通过对抗式引用核验**：起草已完成，但逐条打开源码比对行号/字段名/英文引文的那一遍因会话额度耗尽未执行。文中 `path:line` 与配置字段请以源码为准，核验后本行会被移除。
+> ⚠️ **本篇未通过对抗式引用核验**：起草已完成，但逐条打开源码比对行号/字段名/英文引文的那一遍因会话额度耗尽未执行。文中脚注里的 `path:line` 与配置字段请以源码为准，核验后本行会被移除。
 
 **一句话**：工具结果外溢策略——一个 `tools/post-execute` 的 waterfall 变换器，把超过 `maxInlineBytes` 的纯文本结果全文存进 `ctx.spillStore`，模型侧只留一段有界的头尾预览加一行「存在哪、怎么取」的告示。
 
@@ -17,16 +17,16 @@
 
 这个值**只有 bundle 给**。字段本身的默认是「省略」，而省略不是「用个内置默认值」，是整个插件什么都不注册——真正的 no-op。
 
-它紧跟在提供后端的 [spill-local](./dsh-spill-local.md)（第 346 行）之后。出处：`packages/bundle/base/cordis.patch.yml:349-352`，省略即空注册见 `packages/spill/spill-policy/src/index.ts:112-113`。
+它紧跟在提供后端的 [spill-local](./dsh-spill-local.md) 之后注册[^1]。
 
 ## 它注册了什么
 
 | 类型 | 名字 | 说明 |
 |---|---|---|
-| 事件监听 | `tools/post-execute`（**waterfall**，`{ prepend: true }`） | 先 `await next()` 让下游 hook 定稿，再给它接受的内容封顶；能整体改写模型可见结果（`packages/spill/spill-policy/src/index.ts:190`、`:209`；派发模式见 `docs/event-producer-consumer.md:57`） |
-| 事件监听 | `tools/code-dispatch-log`（**waterfall**，`{ prepend: true }`） | 同一套上限与替换管线，作用于 `run_code` 子调用结果的**持久日志副本**（`packages/spill/spill-policy/src/index.ts:217`、`:231`；派发模式见 `docs/event-producer-consumer.md:55`） |
-| inject | `tools` | `export const inject = ['tools']`（`packages/spill/spill-policy/src/index.ts:73`）——它要的就是工具注册表的这两个扩展点 |
-| 软引用 | `ctx.get('spillStore')` | 取不到就 warn 并保留内联结果（`packages/spill/spill-policy/src/index.ts:142-146`） |
+| 事件监听 | `tools/post-execute`（**waterfall**，`{ prepend: true }`） | 先 `await next()` 让下游 hook 定稿，再给它接受的内容封顶；能整体改写模型可见结果[^2] |
+| 事件监听 | `tools/code-dispatch-log`（**waterfall**，`{ prepend: true }`） | 同一套上限与替换管线，作用于 `run_code` 子调用结果的**持久日志副本**[^3] |
+| inject | `tools` | `export const inject = ['tools']`[^4]——它要的就是工具注册表的这两个扩展点 |
+| 软引用 | `ctx.get('spillStore')` | 取不到就 warn 并保留内联结果[^5] |
 
 **不注册任何 service，也不注册工具或 prompt 段。**
 
@@ -38,7 +38,7 @@
 |---|---|---|---|
 | `maxInlineBytes` | number | *（省略）* | 纯文本结果的模型侧上下文上限，单位 UTF-8 字节，非负整数，加载期校验。**省略即整体禁用**；base bundle 给的是 `50000` |
 
-校验放在加载期，不放在每次调用（`packages/spill/spill-policy/src/index.ts:117-119`）。
+校验放在加载期，不放在每次调用[^6]。
 
 这个位置是故意选的：负数或小数不会在加载期被静静吞掉，而是会在 `TextRetainer` 里抛错，把每一次超长结果都变成 `isError`。坏配置必须让部署失败，而不是让工具失败。
 
@@ -109,7 +109,7 @@ on tools/post-execute(result):
 尾 = 预算 - 头                 // 剩下的对半分给头尾预览
 ```
 
-所以「整体仍在 `maxInlineBytes` 之内」不是靠估的，是靠先给告示留位置。数告示占多少 UTF-8 字节、再从预算里扣掉，都在 `packages/spill/spill-policy/src/index.ts:171-172`。
+所以「整体仍在 `maxInlineBytes` 之内」不是靠估的，是靠先给告示留位置：数告示占多少 UTF-8 字节、再从预算里扣掉，这一步先算后减，顺序不能反[^7]。
 
 ## 模型看得见什么
 
@@ -154,3 +154,13 @@ Token 影响有个反直觉的地方。成功替换后至多 `maxInlineBytes` �
 - **best-effort**：没有 session owner、没有 `ctx.spillStore` 后端、`saveText` reject——三种情况都只 warn 并返回原结果，绝不把一次成功的调用变成 `isError`，也不隐藏内联内容。
 - 成功替换只改 `content`，canonical 的程序化值保持不变。
 - dispatch-log 那一路**会**处理 `read` 子调用：日志副本不是模型上下文，不存在 read-again 循环，而 `read` 恰恰是产出巨型日志的那个工具。
+
+## 出处
+
+[^1]: bundle 中 spill-local 与本插件的相邻注册位置：`packages/bundle/base/cordis.patch.yml:346`（spill-local）、`:349-352`（本插件）；省略即空注册的判断处：`packages/spill/spill-policy/src/index.ts:112-113`。
+[^2]: `packages/spill/spill-policy/src/index.ts:190`、`:209`；派发模式说明：`docs/event-producer-consumer.md:57`。
+[^3]: `packages/spill/spill-policy/src/index.ts:217`、`:231`；派发模式说明：`docs/event-producer-consumer.md:55`。
+[^4]: `packages/spill/spill-policy/src/index.ts:73`。
+[^5]: `packages/spill/spill-policy/src/index.ts:142-146`。
+[^6]: `packages/spill/spill-policy/src/index.ts:117-119`。
+[^7]: `packages/spill/spill-policy/src/index.ts:171-172`。

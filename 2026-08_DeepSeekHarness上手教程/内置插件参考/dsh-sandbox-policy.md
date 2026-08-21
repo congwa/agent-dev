@@ -1,6 +1,6 @@
 # sandbox-policy
 
-> `@deepseek-ai/dsh-sandbox-policy` · bundle：`base` · 配置树 id：`sandbox-policy` · v0.1.0-rc.5（commit `47f9438`）2026-08-14 核对
+> `@deepseek-ai/dsh-sandbox-policy` · bundle：`base` · 配置树 id：`sandbox-policy` · v0.1.0-rc.5（commit `47f9438`）2026-08-14 核对，出处收在文末脚注。
 
 **一句话**：沙箱策略的唯一归属地（`ctx.sandboxPolicy`）——把「部署默认 mode + 兜底 workspaceRoot」和「会话级 `sandbox/mode` 覆盖 + 会话不可变 cwd」合成每次调用一份完整策略，顺带在每个请求前把当前策略讲给模型听。
 
@@ -14,30 +14,26 @@
         workspaceRoot: !!js process.cwd()
 ```
 
-出处 `packages/bundle/base/cordis.patch.yml:172-176`。
+这份配置来自 base bundle[^1]。
 
 这里有个容易看漏的地方：默认值其实有两层。schema 里 `mode` 的默认是 `read-only`，这是 fail-safe 的选择；而 bundle 把它显式抬到了 `workspace-write`。所以光读 schema 会以为开箱是只读的，实际跑起来不是。
 
-环境变量 `DSH_PERMISSION_MODE` 可以覆盖 bundle 这个值。同一个环境变量也决定 [user-approval](./dsh-user-approval.md) 的 `policy`——两处是联动的，改一个等于改两个。
-
-对应 `packages/sandbox/sandbox-policy/src/index.ts:94`（schema 默认）、`packages/bundle/base/cordis.patch.yml:191`（user-approval 那一处）。
+环境变量 `DSH_PERMISSION_MODE` 可以覆盖 bundle 这个值。同一个环境变量也决定 [user-approval](./dsh-user-approval.md) 的 `policy`——两处是联动的，改一个等于改两个[^2]。
 
 ## 它注册了什么
 
 | 类型 | 名字 | 说明 |
 |---|---|---|
-| service | `ctx.sandboxPolicy` | `SandboxPolicyService`，`super(ctx, 'sandboxPolicy')`（`packages/sandbox/sandbox-policy/src/index.ts:105`） |
-| prompt 段 | `sandbox:policy`，`order: 110` | 走 `ctx.inject(['systemPrompt'])` 可选挂载；文本是 `resolve({ session })` 的直接渲染，无 session 时返回空串（同文件 `112-123`） |
-| session 事件（声明+写路径） | `sandbox/mode` | log-only、可重放、**不进模型 transcript**；`setSandboxMode()` 是唯一写入口，一次 append 一条（`src/session-mode.ts:33-37`、`69-71`） |
+| service | `ctx.sandboxPolicy` | `SandboxPolicyService`，`super(ctx, 'sandboxPolicy')`[^3] |
+| prompt 段 | `sandbox:policy`，`order: 110` | 走 `ctx.inject(['systemPrompt'])` 可选挂载；文本是 `resolve({ session })` 的直接渲染，无 session 时返回空串[^4] |
+| session 事件（声明+写路径） | `sandbox/mode` | log-only、可重放、**不进模型 transcript**；`setSandboxMode()` 是唯一写入口，一次 append 一条[^5] |
 
-没有事件监听器，也没有工具。它是**被 inject 的一方**，全仓恰好四个消费者：
+没有事件监听器，也没有工具。它是**被 inject 的一方**，全仓恰好四个消费者[^6]：
 
-| 消费者 | inject 位置 |
-|---|---|
-| `dsh-bash-sandbox` | `packages/shell/bash-sandbox/src/index.ts:45` |
-| `dsh-pwsh-sandbox` | `packages/shell/pwsh-sandbox/src/index.ts:53` |
-| `dsh-fs-sandbox` | `packages/fs/fs-sandbox/src/index.ts:60` |
-| `dsh-terminal-bash` | `packages/terminal/terminal-bash/src/index.ts:25` |
+- `dsh-bash-sandbox`
+- `dsh-pwsh-sandbox`
+- `dsh-fs-sandbox`
+- `dsh-terminal-bash`
 
 ```mermaid
 flowchart LR
@@ -62,12 +58,12 @@ flowchart LR
 
 | 成员 | 说明 |
 |---|---|
-| `resolve({ session?, mode? })` | 一次调用一份 `SandboxExecutionPolicy`。优先级：显式已批准的 `mode` > 会话最后一条 `sandbox/mode` > `defaultMode`；root 取 `session.header.cwd`，缺失才用配置兜底（`src/index.ts:135-142`） |
-| `defaultMode` / `workspaceRoot` | 部署默认与兜底根，构造期算好（`src/index.ts:109-110`） |
-| `overrideOf(session)` | 只读会话覆盖，不套默认值（`149-151`） |
-| `effectiveSandboxMode(events)` | 纯 fold：倒着找最后一条 `sandbox/mode`（`src/session-mode.ts:52-58`） |
-| `setSandboxMode(session, mode)` | 唯一写路径 |
-| `SANDBOX_MODES` | `['read-only', 'workspace-write', 'danger-full-access']`（`src/session-mode.ts:42`） |
+| `resolve({ session?, mode? })` | 一次调用一份 `SandboxExecutionPolicy`。优先级：显式已批准的 `mode` > 会话最后一条 `sandbox/mode` > `defaultMode`；root 取 `session.header.cwd`，缺失才用配置兜底[^7] |
+| `defaultMode` / `workspaceRoot` | 部署默认与兜底根，构造期算好[^8] |
+| `overrideOf(session)` | 只读会话覆盖，不套默认值[^9] |
+| `effectiveSandboxMode(events)` | 纯 fold：倒着找最后一条 `sandbox/mode`[^10] |
+| `setSandboxMode(session, mode)` | 唯一写路径[^5] |
+| `SANDBOX_MODES` | `['read-only', 'workspace-write', 'danger-full-access']`[^11] |
 
 `resolve()` 里 mode 和 root 是两条互不相干的链，各走各的：
 
@@ -94,7 +90,7 @@ resolveWorkspaceRoot(path) = resolve(canonicalPath(path))
                              ^ 后做 lexical  ^ 先做 canonical
 ```
 
-顺序反过来结果就不一样了：`symlink/..` 这种路径，先 lexical 归一会把 `..` 就地抵消掉，先 canonical 则会顺着 symlink 走到真身再回退一级——后者才和进程真正 chdir 的落点一致。实现在 `src/index.ts:33-35`。
+顺序反过来结果就不一样了：`symlink/..` 这种路径，先 lexical 归一会把 `..` 就地抵消掉，先 canonical 则会顺着 symlink 走到真身再回退一级——后者才和进程真正 chdir 的落点一致[^12]。
 
 ```mermaid
 flowchart TD
@@ -132,9 +128,9 @@ flowchart TD
 | `mode` | `'read-only' \| 'workspace-write' \| 'danger-full-access'` | `read-only` | `DSH_PERMISSION_MODE ?? 'workspace-write'` | 会话起步的 file-effect mode |
 | `workspaceRoot` | `string` | 无 schema 默认，构造时落到 `process.cwd()` | `process.cwd()` | 无 session cwd 的 agentless 调用的兜底可写根 |
 
-两个字段的默认值说明见 `packages/sandbox/sandbox-policy/README.md:13-14`。
+两个字段的默认值说明见 README[^13]。
 
-还有一句边界需要划清楚：**runner 的选择不在这里，那是 `ctx.sandbox` provider（即 [sandbox-local](./dsh-sandbox-local.md)）的 config**。这句话出自源码 doc comment（`src/index.ts:64-65`），README 里没有对应表述。
+还有一句边界需要划清楚：**runner 的选择不在这里，那是 `ctx.sandbox` provider（即 [sandbox-local](./dsh-sandbox-local.md)）的 config**。这句话出自源码 doc comment，README 里没有对应表述[^14]。
 
 ## 模型看得见什么
 
@@ -152,13 +148,13 @@ Current DSH file policy: workspace-write. Any available operation enforced by th
 Current DSH file policy: danger-full-access. The DSH file sandbox does not restrict file modifications by available operations.
 ```
 
-三段分别在 `packages/sandbox/sandbox-policy/src/index.ts:41`、`43`、`45`；README 的 `42`、`48`、`54` 逐字相同。
+三段分别在源码与 README 里逐字相同[^15]。
 
 第二段里的路径由 `JSON.stringify(policy.workspaceRoot)` 现填，所以带引号——那对引号不是文案写的，是序列化带出来的。
 
 这段文本**不枚举挂载了哪些能力**，也不列具体临时目录。
 
-它还有一个顺带的 KV Cache effect（README `61-63`）：稳定的 system prompt 在 mode 切换前后逐字节不变，变化的完整快照追加在保留历史之后，旧前缀继续命中缓存。
+它还有一个顺带的 KV Cache effect：稳定的 system prompt 在 mode 切换前后逐字节不变，变化的完整快照追加在保留历史之后，旧前缀继续命中缓存[^16]。
 
 ## 什么时候你会想换掉它 / 怎么换
 
@@ -172,7 +168,7 @@ Current DSH file policy: danger-full-access. The DSH file sandbox does not restr
 
 ## 坑与边界
 
-README 的 Known Limitations and Deferred Work（`packages/sandbox/sandbox-policy/README.md:65-69`）：
+README 的 Known Limitations and Deferred Work 有三条[^17]：
 
 - **一个 session 只有一个主 workspace root**——policy 解析的是 `SessionHeader.cwd`，额外可写根不属于 `SandboxExecutionPolicy`。
 - **只管文件效果**——`SandboxMode` 的词汇表里没有网络和进程策略，这里没有任何旋钮能限制它们。
@@ -180,9 +176,9 @@ README 的 Known Limitations and Deferred Work（`packages/sandbox/sandbox-polic
 
 再补两条读源码所得。
 
-一是 `sandbox/mode` 是 log-only、不带 `surfaceOp`，模型只从 runtime-context 快照知道它（`src/session-mode.ts:27-32`）。
+一是 `sandbox/mode` 是 log-only、不带 `surfaceOp`，模型只从 runtime-context 快照知道它[^18]。
 
-二是可选的 `./invariant` 伴生插件，会在两个时机校验事件里的 mode 属于封闭词汇表：
+二是可选的 `./invariant` 伴生插件，会在两个时机校验事件里的 mode 属于封闭词汇表[^19]：
 
 ```
 on 装载:      for e in 已有事件: assert e.mode in SANDBOX_MODES
@@ -190,4 +186,26 @@ on 新 append: assert e.mode in SANDBOX_MODES
 # 越界 → fail，不是警告
 ```
 
-对应 `src/invariant.ts:18-19`、`24-33`。
+---
+
+## 出处
+
+[^1]: bundle 配置树上的这一行：`packages/bundle/base/cordis.patch.yml:172-176`。
+[^2]: schema 默认 `mode: read-only`：`packages/sandbox/sandbox-policy/src/index.ts:94`；bundle 对 user-approval 的联动覆盖：`packages/bundle/base/cordis.patch.yml:191`。
+[^3]: 构造函数与 super 调用：`packages/sandbox/sandbox-policy/src/index.ts:105`。
+[^4]: prompt 段可选挂载与空串兜底：`packages/sandbox/sandbox-policy/src/index.ts:112-123`。
+[^5]: `setSandboxMode()` 写路径：`packages/sandbox/sandbox-policy/src/session-mode.ts:33-37`、`:69-71`。
+[^6]: 四处 inject：`dsh-bash-sandbox`（`packages/shell/bash-sandbox/src/index.ts:45`）、`dsh-pwsh-sandbox`（`packages/shell/pwsh-sandbox/src/index.ts:53`）、`dsh-fs-sandbox`（`packages/fs/fs-sandbox/src/index.ts:60`）、`dsh-terminal-bash`（`packages/terminal/terminal-bash/src/index.ts:25`）。
+[^7]: `resolve()` 实现：`packages/sandbox/sandbox-policy/src/index.ts:135-142`。
+[^8]: `defaultMode` / `workspaceRoot` 构造期计算：`packages/sandbox/sandbox-policy/src/index.ts:109-110`。
+[^9]: `overrideOf(session)`：`packages/sandbox/sandbox-policy/src/index.ts:149-151`。
+[^10]: `effectiveSandboxMode(events)`：`packages/sandbox/sandbox-policy/src/session-mode.ts:52-58`。
+[^11]: `SANDBOX_MODES` 定义：`packages/sandbox/sandbox-policy/src/session-mode.ts:42`。
+[^12]: `resolveWorkspaceRoot`（先 canonical 再 lexical）：`packages/sandbox/sandbox-policy/src/index.ts:33-35`。
+[^13]: 两个字段默认值的说明：`packages/sandbox/sandbox-policy/README.md:13-14`。
+[^14]: runner 选择边界的源码 doc comment：`packages/sandbox/sandbox-policy/src/index.ts:64-65`；README 无对应表述。
+[^15]: 三段原文：源码 `packages/sandbox/sandbox-policy/src/index.ts:41`、`43`、`45`；README `packages/sandbox/sandbox-policy/README.md:42`、`48`、`54` 逐字相同。
+[^16]: KV Cache effect：`packages/sandbox/sandbox-policy/README.md:61-63`。
+[^17]: Known Limitations and Deferred Work：`packages/sandbox/sandbox-policy/README.md:65-69`。
+[^18]: `sandbox/mode` log-only、不带 `surfaceOp`：`packages/sandbox/sandbox-policy/src/session-mode.ts:27-32`。
+[^19]: invariant 校验的两个时机：`packages/sandbox/sandbox-policy/src/invariant.ts:18-19`（装载）、`:24-33`（新 append）。

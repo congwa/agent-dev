@@ -1,12 +1,12 @@
 # 第 1 篇 · 一条 UPDATE 背后发生了什么
 
-> 目标：建立"一行 SQL 在磁盘和内存里究竟动了什么"的物理直觉。后面所有的并发、膨胀、性能问题都是从这里推出来的。
+> 目标：建立"一行 SQL 在磁盘和内存里究竟动了什么"的物理直觉。后面所有的并发、膨胀、性能问题都是从这里推出来的。实测脚本出处收在文末脚注。
 
 ---
 
 ## 一、从 sub2api 的一次计费说起
 
-用户调了一次 Claude API，网关算出这次花了 0.0032 美元，于是执行（`backend/internal/repository/usage_billing_repo.go`）：
+用户调了一次 Claude API，网关算出这次花了 0.0032 美元，于是执行下面这条 UPDATE[^1]：
 
 ```sql
 UPDATE users
@@ -78,7 +78,7 @@ flowchart TD
 
 MySQL 是"一个连接一个线程"，Postgres 是 **"一个连接一个进程"**（fork 出来的 backend）。
 
-实测（`labs/exp12_conn.py`）：
+实测结果如下[^2]：
 
 ```
   max_connections = 100
@@ -92,7 +92,7 @@ MySQL 是"一个连接一个线程"，Postgres 是 **"一个连接一个进程"*
 
 第一，**Postgres 的连接数上限比你想象的低。** 一般经验值是 `CPU 核数 × 2 ~ 4`，而不是几千。
 
-第二，**必须用连接池**（应用层的 `SetMaxOpenConns`，或者 PgBouncer）。sub2api 在 `internal/repository/db_pool.go` 里就老老实实做了这件事：
+第二，**必须用连接池**（应用层的 `SetMaxOpenConns`，或者 PgBouncer）。sub2api 就老老实实做了这件事[^3]：
 
 ```go
 db.SetMaxOpenConns(settings.MaxOpenConns)
@@ -156,7 +156,7 @@ flowchart TD
 
 这是 Postgres 与 MySQL/InnoDB 最本质的分歧，也是整套文档的地基。
 
-实测（`labs/exp3_mvcc.sql`）：
+实测如下[^4]：
 
 ```sql
 CREATE TABLE acct(id bigint primary key, balance numeric, note text);
@@ -411,7 +411,7 @@ COMMIT;
 
 它依据的是 `pg_statistic` 里的统计信息——列的 distinct 值个数、最常见值（MCV）、直方图、null 比例等，这些由 `ANALYZE`（以及 autovacuum 顺手做的 analyze）收集。
 
-猜得准不准，差距不是百分之几。实测同一条查询，只因为索引不同，执行时间差了 1000 倍（`labs/exp9_index.sql`，100 万行）：
+猜得准不准，差距不是百分之几。实测同一条查询，只因为索引不同，执行时间差了 1000 倍，测试表 100 万行[^5]：
 
 ```
 无索引，走 Parallel Seq Scan     Execution Time: 77.805 ms   读了 9352 个 buffer
@@ -450,6 +450,16 @@ EXPLAIN (ANALYZE, BUFFERS) SELECT ...;
 | 优化器靠统计信息猜 | 导入后要 ANALYZE；用 `EXPLAIN (ANALYZE, BUFFERS)` 而不是 `EXPLAIN` |
 
 📌 **一句话**：Postgres 里的"改一行"，物理上是"追加一个新版本 + 写一条 WAL"，其余所有特性和坑都由这句话派生。
+
+---
+
+## 出处
+
+[^1]: 扣费 UPDATE 语句所在文件：`backend/internal/repository/usage_billing_repo.go`。
+[^2]: 连接数实测脚本：`labs/exp12_conn.py`。
+[^3]: 连接池配置所在文件：`internal/repository/db_pool.go`。
+[^4]: MVCC 版本链实测脚本：`labs/exp3_mvcc.sql`。
+[^5]: 索引效果对比实测脚本：`labs/exp9_index.sql`。
 
 ---
 

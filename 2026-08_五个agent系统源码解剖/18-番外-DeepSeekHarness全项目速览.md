@@ -2,9 +2,9 @@
 
 > **一句话导读**：DeepSeek 在 2026-08-13 开源的 `dsh` 是本系列里第一个**把 harness 本身当产品发布**的样本——不是"某公司自用 coding agent 顺手开源"，而是"我们做了一个可组合的 agent 运行时，欢迎你在上面造你自己的产品"。
 >
-> 它的口号"Everything is a Plugin"这次不是市场语言：**agent loop 是启动配置里的一行 YAML**（`packages/bundle/base/cordis.patch.yml:436`），219 个包里对循环实现有运行期依赖的只有 1 个，而且这条纪律是 `peerDependencies` 图上机器可查的。代价同样明码标价：插件就是普通 npm 包，装进来直接拿到完整 `ctx`，**零签名、零权限声明、零隔离**。
+> 它的口号"Everything is a Plugin"这次不是市场语言：**agent loop 是启动配置里的一行 YAML**[^1]，219 个包里对循环实现有运行期依赖的只有 1 个，而且这条纪律是 `peerDependencies` 图上机器可查的。代价同样明码标价：插件就是普通 npm 包，装进来直接拿到完整 `ctx`，**零签名、零权限声明、零隔离**。
 >
-> 调研时间：**2026-08-14**。仓库 `deepseek-ai/deepseek-harness`，读的是当日 HEAD（commit `47f9438`，2026-08-13 19:38，`Merge pull request #2519 … feat/npm-public`），版本 `0.1.0-rc.5`（npm 上 `@deepseek-ai/dsh` 已到 `0.1.0-rc.6`）。调研方式：仓库 clone 到本地，**15 路并行按维度读源码 + 逐条对抗式核验引用**（共核验 973 处 file:line 与英文引文，修正 269 处）。文中所有行号、计数为当日实测。
+> 调研时间：**2026-08-14**。仓库 `deepseek-ai/deepseek-harness`，读的是当日 HEAD（commit `47f9438`，2026-08-13 19:38，`Merge pull request #2519 … feat/npm-public`），版本 `0.1.0-rc.5`（npm 上 `@deepseek-ai/dsh` 已到 `0.1.0-rc.6`）。调研方式：仓库 clone 到本地，**15 路并行按维度读源码 + 逐条对抗式核验引用**（共核验 973 处 file:line 与英文引文，修正 269 处）。文中所有行号、计数为当日实测。出处收在文末脚注，可照抄代码收在附录。
 >
 > **本章定位**：番外，也是 DeepSeek Harness 的总入口。第 01–15 章各在章末有「第五个样本：DeepSeek Harness」小节按各自维度展开，16 章总表已扩入 dsh 列；本章负责全项目视图、工程形态与总判断。前四个样本的既有结论不受影响——但第 06 章那条"最硬的结论"被逼到了一个更精确的位置，见第 4 节。
 
@@ -100,19 +100,11 @@ Cordis 给的四个原语，正好解释了后面所有维度上 dsh 为什么�
 
 ### 2.2 "一切皆插件"的证据
 
-官方文档的原话（`docs/architecture.md:11`）：
+官方文档的原话[^2]：
 
 > "Every part of the product is a plugin, including the model adapter, the tool registry, the session log, and **the agent loop itself**, so every part is replaceable from configuration."
 
-这句话可以被代码验证，而且验证方式是可量化的：
-
-```yaml
-# packages/bundle/base/cordis.patch.yml:436-439 —— agent loop 就是第 N 行配置
-    - id: agent-loop
-      name: '@deepseek-ai/dsh-agent-loop'
-      config:
-        agents: []
-```
+这句话可以被代码验证，而且验证方式是可量化的：启动树里 id 为 `agent-loop` 的那一行，插件是 `@deepseek-ai/dsh-agent-loop`，配置只有一个空的 `agents: []`——真实内容照抄[附录 A](#a-agent-loop-在启动树里的真实配置)[^1]。
 
 启动 = 一棵按层组合的插件树，叠在一个空 root 上，四层依次生效，命中同一个 `id` 就**整体替换**那一行 config（不深合并）：
 
@@ -208,7 +200,7 @@ flowchart LR
 
 ### 2.3 capability seam：换一个 provider，整个执行世界搬家
 
-`docs/architecture.md:100` 定义的 seam 是三角形：**Service Definition（接口）+ Service Provider（实现）+ Consumer（用它的人，通常是模型可见的工具）**，缺一不成 seam。这个约束的实际收益写在 `:102`：
+这个 seam 是三角形[^3]：**Service Definition（接口）+ Service Provider（实现）+ Consumer（用它的人，通常是模型可见的工具）**，缺一不成 seam。这个约束的实际收益，官方文档写得很直接：
 
 > "Filesystem and subprocess providers share one execution world, so pointing them at a remote sandbox moves Bash, PTY, and LSP with them, with no provider forks."
 
@@ -221,7 +213,7 @@ flowchart LR
 | 维度（对应章） | dsh 的答案 | 最接近谁 |
 |---|---|---|
 | 分层 [01] | 循环是配置树里的一行 YAML；边界靠依赖图机器可查 | Codex（但更极端） |
-| 循环形状 [02] | 三层手写 loop，**循环体合计 192 行**（`agent.ts:210-401`）；历史不在循环里（每次从日志投影）；停止由 inbox 里的**数据**决定而非钩子返回值 | Codex/Grok 同族 |
+| 循环形状 [02] | 三层手写 loop，**循环体合计 192 行**[^4]；历史不在循环里（每次从日志投影）；停止由 inbox 里的**数据**决定而非钩子返回值 | Codex/Grok 同族 |
 | 上下文 [03] | system prompt 是注册表不是模板（28 个源码文件按 `order` 认领段落），实测 0.75–45KB **全由配置决定**；动态事实不进 prompt，走日志化的 user 快照 | Pi 的极化版 |
 | 压缩 [04] | append-only 日志上的"**区间替换**"：头锚定、两端靠 tool-call 括号计数判平衡；摘要请求**刻意做成会话真前缀以复用 KV cache** | 结构像 Pi，方向像 LangChain |
 | 工具与执行 [05] | 三条 waterfall + 单调 guard；并行是"策略串行 / 执行重叠 / 结果按模型序提交"；**写冲突锁下沉到 fs provider**（per-realpath FIFO + 乐观版本号） | Codex |
@@ -262,7 +254,7 @@ next():
 //   内层链路的兄弟监听器被整条跳过，且不会重入
 ```
 
-所以能 wrap、能 veto、能替换结果，但不能把内层重放一遍。实现在 `vendor/cordis/src/events.ts:234-243`。
+所以能 wrap、能 veto、能替换结果，但不能把内层重放一遍[^5]。
 
 真正的 `ModelFallbackMiddleware` 等价物在 dsh 里是这么做的——重试循环留在 loop 自己手里，只把"是否再来一次"这一个 bit 开放给插件投票：
 
@@ -488,7 +480,7 @@ bundle 就是 npm 包，和内置插件同级 import 进主进程，拿完整 `c
 
 `packages/extensions/tool-cordis` 给模型 7 个工具（`cordis_define` / `cordis_run` / `cordis_stop` / …），动态包直接求值挂载，**host 半边不经任何人批准**，能拿哪些服务只由它自己在 `inject` 里声明。
 
-仓库对此的态度是坦率的（`cordis-host-runner/README.md:32`）：node:vm 沙箱 "isolates globals but is not a security boundary"，**要求把它当 bash 权限对待**。它不在任何出厂树里，是显式 opt-in——但这是"第五种答案"和"第五种风险"的同一个东西。
+仓库对此的态度是坦率的[^6]：node:vm 沙箱 "isolates globals but is not a security boundary"，**要求把它当 bash 权限对待**。它不在任何出厂树里，是显式 opt-in——但这是"第五种答案"和"第五种风险"的同一个东西。
 
 **3. 沙箱只管文件写效果。**
 
@@ -552,3 +544,29 @@ Grok Build 的答案是把竞品的文件约定当事实标准全盘实现（第
 **参考来源**（发布背景，第三方）：
 [VentureBeat](https://venturebeat.com/technology/deepseek-harness-launches-as-open-source-rival-to-claude-code-alongside-v4-pro-on-api-with-higher-prices) ·
 [The New Stack](https://thenewstack.io/deepseek-harness-open-source-plugins/)
+
+---
+
+## 附录：可以照抄的模板
+
+### A. agent-loop 在启动树里的真实配置
+
+启动树的第 436-439 行，`id` 为 `agent-loop` 的这一条[^1]：
+
+```yaml
+    - id: agent-loop
+      name: '@deepseek-ai/dsh-agent-loop'
+      config:
+        agents: []
+```
+
+---
+
+## 出处
+
+[^1]: `packages/bundle/base/cordis.patch.yml:436-439`——启动树里 id 为 `agent-loop` 的那一条插件声明，config 只有一个空的 `agents: []`。
+[^2]: `docs/architecture.md:11`。
+[^3]: seam 三角形定义：`docs/architecture.md:100`；引文（filesystem/subprocess provider 共享一个执行世界）出自 `:102`。
+[^4]: 循环体行数：`agent.ts:210-401`，合计 192 行。
+[^5]: waterfall `next()` 不接受参数、`cbs.shift()` 游标共享的实现：`vendor/cordis/src/events.ts:234-243`。
+[^6]: `cordis-host-runner/README.md:32`：node:vm 沙箱 "isolates globals but is not a security boundary"。

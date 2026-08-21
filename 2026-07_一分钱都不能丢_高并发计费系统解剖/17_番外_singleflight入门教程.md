@@ -1,6 +1,6 @@
 # singleflight 到底是什么？——从一次"缓存击穿"事故讲起
 
-> 本系列番外。目标读者：完全没接触过 singleflight 的小白。读完这篇文档，你应该能看懂并解释[第 6 章](./6_实战案例三_高并发余额扣费全链路.md)准入层表格里的这一行：
+> 本系列番外。目标读者：完全没接触过 singleflight 的小白。读完这篇文档，你应该能看懂并解释[第 6 章](./6_实战案例三_高并发余额扣费全链路.md)准入层表格里的这一行。完整可运行的代码收在文末附录。
 >
 > `准入读余额 │ 缓存优先,回源合并 │ singleflight.Do(uid) + background ctx`
 
@@ -160,33 +160,17 @@ sequenceDiagram
 
 ## 3. 核心 API：`Do` 长什么样
 
-`singleflight.Group` 是核心结构，最常用的方法是 `Do`：
+`singleflight.Group` 是核心结构，最常用的方法只有一个：`Do`。它接手的正是第 1 节那三行伪代码里"回源"那一步，接手前后只差一行：
 
-```go
-import "golang.org/x/sync/singleflight"
+```
+改写前：
+    回源(uid)                  ← 每个请求各跑一遍
 
-var g singleflight.Group
-
-func GetBalance(uid string) (int64, error) {
-    // key 用 uid，代表"同一个 uid 的并发查询要合并"
-    v, err, shared := g.Do(uid, func() (interface{}, error) {
-        // 这个函数体，同一个 key 在同一时间只会真正执行一次
-        return queryBalanceFromDB(uid)
-    })
-    if err != nil {
-        return 0, err
-    }
-    return v.(int64), nil
-}
+改写后：
+    g.Do(uid, 回源(uid))       ← 同一个 uid 只跑一遍，其余请求拿同一份结果
 ```
 
-`Do` 签名大致是：
-
-```go
-func (g *Group) Do(key string, fn func() (interface{}, error)) (v interface{}, err error, shared bool)
-```
-
-参数和返回值：
+`Do` 拿两样东西进门——一个 key，一个"真正昂贵"的函数——交出三样东西：结果、错误，还有一个 `shared` 标记，说明这份结果是自己查来的还是蹭来的。参数和返回值：
 
 | 位置 | 名字 | 是什么 |
 |---|---|---|
@@ -311,7 +295,7 @@ flowchart TD
     class B3,B4 data
 ```
 
-所以正确做法是：`fn` 内部发起下游调用时，使用一个**独立于任何单个请求的 context**——通常是 `context.Background()`，或者基于它加一个合理的超时（比如 `context.WithTimeout(context.Background(), 2*time.Second)`），这样：
+所以正确做法是：`fn` 内部发起下游调用时，使用一个**独立于任何单个请求的 context**——通常是 `Background()`，或者基于它加一个合理的超时（比如两秒），这样：
 
 - 这次"合并后的真实回源调用"的生命周期，**不跟随**任何一个具体请求的取消而取消；
 - 它只会因为自己设置的超时、或者业务层面主动 `Forget` 才结束；
@@ -321,57 +305,11 @@ flowchart TD
 
 ---
 
-## 5. 完整示例：把整行代码串起来
+## 5. 把三行伪代码，换成一段能真正跑的实现
 
-```go
-package balance
+回到最开始那三行伪代码——查缓存、没命中就回源、写回缓存。补齐第 3、4 节讲的两处改动：回源那一步换成 `sfGroup.Do(uid, fn)`；`fn` 内部再也不碰调用方传进来的 `reqCtx`，只用自己新开的、带两秒超时的独立 background context。
 
-import (
-    "context"
-    "time"
-
-    "golang.org/x/sync/singleflight"
-)
-
-var sfGroup singleflight.Group
-
-// GetBalance 提供"准入读余额"接口调用
-// 策略：缓存优先，未命中则回源合并
-func GetBalance(reqCtx context.Context, uid string) (int64, error) {
-    // 1. 缓存优先
-    if v, ok := readFromCache(uid); ok {
-        return v, nil
-    }
-
-    // 2. 缓存未命中 -> 回源合并
-    // key 用 uid：同一个用户的并发回源请求会被合并成一次
-    result, err, shared := sfGroup.Do(uid, func() (interface{}, error) {
-        // 关键点：这里不要用 reqCtx（某个具体请求的 ctx）
-        // 而是用一个独立的 background ctx，避免"第一个请求取消"
-        // 连累其他还在等待结果的请求
-        bgCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-        defer cancel()
-
-        balance, err := queryBalanceFromDB(bgCtx, uid)
-        if err != nil {
-            return nil, err
-        }
-
-        // 查到之后顺手回写缓存，下次直接命中
-        writeToCache(uid, balance)
-        return balance, nil
-    })
-
-    if err != nil {
-        return 0, err
-    }
-
-    _ = shared // shared==true 表示这次结果是蹭别人合并来的，可用于打日志/监控
-    return result.(int64), nil
-}
-```
-
-注意这里 `reqCtx`（调用方传进来的、可能被取消的请求 ctx）**只用于函数最外层的参数**，真正塞进 `sfGroup.Do` 里 `fn` 内部去查库的，是独立的 `bgCtx`。这正是"+ background ctx"这半句要强调的实践。
+`reqCtx`（调用方传进来的、可能被取消的请求 ctx）自始至终只活在函数最外层的参数位置，从来不会被塞进 `fn` 里——这正是"+ background ctx"这半句要强调的实践。完整代码照抄[附录](#附录可以照抄的模板)。
 
 ---
 
@@ -463,14 +401,68 @@ flowchart TD
 
 ---
 
-## 7. 总结
+## 7. 把这一章串起来
 
 用一句话记住 singleflight：
 
 > **同一个 key 的并发调用，只让一个人真正去干活，其他人排队分享结果——干活时用的 context，不能是某个具体请求会被取消的 context。**
 
-回到最开始那句话，现在你应该能完整解释它了：
+回到最开始那句话，现在你应该能完整解释它了——每一段都能在前面某一节里找到自己的出处：
 
-- **准入读余额**：这是一个查余额的读接口；
-- **缓存优先，回源合并**：先查缓存，缓存没命中时，把并发的回源请求合并成一次；
-- **singleflight.Do(uid) + background ctx**：用 `uid` 做 key 实现合并，合并后真正执行的那次调用要用独立的 background context，避免被某个请求的取消连累到其他等待者。
+- **准入读余额**：这是一个查余额的读接口，也是第 1.1 节那场事故发生的地方；
+- **缓存优先，回源合并**：先查缓存，缓存没命中时把并发的回源请求合并成一次——之所以要合并，是因为第 1.2 节推出的那条道理，5000 个请求要的其实是同一个答案；
+- **singleflight.Do(uid) + background ctx**：`uid` 当 key 是第 3 节讲的合并依据；`+ background ctx` 是第 4.3 节那个反直觉的坑——leader 请求提前断线，不能连累另外 4999 个还在等结果的人。
+
+---
+
+## 附录：可以照抄的模板
+
+完整实现，把三行伪代码、`Do`、独立的 background context 全部拼在一起，可直接抄进项目：
+
+```go
+package balance
+
+import (
+    "context"
+    "time"
+
+    "golang.org/x/sync/singleflight"
+)
+
+var sfGroup singleflight.Group
+
+// GetBalance 提供"准入读余额"接口调用
+// 策略：缓存优先，未命中则回源合并
+func GetBalance(reqCtx context.Context, uid string) (int64, error) {
+    // 1. 缓存优先
+    if v, ok := readFromCache(uid); ok {
+        return v, nil
+    }
+
+    // 2. 缓存未命中 -> 回源合并
+    // key 用 uid：同一个用户的并发回源请求会被合并成一次
+    result, err, shared := sfGroup.Do(uid, func() (interface{}, error) {
+        // 关键点：这里不要用 reqCtx（某个具体请求的 ctx）
+        // 而是用一个独立的 background ctx，避免"第一个请求取消"
+        // 连累其他还在等待结果的请求
+        bgCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+        defer cancel()
+
+        balance, err := queryBalanceFromDB(bgCtx, uid)
+        if err != nil {
+            return nil, err
+        }
+
+        // 查到之后顺手回写缓存，下次直接命中
+        writeToCache(uid, balance)
+        return balance, nil
+    })
+
+    if err != nil {
+        return 0, err
+    }
+
+    _ = shared // shared==true 表示这次结果是蹭别人合并来的，可用于打日志/监控
+    return result.(int64), nil
+}
+```

@@ -1,6 +1,6 @@
 # user-approval
 
-> `@deepseek-ai/dsh-user-approval` · bundle：`base` · 配置树 id：`approval` · v0.1.0-rc.5（commit `47f9438`）2026-08-14 核对
+> `@deepseek-ai/dsh-user-approval` · bundle：`base` · 配置树 id：`approval` · v0.1.0-rc.5（commit `47f9438`）2026-08-14 核对，出处收在文末脚注。
 
 **一句话**：与渠道无关的一次性审批 seam（`ctx.approval`）——`request()` 只会返回 `allowed-once` / `rejected` / `cancelled` / `unavailable` 四种结果，没有 answerer 或 answerer 抛错一律算失败关闭，授权只对这一次被问的动作生效。
 
@@ -13,35 +13,33 @@
         policy: !!js "(process.env.DSH_PERMISSION_MODE ?? 'workspace-write') === 'danger-full-access' ? 'never' : 'ask'"
 ```
 
-这里最值得记的是：`DSH_PERMISSION_MODE` 这一个环境变量同时管着两处。它决定本插件的 `policy`，也决定 [sandbox-policy](./dsh-sandbox-policy.md) 的 `mode`。
+这份配置来自 base bundle[^1]。
 
-所以把整机开到 `danger-full-access` 时，审批会一起被关成 `never`；否则是 `ask`。插件 schema 自己的默认值也是 `ask`。
+这里最值得记的是：`DSH_PERMISSION_MODE` 这一个环境变量同时管着两处。它决定本插件的 `policy`，也决定 [sandbox-policy](./dsh-sandbox-policy.md) 的 `mode`[^2]。
 
-出处：bundle 配置见 `packages/bundle/base/cordis.patch.yml:188-191`，sandbox-policy 的 `mode` 在同文件 `175`；schema 默认见 `packages/interaction/user-approval/src/index.ts:194`。
+所以把整机开到 `danger-full-access` 时，审批会一起被关成 `never`；否则是 `ask`。插件 schema 自己的默认值也是 `ask`[^1]。
 
 ## 它注册了什么
 
 | 类型 | 名字 | 说明 |
 |---|---|---|
-| service | `ctx.approval` | `ApprovalService`，`super(ctx, 'approval')`（`src/index.ts:198`） |
-| 事件（**声明并派发**，非监听） | `approval/request`（**waterfall**，`src/index.ts:28` 的 `@mode waterfall`） | 它是这条 waterfall 的生产者：`ctx.waterfall(scopeTarget(this, req.agent), 'approval/request', req, …)`（`src/index.ts:318-321`）。answerer 是别人注册的监听器，返回结果即认领、调 `next()` 即转交 |
-| prompt 段 | `approval:policy`，`order: 115` | `ctx.inject(['systemPrompt'])` 可选挂载（`src/index.ts:204-216`） |
-| session 事件 | `approval/asked` / `approval/decided` / `approval/policy` | 全是 log-only 审计/状态事件，**不进模型 transcript**（`src/index.ts:44-71`） |
+| service | `ctx.approval` | `ApprovalService`，`super(ctx, 'approval')`[^3] |
+| 事件（**声明并派发**，非监听） | `approval/request`（**waterfall**）[^4] | 它是这条 waterfall 的生产者：`ctx.waterfall(scopeTarget(this, req.agent), 'approval/request', req, …)`[^5]。answerer 是别人注册的监听器，返回结果即认领、调 `next()` 即转交 |
+| prompt 段 | `approval:policy`，`order: 115` | `ctx.inject(['systemPrompt'])` 可选挂载[^6] |
+| session 事件 | `approval/asked` / `approval/decided` / `approval/policy` | 全是 log-only 审计/状态事件，**不进模型 transcript**[^7] |
 
-waterfall 走 `@deepseek-ai/dsh-scope` 的作用域过滤派发：agent 作用域的监听器只会收到自己那个 agent 的请求（`src/index.ts:26`、`packages/core/scope/src/scoped-events.generated.ts:23`）。
+waterfall 走 `@deepseek-ai/dsh-scope` 的作用域过滤派发：agent 作用域的监听器只会收到自己那个 agent 的请求[^8]。
 
-仓库自动生成的收发表把生产者/消费者关系写死了：生产者是 `user-approval`（waterfall），消费者是 `acp` 和 `apiproxy`（`docs/event-producer-consumer.md:24`）。
+仓库自动生成的收发表把生产者/消费者关系写死了：生产者是 `user-approval`（waterfall），消费者是 `acp` 和 `apiproxy`[^9]。
 
 ### base bundle 里没有内置 answerer
 
-两个已知的 answerer 都在 base 之外，而且认领请求的判据完全不同：
+两个已知的 answerer 都在 base 之外，而且认领请求的判据完全不同[^10]：
 
 | answerer | 认领判据 | 不认领时 | 组合位置 |
 |---|---|---|---|
 | ACP 桥 | 只认领自己拥有、且带 `callId` 的请求 | `next()` | 不在任何 bundle 里 |
 | web 端 api-proxy | 不看 agent 归属，去会话日志里配对一条尚未决定、未被别的挂起项认领的 `approval/asked` | 配不上就 `next()` | 由 web-app bundle 组合 |
-
-出处：ACP 桥 `packages/acp/acp/src/index.ts:215-217`；api-proxy 认领逻辑 `packages/host/apiproxy/src/api-proxy.ts:1422`、转交在同文件 `1457`；组合位置 `packages/bundle/web-app/cordis.patch.yml:100`。
 
 ## 关键流程
 
@@ -67,11 +65,11 @@ request(req):
     return result
 ```
 
-`request()` 要求当前处在一个未关闭的 turn 里，是因为审计对必须被 turn 的提交/重放边界包住（`src/index.ts:259-265`、`127-134`）。
+`request()` 要求当前处在一个未关闭的 turn 里，是因为审计对必须被 turn 的提交/重放边界包住[^11]。
 
-`never` 的短路为什么写在服务里而不是做成一个监听器？源码注释专门解释了：监听器即便用 `prepend: true` 也可能被别人插队，只有服务本身能保证这一刀落在所有 dispatch 之前（`src/index.ts:307-312`）。
+`never` 的短路为什么写在服务里而不是做成一个监听器？源码注释专门解释了：监听器即便用 `prepend: true` 也可能被别人插队，只有服务本身能保证这一刀落在所有 dispatch 之前[^12]。
 
-answerer 抛错那条要注意 `317` 特意先进了 promise 链，所以同步抛出的错误也会被归到 `unavailable`，而不是穿透出去。归一化非法返回值在 `325-328`。
+answerer 抛错这条要留意实现细节：抛错会特意先进一趟 promise 链，所以同步抛出的错误也会被归到 `unavailable`，不会穿透出去；返回值不在词汇表里同样会被就地归一化[^13]。
 
 最后一步的失败模式也是刻意的：审计写失败会导致整个请求抛出，而不是返回一个没记账的决定。
 
@@ -117,11 +115,11 @@ flowchart TD
 
 ### 谁在消费它
 
-工具管线的 `ask` 决策走这里，没组合审批服务就退化成拒绝（`packages/core/tools/src/index.ts:1693-1699`）。
+工具管线的 `ask` 决策走这里，没组合审批服务就退化成拒绝[^14]。
 
-沙箱升级（`sandbox_permissions`）也走这里。`approveEscalation()` 先校验「严格更宽」，再问审批：`allowed-once` 返回被批准的 mode，其余三种结果各抛一段不同的报错文案（`packages/sandbox/sandbox/src/escalation.ts:157-189`，分支在 `180-187`）。
+沙箱升级（`sandbox_permissions`）也走这里。`approveEscalation()` 先校验「严格更宽」，再问审批：`allowed-once` 返回被批准的 mode，其余三种结果各抛一段不同的报错文案[^15]。
 
-把 `ctx.get('approval')` 传进去的是 `dsh-tool-bash`（`packages/shell/tool-bash/src/index.ts:226`）与 `dsh-tool-fs`（`packages/fs/tool-fs/src/sandbox.ts:100`）。
+把 `ctx.get('approval')` 传进去的是 `dsh-tool-bash` 与 `dsh-tool-fs`[^16]。
 
 ## 配置项
 
@@ -129,13 +127,13 @@ flowchart TD
 |---|---|---|---|
 | `policy` | `'ask' \| 'never'` | `ask`（bundle 按 `DSH_PERMISSION_MODE` 算） | 没有 `approval/policy` 覆盖的 session 的部署默认。`ask` 委派给组合好的 answerer（一个都没有就失败关闭）；`never` 不问任何人，每次 ask 确定性地 `rejected` |
 
-会话级覆盖是最后一条 `approval/policy` 事件，`setApprovalPolicy(session, policy)` 是唯一写路径（`src/index.ts:142-147`）。
+会话级覆盖是最后一条 `approval/policy` 事件，`setApprovalPolicy(session, policy)` 是唯一写路径[^17]。
 
-另有一个 `setPolicy(agent, policy)`，是「活 agent 切换」的版本——除了写事件，还会给模型注入一句切换通知（`226-237`）。
+另有一个 `setPolicy(agent, policy)`，是「活 agent 切换」的版本——除了写事件，还会给模型注入一句切换通知[^18]。
 
 ## 模型看得见什么
 
-两条策略文本，逐字来自源码常量（`src/index.ts:102`、`100`；README 的 `26`、`32` 相同）：
+两条策略文本，逐字来自源码常量[^19]：
 
 ```markdown
 Approval policy: ask. Operations that require approval may ask through the configured answerers; without an available answerer, the request fails closed.
@@ -145,30 +143,58 @@ Approval policy: ask. Operations that require approval may ask through the confi
 Approval prompts are disabled in this session: actions that require approval are rejected automatically — do not request sandbox escalation (do not set `sandbox_permissions`).
 ```
 
-运行中切换还会追加一句 `The approval policy changed from "<previous>" to "<policy>" (changed by the user).`（`src/index.ts:233`）。
+运行中切换还会追加一句 `The approval policy changed from "<previous>" to "<policy>" (changed by the user).`[^20]。
 
-README 的 Tool outcome 一节把边界划得很清楚：`approval/asked` / `approval/decided` 都是 log-only，模型只看到发问方最终的工具结果，**人类看到的审批 UI 不是上下文**。
+README 的 Tool outcome 一节把边界划得很清楚：`approval/asked` / `approval/decided` 都是 log-only，模型只看到发问方最终的工具结果，**人类看到的审批 UI 不是上下文**[^21]。
 
 策略上下文那一段还有两条效应：
 
-| 效应 | 表现 | 出处 |
-|---|---|---|
-| Token effect | 策略消息只在首个请求和有效变化时各出现一次 | `README.md:37` |
-| KV Cache effect | 只追加，`ask`/`never` 互切不会重写第一条 wire 消息 | `README.md:41` |
-
-Tool outcome 一节本身在 `packages/interaction/user-approval/README.md:43-47`。
+| 效应 | 表现 |
+|---|---|
+| Token effect | 策略消息只在首个请求和有效变化时各出现一次[^22] |
+| KV Cache effect | 只追加，`ask`/`never` 互切不会重写第一条 wire 消息[^23] |
 
 ## 什么时候你会想换掉它 / 怎么换
 
 - **CI / 无人值守**：`config.policy: never`，或直接把 `DSH_PERMISSION_MODE` 设成 `danger-full-access`（那会连带把沙箱开到底，两件事一起发生，别只想着关弹窗）。
-- **自建审批渠道**：不用换插件，注册一个 `approval/request` waterfall 监听器即可，认领自己的请求、其余 `next()`。README 提醒：**每个部署只组合一个终结性 answerer**，兄弟监听器的顺序不是策略优先级机制（`README.md:9`）。
+- **自建审批渠道**：不用换插件，注册一个 `approval/request` waterfall 监听器即可，认领自己的请求、其余 `next()`。README 提醒：**每个部署只组合一个终结性 answerer**，兄弟监听器的顺序不是策略优先级机制[^24]。
 - **卸掉它**：[permission-presets](./dsh-permission-presets.md) 的 `static inject` 里有 `approval`，会跟着一起不启动；工具管线则退化为「需要审批 = 拒绝」。
 
 ## 坑与边界
 
-README 的 Known Limitations and Deferred Work（`packages/interaction/user-approval/README.md:57-62`）：
+README 的 Known Limitations and Deferred Work 有四条[^25]：
 
 - **请求只在开着的 turn 内有效**——空闲或 turn 之间的调用在审计之前就抛，跨 turn 的持久审批流程被推迟。
 - **只有一次性授权**——词汇表里有 `allowed-once`，但没有 `allow-always`、记忆规则、撤销或授权存储；会话策略也只有 `ask` / `never`。
 - **请求不带工具参数**——answerer 只看到工具名、原因和可选的 call id；ACP 机器渠道要求必须有 call id，没有的请求它直接 `next()` 转交。
 - **没有内置 answerer**——headless 或组合不完整的部署解析为 `unavailable` 并失败关闭，服务本身永远不会去问人。
+
+---
+
+## 出处
+
+[^1]: bundle 配置树上的这一行：`packages/bundle/base/cordis.patch.yml:188-191`；schema 默认值 `ask`：`packages/interaction/user-approval/src/index.ts:194`。
+[^2]: `DSH_PERMISSION_MODE` 同时决定 sandbox-policy 的 `mode`：同一 bundle 文件 `:175`。
+[^3]: 构造函数与 super 调用：`packages/interaction/user-approval/src/index.ts:198`。
+[^4]: 事件声明与 `@mode waterfall` 标注：`packages/interaction/user-approval/src/index.ts:28`。
+[^5]: 派发调用点：`packages/interaction/user-approval/src/index.ts:318-321`。
+[^6]: prompt 段可选挂载：`packages/interaction/user-approval/src/index.ts:204-216`。
+[^7]: 三个 log-only 事件、不进模型 transcript：`packages/interaction/user-approval/src/index.ts:44-71`。
+[^8]: 作用域过滤实现：`packages/interaction/user-approval/src/index.ts:26`；`scopeTarget()` 定义：`packages/core/scope/src/scoped-events.generated.ts:23`。
+[^9]: 全仓事件收发表：`docs/event-producer-consumer.md:24`。
+[^10]: ACP 桥认领判据：`packages/acp/acp/src/index.ts:215-217`；api-proxy 认领逻辑：`packages/host/apiproxy/src/api-proxy.ts:1422`，转交同文件 `:1457`；组合位置：`packages/bundle/web-app/cordis.patch.yml:100`。
+[^11]: 审计写路径受 turn 提交/重放边界约束：`packages/interaction/user-approval/src/index.ts:259-265`、`:127-134`。
+[^12]: `never` 短路写在服务里的理由（源码注释）：`packages/interaction/user-approval/src/index.ts:307-312`。
+[^13]: 抛错先进 promise 链：`packages/interaction/user-approval/src/index.ts:317`；非法返回值归一化：`:325-328`。
+[^14]: 工具管线 `ask` 决策的调用点：`packages/core/tools/src/index.ts:1693-1699`。
+[^15]: `approveEscalation()` 实现与四种结果分支：`packages/sandbox/sandbox/src/escalation.ts:157-189`，分支在 `:180-187`。
+[^16]: 传入点：`dsh-tool-bash`——`packages/shell/tool-bash/src/index.ts:226`；`dsh-tool-fs`——`packages/fs/tool-fs/src/sandbox.ts:100`。
+[^17]: `setApprovalPolicy()` 写路径：`packages/interaction/user-approval/src/index.ts:142-147`。
+[^18]: `setPolicy(agent, policy)`：`packages/interaction/user-approval/src/index.ts:226-237`。
+[^19]: 源码常量位置：`packages/interaction/user-approval/src/index.ts:102`、`:100`；README 中相同文本：`packages/interaction/user-approval/README.md:26`、`:32`。
+[^20]: 切换通知文案：`packages/interaction/user-approval/src/index.ts:233`。
+[^21]: Tool outcome 一节：`packages/interaction/user-approval/README.md:43-47`。
+[^22]: Token effect：`packages/interaction/user-approval/README.md:37`。
+[^23]: KV Cache effect：`packages/interaction/user-approval/README.md:41`。
+[^24]: README 原文位置：`packages/interaction/user-approval/README.md:9`。
+[^25]: Known Limitations and Deferred Work：`packages/interaction/user-approval/README.md:57-62`。

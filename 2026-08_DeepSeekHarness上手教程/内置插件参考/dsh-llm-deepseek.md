@@ -1,6 +1,6 @@
 # llm-deepseek
 
-> `@deepseek-ai/dsh-llm-deepseek` · bundle：`base` · 配置树 id：`llm-deepseek` · v0.1.0-rc.5（commit `47f9438`）2026-08-14 核对
+> `@deepseek-ai/dsh-llm-deepseek` · bundle：`base` · 配置树 id：`llm-deepseek` · v0.1.0-rc.5（commit `47f9438`）2026-08-14 核对。出处收在文末脚注。
 
 **一句话**：原生 DeepSeek adapter，用裸 `fetch` + `eventsource-parser` 解 SSE，独占 `deepseek-official` 这一条 provider 路由——也就是 [agent-default-model](./dsh-agent-default-model.md) 出厂默认指向的那一条。
 
@@ -15,21 +15,19 @@
       name: '@deepseek-ai/dsh-llm-deepseek'
 ```
 
-这段正好是 base bundle 的最后一行，全文 451 行，它占 `446-451`。
+这段正好是 base bundle 的最后一行，全文 451 行，它占最后六行[^1]。
 
 注意它**不带 config**，所以下面那张配置表里的默认值，就是它实际跑起来的值——没有任何一行 bundle 配置在中间改写。
 
-源码级 `inject = ['llm']`，依赖 [llm](./dsh-llm.md) 提供的 `ctx.llm`。
-
-出处：bundle 那一段见 `packages/bundle/base/cordis.patch.yml:446-451`；`inject` 见 `packages/llm/llm-deepseek/src/index.ts:42`。
+源码级 `inject = ['llm']`[^2]，依赖 [llm](./dsh-llm.md) 提供的 `ctx.llm`。
 
 ## 它注册了什么
 
 | 类型 | 名字 | 说明 |
 |---|---|---|
-| adapter 路由 | `deepseek-official` | `ctx.llm.registerAdapter([PROVIDER], adapter)`，`src/index.ts:256`。路由名故意跟 pi-ai catalog 里的 `deepseek` 区分开，好让一套 composition 同时挂两条 DeepSeek 通路（`README.md:7`） |
-| configurable provider 目录项 | provider `deepseek-official`，`displayName: 'DeepSeek'`，`settingsNs: llm-deepseek`，`settingsPath: []` | `src/index.ts:251-253`。整个 section 就是 profile，所以 path 是空 |
-| settings section | 命名空间 `llm-deepseek`，schema 就是它自己的 `Config` | `installSettingsSection(...)`，`src/index.ts:270-275` |
+| adapter 路由 | `deepseek-official` | 通过 `ctx.llm.registerAdapter([PROVIDER], adapter)` 注册[^3]。路由名故意跟 pi-ai catalog 里的 `deepseek` 区分开，好让一套 composition 同时挂两条 DeepSeek 通路[^4] |
+| configurable provider 目录项 | provider `deepseek-official`，`displayName: 'DeepSeek'`，`settingsNs: llm-deepseek`，`settingsPath: []`[^5] | 整个 section 就是 profile，所以 path 是空 |
+| settings section | 命名空间 `llm-deepseek`，schema 就是它自己的 `Config` | 通过 `installSettingsSection(...)` 注册[^6] |
 
 它**不监听任何事件**——`src/` 下没有一处 `ctx.on`——也不注册工具、prompt 段、命令。
 
@@ -37,12 +35,12 @@
 
 ## 配置项
 
-schema 在 `src/index.ts:91-101`，字段注释在 `:62-81`：
+配置项 schema 与字段注释定义如下[^7]：
 
 | 字段 | 类型 | 默认值 | 作用 |
 |---|---|---|---|
 | `apiKeyEnv` | string（role `credential-ref`） | `DEEPSEEK_API_KEY` | 凭据**引用**（环境变量名），每次请求现解；配置里永远不放明文 key |
-| `baseURL` | string | 无 | 省略时依次退到 `$DEEPSEEK_BASE_URL`（只认可信环境层）、再到 `https://api.deepseek.com`（`:104-107`） |
+| `baseURL` | string | 无 | 省略时依次退到 `$DEEPSEEK_BASE_URL`（只认可信环境层）、再到 `https://api.deepseek.com`[^8] |
 | `thinking` | `enabled` \| `disabled` | 无（provider 默认 enabled） | 部署级思考锁；`disabled` 时只发布 `off` |
 | `reasoningEffort` | `off` \| `high` \| `max` | 省略 ⇒ `high` | 部署默认努力档；`high`/`max` 序列化成官方顶层 `reasoning_effort`，`off` 改发 `thinking.type: disabled` |
 | `maxTokens` | number ≥ 1 | `256000` | 每请求输出上限，属于 adapter 默认值，显式请求值优先 |
@@ -51,7 +49,7 @@ schema 在 `src/index.ts:91-101`，字段注释在 `:62-81`：
 | `streamIdleTimeoutMs` | number（正有限，≤ 定时器上限） | `300000` | 单次 provider 读的空闲上限，不计消费者思考时间 |
 | `retryPolicy` | `RetryPolicyConfig` | 省略 ⇒ normal 默认 | 注册时被 `ctx.llm` 抓取冻结，由 [llm-retry](./dsh-llm-retry.md) 执行 |
 
-三个默认值常量长这样：
+三个默认值常量长这样[^9]：
 
 ```
 DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000
@@ -59,11 +57,9 @@ DEFAULT_CONTEXT_WINDOW        = 1_000_000
 DEFAULT_MAX_TOKENS            = 256_000
 ```
 
-全在 `src/adapter.ts:89-93`。
-
 ### 连接事实不在装载时冻结
 
-`resolveAdapterOptions` 是唯一的解析步骤，adapter 通过 thunk **每次操作重读一遍**：
+`resolveAdapterOptions` 是唯一的解析步骤，adapter 通过 thunk **每次操作重读一遍**[^10]：
 
 ```
 每次操作:
@@ -79,11 +75,9 @@ DEFAULT_MAX_TOKENS            = 256_000
 
 所以 settings 文档里的 `llm-deepseek:` section 覆盖 bundle 那一行，改完下一次请求生效，不用重启；正在流的那次请求保留它开始时的事实。
 
-但同样的容错**不适用于 bundle 自己的 entry config**：那里出错是直接装载失败（`README.md:54`）。
+但同样的容错**不适用于 bundle 自己的 entry config**：那里出错是直接装载失败[^11]。
 
-出处：thunk 与解析 `src/index.ts:200-223`；坏快照回退到上一份好配置 `src/index.ts:212-221`。
-
-唯一在注册时被捕获的事实是 retry policy，所以它变了要原地 `registration.replace([PROVIDER])`——同一个 adapter 实例、一个同步段，避免中间出现空路由集被观察者看到（`src/index.ts:258-268`）。
+唯一在注册时被捕获的事实是 retry policy，所以它变了要原地 `registration.replace([PROVIDER])`——同一个 adapter 实例、一个同步段，避免中间出现空路由集被观察者看到[^12]。
 
 这两条时间线（每次调用现读 vs 注册那一刻冻结）拆开看更清楚：
 
@@ -118,11 +112,11 @@ flowchart TD
 
 ## 模型看得见什么
 
-README 的 Model Experience 分请求 / 响应两半（`README.md:79-107`）。
+README 的 Model Experience 分请求 / 响应两半[^13]。
 
 请求侧：所选模型收到 harness system prompt、消息历史、工具 schema、stop 序列和 call config。**adapter 自己不加任何 prompt 文字**——它只是搬运。
 
-关键的一条是 reasoning 回传规则（`README.md:72`）：
+关键的一条是 reasoning 回传规则[^14]：
 
 > **Reasoning passback rule**: on assistant turns that carried tool calls, `reasoning_content` is serialized back in history (required by the API in thinking mode); on tool-call-free turns it is dropped (ignored anyway — saves tokens).
 
@@ -138,7 +132,7 @@ KV cache：未变的前缀可复用，adapter 在 usage 里回报——`cacheRea
 
 换模型或换路由等于换 cache 域，这一点在算命中率的时候容易忘。
 
-另外两个模型看不见、但会出现在 HTTP 头上的东西：
+另外两个模型看不见、但会出现在 HTTP 头上的东西[^15]：
 
 | 头 | 何时出现 | 内容 |
 |---|---|---|
@@ -146,34 +140,32 @@ KV cache：未变的前缀可复用，adapter 在 usage 里回报——`cacheRea
 | `x-deepseek-harness-session-id` | 携带 `GenerateOptions.sessionId` 时 | 会话 id |
 | `x-deepseek-harness-compact: 1` | compaction 请求专有 | 固定值 1 |
 
-出处：`README.md:63-65`。
-
 ## 什么时候你会想换掉它 / 怎么换
 
 - **只想换 endpoint / key**：别动 composition，写 `$DSH_HOME/settings.yaml` 的 `llm-deepseek:` section（Web 的 Models 页写的就是它），热生效。
 - **想接 OpenAI 兼容网关或别家模型**：不要改这个包，用 [llm-pi-ai](./dsh-llm-pi-ai.md)——它默认休眠，加一段 `llm-pi-ai:` profiles 就活。两者可以并存，因为路由名 `deepseek-official` 与 `deepseek` 不撞。
 - **想改重试**：在这一行的 `config.retryPolicy` 上写，执行者是 [llm-retry](./dsh-llm-retry.md)；`retryPolicy` 写到 llm-retry 那一行上会被它显式拒绝。
-- **想彻底摘掉**：patch 层**不能删行**，只能按 id 覆盖 config 或 insert（`packages/boot/app-boot/README.md:43`）。正确写法是在 profile 的 `cordis.patch.yml` 里把这一行停掉：
+- **想彻底摘掉**：patch 层**不能删行**，只能按 id 覆盖 config 或 insert[^16]。正确写法是在 profile 的 `cordis.patch.yml` 里把这一行停掉：
 
 ```yaml
 - id: llm-deepseek
   disabled: true
 ```
 
-`disabled` 是 patch 的合法字段（`vendor/include/src/index.ts:151`），被停掉的 entry 不会 mount（`vendor/loader/src/config/entry.ts:126`）。
+`disabled` 是 patch 的合法字段[^17]，被停掉的 entry 不会 mount[^18]。
 
 停掉之后 `ctx.llm` 仍在，只是没有 `deepseek-official` 路由——于是 agent-default-model 的出厂默认就指向了一条不存在的路由。摘之前先想好谁来顶。
 
 ## 坑与边界
 
-`README.md:109-114` 的 Known Limitations and Deferred Work：
+以下坑点来自 Known Limitations and Deferred Work 一节[^19]：
 
 - **settings 里的 `models` 列表是整份替换**：settings 层按字段合并，数组算一个字段。
 - **`tool_choice` 没有映射**（MVP 裁掉，与 pi-ai 双胞胎共享这个缺口）。
 - **用裸 `fetch` 而不是 `@cordisjs/plugin-http`**：没有共享的代理/拦截配置（`TODO(http)`）。
 - **序列化把 user 与 tool-result 内容压平成文本块**：插件新增的块类型被跳过，空的工具输出以字面量 `(no output)` 过线。
 
-读源码补充：HTTP 错误码映射是**稳定可路由**的，不要去 parse 文案（`src/adapter.ts:138-149`）——判定顺序是一条链，命中就停：
+读源码补充：HTTP 错误码映射是**稳定可路由**的，不要去 parse 文案[^20]——判定顺序是一条链，命中就停：
 
 ```mermaid
 flowchart TD
@@ -204,15 +196,44 @@ flowchart TD
 
 链上有两处容易被直觉带偏：`AUTH` 排最先；`QUOTA` 不看状态码，而且比 429 分支还靠前判。如果你按"先看状态码"的习惯去读，就会把配额错认成 `RATE_LIMIT`。
 
-HTTP 之外还有几类错误，各有自己的出处：
+HTTP 之外还有几类错误：
 
-| 情形 | 错误码 | 出处 |
-|---|---|---|
-| 传输层失败 | `TRANSPORT`（链上 `cause` 保留原始 DNS/TLS/ECONNREFUSED） | `src/adapter.ts:258` |
-| SSE 协议违规 | `STREAM_CLOSED` | `src/sse.ts:39` |
-| 响应结构不对 | `MALFORMED_RESPONSE` | `src/translate.ts:124` |
-| `stop` 却一个内容块都没开的退化完成 | `EMPTY_RESPONSE`（默认策略会重试） | `src/translate.ts:113` |
+| 情形 | 错误码 |
+|---|---|
+| 传输层失败 | `TRANSPORT`（链上 `cause` 保留原始 DNS/TLS/ECONNREFUSED）[^21] |
+| SSE 协议违规 | `STREAM_CLOSED`[^22] |
+| 响应结构不对 | `MALFORMED_RESPONSE`[^23] |
+| `stop` 却一个内容块都没开的退化完成 | `EMPTY_RESPONSE`（默认策略会重试）[^24] |
 
-最后一个特殊情况：key 解析不到时报 `MISSING_CREDENTIAL`，但**路由仍然注册、目录仍可浏览**（`src/index.ts:241-245`）。
+最后一个特殊情况：key 解析不到时报 `MISSING_CREDENTIAL`，但**路由仍然注册、目录仍可浏览**[^25]。
 
-这是故意的——首次上手就是「先浏览模型、再存 key、再提问」，中间不用重启（`README.md:55`）。
+这是故意的——首次上手就是「先浏览模型、再存 key、再提问」，中间不用重启[^26]。
+
+## 出处
+
+[^1]: `packages/bundle/base/cordis.patch.yml:446-451`。
+[^2]: `packages/llm/llm-deepseek/src/index.ts:42`。
+[^3]: `src/index.ts:256`。
+[^4]: `README.md:7`。
+[^5]: `src/index.ts:251-253`。
+[^6]: `src/index.ts:270-275`。
+[^7]: schema 在 `src/index.ts:91-101`，字段注释在 `:62-81`。
+[^8]: `src/index.ts:104-107`。
+[^9]: `src/adapter.ts:89-93`。
+[^10]: thunk 与解析在 `src/index.ts:200-223`；坏快照回退到上一份好配置的逻辑在 `:212-221`。
+[^11]: `README.md:54`。
+[^12]: `src/index.ts:258-268`。
+[^13]: `README.md:79-107`。
+[^14]: `README.md:72`。
+[^15]: `README.md:63-65`。
+[^16]: `packages/boot/app-boot/README.md:43`。
+[^17]: `vendor/include/src/index.ts:151`。
+[^18]: `vendor/loader/src/config/entry.ts:126`。
+[^19]: `README.md:109-114`。
+[^20]: `src/adapter.ts:138-149`。
+[^21]: `src/adapter.ts:258`。
+[^22]: `src/sse.ts:39`。
+[^23]: `src/translate.ts:124`。
+[^24]: `src/translate.ts:113`。
+[^25]: `src/index.ts:241-245`。
+[^26]: `README.md:55`。

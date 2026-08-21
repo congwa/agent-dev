@@ -115,9 +115,8 @@ flowchart TD
 
 **明确的拒绝声明。** 这不是"还没做"，是设计决策，写在 README 里并附了论证链接。
 
-`packages/coding-agent/README.md:498`
-
 ```markdown
+<!-- packages/coding-agent/README.md:498 -->
 **No MCP.** Build CLI tools with READMEs (see [Skills](#skills)), or build an extension
 that adds MCP support. [Why?](https://mariozechner.at/posts/2025-11-02-what-if-you-dont-need-mcp/)
 ```
@@ -170,9 +169,8 @@ flowchart LR
 
 Pi 启动时扫描所有 skill 位置，**只把 name/description/路径注入系统提示**：
 
-`packages/coding-agent/src/core/skills.ts:335`
-
 ```typescript
+// packages/coding-agent/src/core/skills.ts:335
 export function formatSkillsForPrompt(skills: Skill[]): string {
 	const visibleSkills = skills.filter((s) => !s.disableModelInvocation);
 	if (visibleSkills.length === 0) return "";
@@ -198,15 +196,14 @@ export function formatSkillsForPrompt(skills: Skill[]): string {
 
 三行 XML 一个 skill，常驻成本大约几十 token。`docs/skills.md` 把这个模式直接命名了：**"This is progressive disclosure: only descriptions are always in context, full instructions load on-demand."**
 
-注意这段代码只在 `read` 工具可用时才被调用（`system-prompt.ts:65` 的 `customPromptHasRead && skills.length > 0`）——因为整个机制的前提就是模型能读文件。
+注意这段代码只在 `read` 工具可用时才被调用（要求存在自定义系统提示且技能列表非空）[^1]——因为整个机制的前提就是模型能读文件。
 
 同一份文档也诚实地写了这个方案的软肋："models don't always do this; use prompting or `/skill:name` to force it"。**没有 schema 强制，就没有确定性**。这是拿可靠性换上下文。
 
 **逃生舱：扩展可以自己接 MCP。** `ExtensionAPI` 提供了完整的动态工具能力：
 
-`packages/coding-agent/src/core/extensions/types.ts:1331`
-
 ```typescript
+// packages/coding-agent/src/core/extensions/types.ts:1331
 	/** Get the list of currently active tool names. */
 	getActiveTools(): string[];
 
@@ -217,7 +214,7 @@ export function formatSkillsForPrompt(skills: Skill[]): string {
 	setActiveTools(toolNames: string[]): void;
 ```
 
-配合 `registerTool()`（`types.ts:1246`，可在 `session_start` 之后任意时刻调用，见 `examples/extensions/dynamic-tools.ts`），写一个 MCP client 扩展在技术上完全可行：连 server、`tools/list`、把每个 MCP tool 转成 `pi.registerTool({ name, description, parameters, execute })`。
+配合 `registerTool()`[^2]（可在 `session_start` 之后任意时刻调用），写一个 MCP client 扩展在技术上完全可行：连 server、拉取工具列表、把每个 MCP tool 转成一个新注册的工具（携带名字、描述、参数与执行函数）。
 
 更有意思的是 `examples/extensions/kimi-deferred-tools.ts`——它演示了**在 Pi 里手搓 tool search**。机制只有三步：
 
@@ -292,11 +289,10 @@ flowchart TD
 
 ### 3.2 机制拆解
 
-**配置面。** 配置根键是 `[mcp_servers.<name>]`（`config/src/config_toml.rs:260`），单个 server 的字段相当丰富：
-
-`codex-rs/config/src/mcp_types.rs:161`
+**配置面。** 配置根键是 `[mcp_servers.<name>]`[^3]，单个 server 的字段相当丰富：
 
 ```rust
+// codex-rs/config/src/mcp_types.rs:161
 pub struct McpServerConfig {
     #[serde(flatten)]
     pub transport: McpServerTransportConfig,
@@ -337,15 +333,14 @@ pub struct McpServerConfig {
 | `supports_parallel_tool_calls` | 是**用户对 server 的信任声明**，因为协议里没有可靠的并发安全标记 |
 | `tools: HashMap<String, McpServerToolConfig>` | 让审批模式可以精确到单个工具名 |
 
-默认超时在 `codex-mcp/src/rmcp_client.rs:91`：启动 30 秒、工具调用 300 秒。
+默认超时[^4]：启动 30 秒、工具调用 300 秒。
 
-传输层就是协议规定的两种（`mcp_types.rs:463`）：`Stdio { command, args, env, env_vars, cwd }` 和 `StreamableHttp { url, bearer_token_env_var, http_headers, env_http_headers }`。注意 bearer token 存的是**环境变量名**而不是值——注释写得很清楚："The actual secret value must be provided via the environment."
+传输层就是协议规定的两种[^5]：stdio 传输记录命令、参数、环境变量与工作目录，Streamable HTTP 传输记录 URL、bearer token 的环境变量名与 HTTP 头。注意 bearer token 存的是**环境变量名**而不是值——注释写得很清楚："The actual secret value must be provided via the environment."
 
 **第一层降本：工具过滤。** `enabled_tools` / `disabled_tools` 的语义在代码里定义得毫不含糊：
 
-`codex-rs/codex-mcp/src/tools.rs:63`
-
 ```rust
+// codex-rs/codex-mcp/src/tools.rs:63
 /// A tool is allowed to be used if both are true:
 /// 1. enabled is None (no allowlist is set) or the tool is explicitly enabled.
 /// 2. The tool is not explicitly disabled.
@@ -369,7 +364,7 @@ impl ToolFilter {
 
 同一个文件里还有一个容易被忽略但很重要的问题：**命名冲突和长度限制**。
 
-`normalize_tools_for_model_with_prefix()`（`tools.rs:113`）要保证每个模型可见的工具名唯一且 ≤ 64 字节——两个 server 都叫 `search` 怎么办、server 名太长怎么办，它用 sanitize + 必要时 SHA1 哈希来解决，同时把**原始的 `server_name` / `tool.name` 保留在 `ToolInfo` 上**用于回传给 server。这是任何 MCP client 都躲不掉的一层翻译。
+`normalize_tools_for_model_with_prefix()`[^6] 要保证每个模型可见的工具名唯一且 ≤ 64 字节——两个 server 都叫 `search` 怎么办、server 名太长怎么办，它用 sanitize + 必要时 SHA1 哈希来解决，同时把**原始的 server 名与工具名保留在 `ToolInfo` 上**用于回传给 server。这是任何 MCP client 都躲不掉的一层翻译。
 
 **第二层降本：按需启动。** 这是 Codex 对"常驻税"最有意思的回应。每一轮开始时，Codex 先扫一遍用户输入，判断这一轮**到底需要哪些 server**：
 
@@ -382,9 +377,8 @@ required_servers = 空集合
 
 三个来源，一个集合，实现如下：
 
-`codex-rs/core/src/session/turn.rs:628`
-
 ```rust
+// codex-rs/core/src/session/turn.rs:628
 async fn required_mcp_servers_for_input(
     sess: &Arc<Session>,
     turn_context: &TurnContext,
@@ -413,7 +407,7 @@ async fn required_mcp_servers_for_input(
 }
 ```
 
-这份名单一路传到 `capture_step_context_with_required_mcp_servers()`（`session/mod.rs:3076`），最终决定"这一轮愿意为哪些 server 的启动**阻塞等待**"。判定只有四行：
+这份名单一路传到 `capture_step_context_with_required_mcp_servers()`[^7]，最终决定"这一轮愿意为哪些 server 的启动**阻塞等待**"。判定只有四行：
 
 ```
 must_wait = 在必需名单里
@@ -425,9 +419,8 @@ if not must_wait:             只等 1 秒（OPTIONAL_MCP_STARTUP_GRACE），没
 else:                         一直等，上限是它自己的 startup_timeout_sec
 ```
 
-`codex-rs/codex-mcp/src/connection_manager/tool_catalog.rs:186`
-
 ```rust
+// codex-rs/codex-mcp/src/connection_manager/tool_catalog.rs:186
     let required = self.required_servers.binary_search(server_name).is_ok();
     let has_cached_tools = view.connection.client.has_cached_tools();
     let must_wait_for_startup = required
@@ -447,7 +440,7 @@ else:                         一直等，上限是它自己的 startup_timeout_
     let _ = view.connection.client.client().await;   // 必需的，无限等到 startup_timeout_sec
 ```
 
-缓存那一档用的是 `McpToolCatalogCache`：进程内 LRU，容量 32、TTL 30 分钟（`tool_catalog_cache.rs:28`）。三档判定画成决策树更直观：
+缓存那一档用的是 `McpToolCatalogCache`：进程内 LRU，容量 32、TTL 30 分钟[^8]。三档判定画成决策树更直观：
 
 ```mermaid
 flowchart TD
@@ -480,7 +473,7 @@ flowchart TD
 
 **第三层降本：`defer_loading` 与 tool search。** 这是最彻底的一层。
 
-Codex 的工具注册表里每个工具有一个 `ToolExposure`（`tools/src/tool_executor.rs:51`，六态：`Direct` / `Deferred` / `DeferredModelOnly` / `DirectModelOnly` / `CodeModeOnly` / `Hidden`）。MCP 工具的曝光度算法只有一个开关：
+Codex 的工具注册表里每个工具有一个 `ToolExposure`[^9]，六态：`Direct` / `Deferred` / `DeferredModelOnly` / `DirectModelOnly` / `CodeModeOnly` / `Hidden`。MCP 工具的曝光度算法只有一个开关：
 
 ```
 if tool search 开着 且 这个工具带 DEFERRED 且 (当前不是 CodeModeOnly 模式 or 工具支持 CODE_MODE):
@@ -491,9 +484,8 @@ else:
 // 撤完之后 DIRECT 与 DEFERRED 必然互斥，同时为真是 unreachable!
 ```
 
-`codex-rs/core/src/tools/spec_plan.rs:222`
-
 ```rust
+// codex-rs/core/src/tools/spec_plan.rs:222
         exposures = if search_tool_enabled(turn_context)
             && exposures.contains(ToolExposures::DEFERRED)
             && (effective_tool_mode(turn_context) != ToolMode::CodeModeOnly
@@ -519,15 +511,16 @@ else:
         };
 ```
 
-**只要 tool search 开着，MCP 工具就整体从初始工具列表里消失**，改由模型主动搜索发现。落到线上就是 `ResponsesApiTool` 上的 `defer_loading: Some(true)` 字段（`tools/src/responses_api.rs:162`），由 provider 侧按需展开完整 schema。
+**只要 tool search 开着，MCP 工具就整体从初始工具列表里消失**，改由模型主动搜索发现。落到线上就是 `ResponsesApiTool` 上的 `defer_loading` 字段被置为真[^10]，由 provider 侧按需展开完整 schema。
 
-还有一个兜底的硬限制：agent plugin 来源的 MCP 工具，序列化后超过 `MAX_SERIALIZED_MCP_TOOL_BYTES = 8_000` 字节，就把 `parameters` 整个换成一个 `additionalProperties: true` 的空对象（`responses_api.rs:136`）。宁可让模型丢失参数细节，也不允许单个工具吃掉 8KB。
+还有一个兜底的硬限制：agent plugin 来源的 MCP 工具，序列化后超过 8000 字节（`MAX_SERIALIZED_MCP_TOOL_BYTES`），就把参数整个换成一个允许任意属性的空对象[^11]。宁可让模型丢失参数细节，也不允许单个工具吃掉 8KB。
 
 `omit_tools_from` 配置项正好对应这三个 surface（`Direct` / `Deferred` / `CodeMode`），让用户可以说"这个 server 的工具不要进初始列表，但允许被搜到"。
 
-**审批：四档模式 + 注解。** 审批模式定义在 `mcp_types.rs:25`：
+**审批：四档模式 + 注解。** 审批模式定义如下：
 
 ```rust
+// codex-rs/config/src/mcp_types.rs:25
 pub enum AppToolApproval {
     #[default]
     Auto,
@@ -546,9 +539,10 @@ pub enum AppToolApproval {
 | `Writes` | 信任 server 声明的 `read_only_hint`，缺失时按"要审批"处理（fail-closed） |
 | `Auto`（默认） | 交给内建启发式 |
 
-对应实现在 `codex-rs/core/src/mcp_tool_call.rs:2179`：
+对应实现如下：
 
 ```rust
+// codex-rs/core/src/mcp_tool_call.rs:2179
 fn requires_mcp_tool_approval_for_mode(
     annotations: Option<&ToolAnnotations>,
     approval_mode: AppToolApproval,
@@ -595,7 +589,7 @@ flowchart TD
     class AP6 danger
 ```
 
-审批决策还能记忆：`McpToolApprovalPolicy` 带一个 `allow_persistent` 字段（`mcp_tool_call.rs:1018`），server 级审批可以持久化到配置，而"临时选中的 plugin"的审批用 `for_selected_plugin()` 构造，`allow_persistent: false`——**临时授权不会变成永久授权**。
+审批决策还能记忆：`McpToolApprovalPolicy` 带一个 `allow_persistent` 字段[^12]，server 级审批可以持久化到配置，而"临时选中的 plugin"的审批用 `for_selected_plugin()` 构造，把这个字段设为假——**临时授权不会变成永久授权**。
 
 同一条路径上还串了 hooks（`run_permission_request_hooks`）和一个可选的 "guardian" 自动审查者（`ApprovalsReviewer::AutoReview`），可以让另一个模型来判断这次调用该不该放行。
 
@@ -603,9 +597,8 @@ flowchart TD
 
 CLI 侧是 `codex mcp login <name>`：
 
-`codex-rs/cli/src/mcp_cmd.rs:486`
-
 ```rust
+// codex-rs/cli/src/mcp_cmd.rs:486
 async fn run_login(config: &Config, login_args: LoginArgs) -> Result<()> {
     // ...
     let (url, http_headers, env_http_headers) = match &server.transport {
@@ -627,13 +620,12 @@ async fn run_login(config: &Config, login_args: LoginArgs) -> Result<()> {
 
 注意函数名里的 `retry_without_scopes`——有些 server 不接受 `scope` 参数，第一次失败后要不带 scope 重试。这类兼容性补丁是"全面拥抱一个新协议"的真实成本。
 
-错误信息也做了针对性处理，`connection_manager/startup.rs:76` 的 `mcp_init_error_display()` 里有三条专门的分支：GitHub Copilot MCP 不支持 OAuth（直接告诉用户去建 personal access token 并给出 `config.toml` 片段）、"Auth required" 时提示跑 `codex mcp login <name>`、超时时提示调大 `startup_timeout_sec` 并把当前值填进去。
+错误信息也做了针对性处理，`mcp_init_error_display()`[^13] 里有三条专门的分支：GitHub Copilot MCP 不支持 OAuth（直接告诉用户去建 personal access token 并给出配置片段）、"Auth required" 时提示跑 `codex mcp login <name>`、超时时提示调大 `startup_timeout_sec` 并把当前值填进去。
 
 **resources：三个独立工具，且只在有 server 时注册。**
 
-`codex-rs/core/src/tools/spec_plan.rs:951`
-
 ```rust
+// codex-rs/core/src/tools/spec_plan.rs:951
 fn add_mcp_resource_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistry) {
     if context.mcp.has_servers() {
         registry.add(ListMcpResourcesHandler);
@@ -645,13 +637,12 @@ fn add_mcp_resource_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
 
 一行 `if` 省掉三个工具的 schema——没配 MCP server 的用户不为 MCP 付任何 token。
 
-`list_mcp_resources` 的参数是 `{ server?, cursor? }`：不给 `server` 就聚合列出所有 server 的资源，给了才能用 `cursor` 翻页（`mcp_resource.rs:88` 明确拒绝"给 cursor 但不给 server"）。
+`list_mcp_resources` 的参数是可选的 `server` 与 `cursor`：不给 `server` 就聚合列出所有 server 的资源，给了才能用 `cursor` 翻页[^14]（明确拒绝"给 cursor 但不给 server"）。
 
-**反向：Codex 自己当 MCP server。** `codex mcp-server` 把 Codex 引擎暴露成一个 MCP server，让别的 agent 能把 Codex 当工具用。它注册的模型可见工具只有两个：`codex`（启动一个会话）和 `codex-reply`（继续会话），定义在 `mcp-server/src/codex_tool_config.rs:106` 和 `:225`：
-
-`codex-rs/mcp-server/src/codex_tool_config.rs:117`
+**反向：Codex 自己当 MCP server。** `codex mcp-server` 把 Codex 引擎暴露成一个 MCP server，让别的 agent 能把 Codex 当工具用。它注册的模型可见工具只有两个[^15]：`codex`（启动一个会话）和 `codex-reply`（继续会话）：
 
 ```rust
+// codex-rs/mcp-server/src/codex_tool_config.rs:117
     Tool::new(
         "codex",
         "Run a Codex session. Accepts configuration parameters matching the Codex Config struct.",
@@ -663,15 +654,16 @@ fn add_mcp_resource_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
 
 调用 `codex` 会返回一个标准 `CallToolResult`，同时把 `threadId` 镜像进 `structuredContent`，客户端拿这个 id 去调 `codex-reply` 继续对话。执行过程中的审批走 MCP 的反向请求（`applyPatchApproval` / `execCommandApproval`，见 `mcp-server/src/{patch_approval,exec_approval}.rs`），客户端回 `{ decision: "allow" | "deny" }`。
 
-`codex-rs/docs/codex_mcp_interface.md:5` 第一句就是：
+`codex_mcp_interface.md` 文档第一句就是：
 
 ```markdown
+<!-- codex-rs/docs/codex_mcp_interface.md:5 -->
 - Status: experimental and subject to change without notice
 ```
 
 这跟 `codex app-server` 的关系需要说清楚，而且**文档和代码在这里对不上**。
 
-`codex_mcp_interface.md` 声称 mcp-server 暴露 `thread/*` `turn/*` `account/*` `config/*` 一整套 v2 RPC，类型来自 `app-server-protocol/src/protocol/{common,v1,v2}.rs`。但 `mcp-server/Cargo.toml` 里**根本没有依赖 `codex-app-server-protocol` 或 `codex-app-server`**（它直接依赖 `codex-core` + `rmcp`），`message_processor.rs` 的方法分发里也 grep 不到任何 `thread/` 或 `turn/` 前缀——未识别的方法统一走 `handle_unsupported_request()`（`message_processor.rs:518`）。
+`codex_mcp_interface.md` 声称 mcp-server 暴露 `thread/*` `turn/*` `account/*` `config/*` 一整套 v2 RPC，类型来自 `app-server-protocol` 的协议定义。但 `mcp-server` 的依赖清单里**根本没有 `codex-app-server-protocol` 或 `codex-app-server`**（它直接依赖 `codex-core` + `rmcp`），方法分发代码里也 grep 不到任何 `thread/` 或 `turn/` 前缀——未识别的方法统一走 `handle_unsupported_request()`[^16]。
 
 实际形态是：`mcp-server` 是一个**独立的、直接架在 `codex-core` 上的 MCP server**，只实现标准 MCP 方法（`initialize` / `tools/list` / `tools/call` / `resources/*` / `prompts/*` …）加上 `codex` / `codex-reply` 两个工具；`app-server` 才是那套 `thread/*` `turn/*` v2 RPC 的宿主，走自己的传输（stdio / websocket / unix socket + 健康探针），供 VS Code 扩展这类富客户端使用。
 
@@ -699,9 +691,8 @@ fn add_mcp_resource_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
 
 **适配器的全部工作就是一次类型转换。** `langchain-mcp-adapters` 的核心函数：
 
-`langchain_mcp_adapters/tools.py:357`
-
 ```python
+# langchain_mcp_adapters/tools.py:357
 def convert_mcp_tool_to_langchain_tool(
     session: ClientSession | None,
     tool: MCPTool,
@@ -794,11 +785,12 @@ flowchart LR
 | 中间件 | 做法 | 依赖 | 代价 |
 |---|---|---|---|
 | `ProviderToolSearchMiddleware` | 给指定工具打上 `extras["defer_loading"] = True`，再往 `tools` 里追加 provider 原生的 tool search 工具 | provider 支持 | 不支持的 provider 直接 `ValueError` |
-| `LLMToolSelectorMiddleware`（`tool_selection.py:123`） | 主模型调用前用小模型从 N 个工具里挑 ≤ `max_tools` 个，然后 `request.override(tools=...)` | 无 | 每轮多一次模型调用 |
+| `LLMToolSelectorMiddleware`[^17] | 主模型调用前用小模型从 N 个工具里挑 ≤ `max_tools` 个，然后替换生效的工具列表 | 无 | 每轮多一次模型调用 |
 
-provider 侧的映射表写死在 `langchain/agents/middleware/provider_tool_search.py:47`：
+provider 侧的映射表写死在如下位置：
 
 ```python
+# langchain/agents/middleware/provider_tool_search.py:47
 _SERVER_TOOL_SEARCH_TOOLS: dict[str, _ServerToolSearchSpec] = {
     "anthropic": {
         "type": "tool_search_tool_bm25_20251119",
@@ -898,27 +890,27 @@ flowchart LR
 
 **立场：全面拥抱，作为 client；对外暴露自己时不用 MCP，用 ACP。**
 
-在本章"全面拥抱 / adapter 接入 / 明确拒绝"的三分坐标上，Grok 落在 Codex 那一格，但底座选择相反——Codex 自研协议实现，Grok 用官方 rmcp SDK 2.1，还把它隔离在专用 crate 里。`xai-grok-mcp/Cargo.toml:6` 的描述原话是："Quarantines rmcp + reqwest 0.13 (rmcp 2.1 requires reqwest >= 0.13.2 while the rest of the workspace uses reqwest 0.12) and owns the MCP credential store and OAuth flow orchestrator."
+在本章"全面拥抱 / adapter 接入 / 明确拒绝"的三分坐标上，Grok 落在 Codex 那一格，但底座选择相反——Codex 自研协议实现，Grok 用官方 rmcp SDK 2.1，还把它隔离在专用 crate 里。`xai-grok-mcp` 的包描述原话是："Quarantines rmcp + reqwest 0.13 (rmcp 2.1 requires reqwest >= 0.13.2 while the rest of the workspace uses reqwest 0.12) and owns the MCP credential store and OAuth flow orchestrator."[^82]
 
 为了一个依赖的 reqwest 版本冲突单独开检疫区，工程洁癖可见一斑。
 
-**transport 与修补**：stdio / Streamable HTTP / SSE 三种配置级（`servers.rs:856-857, 4356-4366`）。
+**transport 与修补**：stdio / Streamable HTTP / SSE 三种配置级[^18]。
 
-值得注意的是它对上游 SDK 的两处自修：stdio 用自实现的 `SafeTokioChildProcess` 修 rmcp 的 Drop-spawn 问题（`servers.rs:2043-2231`）；HTTP 侧自带指数退避包装修 rmcp SSE 零退避重连（`mcp_http_client.rs`）。用官方 SDK 不等于免维护——协议实现的坑最终还是自己填。
+值得注意的是它对上游 SDK 的两处自修：stdio 用自实现的 `SafeTokioChildProcess` 修 rmcp 的 Drop-spawn 问题；HTTP 侧自带指数退避包装修 rmcp SSE 零退避重连[^19]。用官方 SDK 不等于免维护——协议实现的坑最终还是自己填。
 
-**企业侧三件套齐全**（对照第 1 节列的"接企业 server 的基础设施税"）：OAuth 完整（浏览器流 + 跨进程去重，`src/oauth.rs`），凭据落 `$GROK_HOME/mcp_credentials.json`；配置源含**仓库级 `.mcp.json`（Claude Code 兼容格式）**与 config.toml；工具命名 `server__tool` 双下划线拼接（`servers.rs:42-46`）。
+**企业侧三件套齐全**（对照第 1 节列的"接企业 server 的基础设施税"）：OAuth 完整（浏览器流 + 跨进程去重），凭据落 `$GROK_HOME/mcp_credentials.json`；配置源含**仓库级 `.mcp.json`（Claude Code 兼容格式）**与 config.toml；工具命名用双下划线拼接 `server__tool`[^20]。
 
 注意命名这一项**没有** Codex 那套 sanitize + SHA1 + ≤64 字节的长度处理（未见对应代码，长名/冲突行为未确认）。
 
-**上下文开销的答案与 Codex 同构**：`search_tool`（BM25 检索 MCP 工具）+ `use_tool`（按检索到的 schema 转发）二段式延迟加载（`implementations/search_tool/mod.rs:1`、`use_tool/mod.rs:1-27`），输出侧 `MCP_MAX_OUTPUT_BYTES = 20_000` **按字节**截断（`util/mcp_truncate.rs:34-42`，注释点名"Some agents use MAX_MCP_OUTPUT_TOKENS; we bound by bytes"）。
+**上下文开销的答案与 Codex 同构**：`search_tool`（BM25 检索 MCP 工具）+ `use_tool`（按检索到的 schema 转发）二段式延迟加载[^21]，输出侧的结果**按字节**截断，上限 20000 字节[^22]，注释点名"Some agents use MAX_MCP_OUTPUT_TOKENS; we bound by bytes"。
 
 第 7 节说"没有人会为不存在的问题写这么多代码"——第四个样本又写了一遍。
 
-**子 agent 的 MCP 继承是四家里做得最显式的**：spawn 时快照 `SharedMcpPool`，`Arc<McpClient>` 共享传输、工具 map 独立（`servers.rs:928-935`）；agent 定义可声明 `mcp_inheritance: All|None|Named|Except`（`xai-grok-agent/src/config.rs:935-941`）——把"子 agent 能看到哪些外部工具"做成了声明式配置，而不是隐式继承。
+**子 agent 的 MCP 继承是四家里做得最显式的**：spawn 时快照 `SharedMcpPool`，共享传输但工具 map 独立[^23]；agent 定义可声明继承模式（全部 / 无 / 按名单 / 排除）[^24]——把"子 agent 能看到哪些外部工具"做成了声明式配置，而不是隐式继承。
 
-**自身不当 MCP server**：CLI 子命令全集里没有 `mcp serve`（`pager/src/app/cli.rs:9-146`），对外暴露走 ACP（`grok agent stdio`）和 WebSocket。这和 Codex 的 `codex mcp-server` 形成对照——Grok 把"被嵌入"这件事整个押在了 ACP 上。
+**自身不当 MCP server**：CLI 子命令全集里没有 `mcp serve`[^25]，对外暴露走 ACP（`grok agent stdio`）和 WebSocket。这和 Codex 的 `codex mcp-server` 形成对照——Grok 把"被嵌入"这件事整个押在了 ACP 上。
 
-两个特殊变体：SDK 进程内 MCP **反向桥**（SDK 宿主进程里 `create_sdk_mcp_server` 定义的 server，agent 经 ACP 扩展方法 `x.ai/mcp/sdk_call` 反向调用，再适配成 rmcp transport，半双工、不支持 server→client 的 sampling/notifications，`acp_transport.rs:1-20`）；以及 `computer-hub-mcp-adapter`——把 MCP server 桥进 xAI 自家的远程工具路由基础设施 Computer Hub（local-shadows-remote 的 `CompoundResolver`，`xai-computer-hub-core/src/lib.rs:1-29`），对应 `grok workspace` 把本地工作区暴露给云端。
+两个特殊变体：SDK 进程内 MCP **反向桥**——SDK 宿主进程里 `create_sdk_mcp_server` 定义的 server，agent 经 ACP 扩展方法 `x.ai/mcp/sdk_call` 反向调用，再适配成 rmcp transport，半双工、不支持 server→client 的 sampling/notifications[^26]；以及 `computer-hub-mcp-adapter`——把 MCP server 桥进 xAI 自家的远程工具路由基础设施 Computer Hub（local-shadows-remote 的 `CompoundResolver`）[^27]，对应 `grok workspace` 把本地工作区暴露给云端。
 
 本节未确认：SSE 配置最终走独立传输还是统一降级到 Streamable HTTP（refresh 路径把 Http/Sse 同等映射 `HttpConfig`，初始建连路径未逐行核对）；MCP 工具名超长/冲突时的处理；`annotations.readOnlyHint` 是否参与审批决策未追查。
 
@@ -936,17 +928,17 @@ flowchart LR
 
 219 个 `packages/*/*` 包里**只有一个**依赖 `@modelcontextprotocol/sdk`（`^1.12.0`，`packages/mcp/mcp-client/package.json`）。`packages/mcp/mcp-client/src/` 共 5 个文件 929 行（`connection.ts` 351 / `tools.ts` 317 / `index.ts` 181 / `transport.ts` 50 / `invariant.ts` 30），配套测试 6 个文件 2,393 行——测试是实现的 2.6 倍。
 
-配置形态是第五种答案：**没有 `dsh mcp add` 这类子命令**（`apps/cli/src/args.ts` 只有 `profile` / `dump-config` / `plugin` 三个 mode，`args.ts:22,32,41`）。一个 MCP server 就是 `cordis.yml` 里一行插件 row，和 model adapter、tool、日志后端平级，`--patch` overlay 开关它（`examples/mcp-memory/README.md`）。
+配置形态是第五种答案：**没有 `dsh mcp add` 这类子命令**——CLI 只有 `profile` / `dump-config` / `plugin` 三个 mode[^28]。一个 MCP server 就是 `cordis.yml` 里一行插件 row，和 model adapter、tool、日志后端平级，用 `--patch` overlay 开关它[^29]。
 
-一实例一 server 是硬约定：`serverName` 必须匹配 `/^[A-Za-z0-9_-]{1,32}$/`（`index.ts:37`），重名的**后一个实例在 load 期直接抛错**，前一个不受影响（`index.ts:154-158`）。
+一实例一 server 是硬约定：`serverName` 必须匹配一个 1-32 字符的字母数字/下划线/连字符正则[^30]，重名的**后一个实例在 load 期直接抛错**，前一个不受影响[^31]。
 
 这正是"Everything is a Plugin"落到 MCP 上的样子——Codex 的 `[mcp_servers.<name>]` 是 harness 内部的一张表，dsh 的 MCP server 是插件树里一个可被 HMR 热换的节点。
 
-传输只有两种，就是协议规定的那两种（`transport.ts:31-49`）：`stdio` 与 `streamable-http`。没有 LangChain 那样的 `sse` / `websocket` 额外档位。
+传输只有两种，就是协议规定的那两种[^32]：`stdio` 与 `streamable-http`。没有 LangChain 那样的 `sse` / `websocket` 额外档位。
 
 ### 9.2 命名：和 Codex 撞出了同一个答案
 
-`publicToolName()`（`tools.ts:96-102`）是 `(serverName, rawName)` 的纯函数：干净情况就是 `mcp__<serverName>__<rawName>`；一旦字符替换或截断改变了名字，就追加 12 位 SHA-256 十六进制，上限 64 字符（`tools.ts:45,50-51,100-101`）。
+`publicToolName()`[^33] 是一个以 server 名与原始工具名为输入的纯函数：干净情况就是 `mcp__<serverName>__<rawName>`；一旦字符替换或截断改变了名字，就追加 12 位 SHA-256 十六进制，上限 64 字符[^34]。
 
 **和 Codex 的 sanitize + 哈希 + ≤64 字节几乎逐条对应**，只是哈希算法从 SHA1 换成 SHA-256。README 自己点破了这件事：
 
@@ -956,19 +948,19 @@ The model sees `mcp__github__create_issue`, `mcp__web__search`, … — the same
 server-qualified shape Claude Code and Codex use.
 ```
 
-对照表里 Grok 那格"`server__tool` 双下划线拼接、无长度处理"，dsh 站在 Codex 一边。原始 `rawName` 只走线（`tools/call`），公共名永远不被反解析（`tools.ts:6-10` 的模块注释写死了这条契约）。
+对照表里 Grok 那格"`server__tool` 双下划线拼接、无长度处理"，dsh 站在 Codex 一边。原始 `rawName` 只走线（调用 `tools/call` 时使用），公共名永远不被反解析——模块注释写死了这条契约[^35]。
 
 ### 9.3 它没做的那一栏，比做了的更能说明定位
 
 | 本章的坐标 | dsh 的答案 | 出处 |
 |---|---|---|
-| 常驻税缓解 | **一层都没有**。mcp-client 无工具过滤、无按需启动、无 `defer_loading`；tool search / 渐进式披露只在 cookbook 里作为"自己写"的扩展写法被点名（`docs/cookbook/extension-cookbook.md:113`），仓库无实现。通用的 `ctx.tools.restrict()` 只被子 agent 的 `toolFilter` 消费（`packages/subagent/subagent/src/child-agent.ts:174`），不是 MCP 的降本机制 | README 直说 "Data-dependent schema cost is paid on every request while the tools are registered"（`mcp-client/README.md:89`） |
-| 鉴权 | 只有静态 `headers`，**无 OAuth**（`index.ts:88`） | 与 LangChain 同格 |
-| resources / prompts / elicitation | 全无 | "Tools are the only bridged MCP capability — Resources and Prompts have no harness consumer and are deferred"（`README.md:111`） |
-| 审批粒度 | mcp-client 自己零审批；`annotations.readOnlyHint` **完全不读**（`tools.ts` 全文无 annotations）。要卡只能在通用 `tools/pre-execute` waterfall 上按工具名卡（`packages/core/tools/src/index.ts:152`） | 比 Codex 的四档粗，比 LangChain 多一个 waterfall 挂点 |
-| 单工具 schema 上限 | 无。`parameters: tool.inputSchema` 原样透传（`tools.ts:149`），而 `register()` 只校验 `output.schema`、**不校验 parameters**（`packages/core/tools/src/index.ts:1037-1045`） | 没有 Codex 的 8KB 兜底 |
-| 结果字节上限 | 无（`extractText` 直接 join，`tools.ts:288-317`）；靠通用 compaction / spill 兜 | 没有 Grok 的 `MCP_MAX_OUTPUT_BYTES` |
-| 启动延迟 | **反向于 Codex**：插件激活 `await connection.ready`（`index.ts:177`），初次连接 + `tools/list` 分页拉完才放行；连接/发现路径没有自己的超时，README 称吃 SDK 的 60 秒默认值 | `README.md:112` 自陈这是 Known Limitation |
+| 常驻税缓解 | **一层都没有**。mcp-client 无工具过滤、无按需启动、无 `defer_loading`；tool search / 渐进式披露只在 cookbook 里作为"自己写"的扩展写法被点名[^36]，仓库无实现。通用的 `ctx.tools.restrict()` 只被子 agent 的 `toolFilter` 消费[^37]，不是 MCP 的降本机制 | README 直说 "Data-dependent schema cost is paid on every request while the tools are registered"[^38] |
+| 鉴权 | 只有静态 `headers`，**无 OAuth**[^39] | 与 LangChain 同格 |
+| resources / prompts / elicitation | 全无 | "Tools are the only bridged MCP capability — Resources and Prompts have no harness consumer and are deferred"[^40] |
+| 审批粒度 | mcp-client 自己零审批；`annotations.readOnlyHint` **完全不读**（全文无消费点）。要卡只能在通用 `tools/pre-execute` waterfall 上按工具名卡[^41] | 比 Codex 的四档粗，比 LangChain 多一个 waterfall 挂点 |
+| 单工具 schema 上限 | 无。参数 schema 原样透传[^42]，而 `register()` 只校验输出 schema、**不校验参数 schema**[^43] | 没有 Codex 的 8KB 兜底 |
+| 结果字节上限 | 无——`extractText` 直接拼接[^44]；靠通用 compaction / spill 兜 | 没有 Grok 的 `MCP_MAX_OUTPUT_BYTES` |
+| 启动延迟 | **反向于 Codex**：插件激活要等连接就绪[^45]，初次连接加上工具列表分页拉完才放行；连接/发现路径没有自己的超时，README 称吃 SDK 的 60 秒默认值 | README 自陈这是 Known Limitation[^46] |
 
 最后一条值得单说：Codex 花大力气把可选 server 的启动阻塞压到 1 秒，dsh 反过来**让插件激活等 MCP server**。
 
@@ -978,10 +970,10 @@ server-qualified shape Claude Code and Codex use.
 
 本章第 1 节张力（二）说"server 是有生命周期的外部进程"，三家的回应分别是：Codex 给缓存 + 宽限期，Grok 给 SSE 退避补丁，LangChain 让你自己 `async with`。dsh 是唯一一个写了**完整监管器**的（`connection.ts` 整个文件）：
 
-- 默认策略 `{ enabled: true, initialDelayMs: 500, maxDelayMs: 30_000, maxAttempts: 10 }`（`connection.ts:40-45`）；
-- **稳定窗口**：连上并存活超过 `maxDelayMs` 才算"这次故障结束"，尝试预算清零（`connection.ts:203`）——所以偶发崩溃的 server 可以无限恢复，而"连上就崩"的 crash-loop server 照样耗尽 10 次上限、注销工具并停手（`connection.ts:206-214`）；
-- **generation 模型**：每次重连是一个新的 `Client` 世代，`isCurrent()` 守卫让 close/error 竞态幂等（`connection.ts:153,173-178`）；失败世代没在 5 秒内关掉就**停止重连**，宁可不恢复也不允许两个子进程重叠（`connection.ts:288-292`）；
-- **`notifications/tools/list_changed` 热重注册**：`syncTools()` 两阶段——先拉全量构建下一代，成功后才 dispose 上一代（`tools.ts:128-174`）；fetch 阶段失败则上一代原样留着继续服务；注册阶段冲突则整代回滚，"模型看到的要么是全集要么是空集，绝不是半个"（`tools.ts:164-172`）。
+- 默认策略是启用重连，初始延迟 500 毫秒、最大延迟 30 秒、最多尝试 10 次[^47]；
+- **稳定窗口**：连上并存活超过最大延迟才算"这次故障结束"，尝试预算清零[^48]——所以偶发崩溃的 server 可以无限恢复，而"连上就崩"的 crash-loop server 照样耗尽 10 次上限、注销工具并停手[^49]；
+- **generation 模型**：每次重连是一个新的 `Client` 世代，`isCurrent()` 守卫让 close/error 竞态幂等[^50]；失败世代没在 5 秒内关掉就**停止重连**，宁可不恢复也不允许两个子进程重叠[^51]；
+- **`notifications/tools/list_changed` 热重注册**：`syncTools()` 两阶段——先拉全量构建下一代，成功后才 dispose 上一代[^52]；fetch 阶段失败则上一代原样留着继续服务；注册阶段冲突则整代回滚，"模型看到的要么是全集要么是空集，绝不是半个"[^53]。
 
 那个两阶段换代写成伪代码就是三行：
 
@@ -1007,7 +999,7 @@ stateDiagram-v2
     CrashLoop --> [*]: 注销工具,停止重连
 ```
 
-代价老实写在 README 里：Streamable HTTP 的失败是按请求暴露的，监管器只对"传输关闭"起反应，所以**不可达的 HTTP server 是每次调用重试，而不是被重启**（`README.md:113`）。
+代价老实写在 README 里：Streamable HTTP 的失败是按请求暴露的，监管器只对"传输关闭"起反应，所以**不可达的 HTTP server 是每次调用重试，而不是被重启**[^54]。
 
 ### 9.5 凭据方向反转：不是"传什么"，是"删什么"
 
@@ -1020,41 +1012,41 @@ function buildChildEnv(extra: Record<string, string>): Record<string, string> {
 }
 ```
 
-`scrubbedParentEnv()` 按 `/KEY|PASSWORD|SECRET|TOKEN/i` 把所有像凭据的变量、以及全部 `DSH_*` 变量从子环境里删掉（`packages/subprocess/subprocess/src/index.ts:44,60-66`），再把配置里显式写的 `env` 合并回来。
+`scrubbedParentEnv()` 按一个匹配 KEY/PASSWORD/SECRET/TOKEN 的正则，把所有像凭据的变量、以及全部 `DSH_*` 变量从子环境里删掉[^55]，再把配置里显式写的 `env` 合并回来。
 
 这是本章四个样本都没出现过的一档：**对第三方 server 的环境默认 deny**。代价是启发式误伤（`MONKEY_TOKEN` 这种无辜变量也会被删），所以注释直说这是"one heuristic for every in-repo spawner"，被删掉的要在 `config.env` 里显式加回。
 
 ### 9.6 结果有两个投影：模型看文本，Code Mode 看原始 JSON
 
-MCP 的 `CallToolResult` 在 dsh 里被拆成两份：canonical 值 `{ content: JsonValue[], structuredContent? }` 完整保留协议块（`tools.ts:36-39`），而模型侧的 `render()` 把 image/audio/resource 全部换成占位符（`tools.ts:200-215,288-317`）。
+MCP 的 `CallToolResult` 在 dsh 里被拆成两份：canonical 值完整保留协议的 content 与 structuredContent 块[^56]，而模型侧的 `render()` 把 image/audio/resource 全部换成占位符[^57]。
 
-canonical 值**是 execution-local 的，"deliberately omitted from durable events"**（`packages/core/tools/src/index.ts:558`）——它给 Code Mode 和程序化调用者用，不进 session log、不进模型上下文。这是"图片太贵不给模型"与"程序化调用者需要完整数据"的一次显式分岔，Codex/LangChain 的 adapter 只有一份结果。
+canonical 值**是 execution-local 的，"deliberately omitted from durable events"**[^58]——它给 Code Mode 和程序化调用者用，不进 session log、不进模型上下文。这是"图片太贵不给模型"与"程序化调用者需要完整数据"的一次显式分岔，Codex/LangChain 的 adapter 只有一份结果。
 
-错误处理与本章第 6 节第 4 条一致：MCP `isError: true` → executor `throw`，由 ToolRuntime 转成给模型的 `isError` 结果（`tools.ts:266-269`）；传输/超时错误走 `client.request` 自己的 reject 路径。
+错误处理与本章第 6 节第 4 条一致：MCP 的执行错误 → executor 抛出，由 ToolRuntime 转成给模型的错误结果[^59]；传输/超时错误走请求本身的 reject 路径。
 
-另有一条别家没写的防御：server 声明 `execution.taskSupport === 'required'` 的工具直接拒绝执行并告诉模型原因（`tools.ts:151,235-237`）。
+另有一条别家没写的防御：server 声明任务支持为必需的工具会被直接拒绝执行，并告诉模型原因[^60]。
 
 ### 9.7 对外协议面：6 个 wire 协议 + 1 个自有 RPC 网关，MCP server 不在其中
 
 口径：跨进程 wire 协议，按"dsh 在哪一端"分。
 
-| # | 协议 | dsh 的角色 | 出处 |
-|---|---|---|---|
-| 1 | MCP（stdio / streamable-http） | **client** | `packages/mcp/mcp-client/` |
-| 2 | ACP（`@agentclientprotocol/sdk` 0.25.1，stdio） | **server**（automation-only） | `packages/acp/acp/package.json` |
-| 3 | ACP（同一 SDK 版本） | **client**，驱动子 agent | `packages/subagent/subagent-acp/package.json` |
-| 4 | 自有 SDK JSON-RPC（换行分隔，stdio） | **server**；另有 `subagent-dsh-sdk` 作 **client** 驱动子 harness | `packages/sdk/protocol/src/types.ts:100-105` |
-| 5 | Codex app-server 0.147.0 | **client**（手写，不用官方 SDK） | `packages/subagent/subagent-codex/src/wire.ts:2` |
-| 6 | Claude Agent SDK 0.3.220 | **client** | `packages/subagent/subagent-claude-code/package.json` |
-| 7 | Typert RPC over Connection `/api` | 自有类型驱动 RPC 网关，Web 前端 ↔ Host | `docs/api-gateway.md` |
+| # | 协议 | dsh 的角色 |
+|---|---|---|
+| 1 | MCP（stdio / streamable-http）[^61] | **client** |
+| 2 | ACP（`@agentclientprotocol/sdk` 0.25.1，stdio）[^62] | **server**（automation-only） |
+| 3 | ACP（同一 SDK 版本）[^63] | **client**，驱动子 agent |
+| 4 | 自有 SDK JSON-RPC（换行分隔，stdio）[^64] | **server**；另有 `subagent-dsh-sdk` 作 **client** 驱动子 harness |
+| 5 | Codex app-server 0.147.0[^65] | **client**（手写，不用官方 SDK） |
+| 6 | Claude Agent SDK 0.3.220[^66] | **client** |
+| 7 | Typert RPC over Connection `/api`[^67] | 自有类型驱动 RPC 网关，Web 前端 ↔ Host |
 
-**dsh 不当 MCP server**：全仓引用 `McpServer` 的地方只有 mcp-client 自己的测试（`packages/mcp/mcp-client/tests/fixture-server.ts:8-12`、`tests/mcp-client.e2e.ts:18,434`）。这跟 Grok 一致、跟 Codex 的 `codex mcp-server` 相反——被别人嵌入这件事押在 ACP 和自有 SDK 上。
+**dsh 不当 MCP server**：全仓引用 `McpServer` 的地方只有 mcp-client 自己的测试[^68]。这跟 Grok 一致、跟 Codex 的 `codex mcp-server` 相反——被别人嵌入这件事押在 ACP 和自有 SDK 上。
 
-而且它的 ACP server **主动拒绝客户端下发的 MCP server**：`initialize` 只广告 `promptCapabilities`（`packages/acp/acp/src/index.ts:240-242`），`session/new` 里 `if (params.mcpServers.length > 0) throw invalidParams('mcpServers is not supported')`（`index.ts:435`）。
+而且它的 ACP server **主动拒绝客户端下发的 MCP server**：`initialize` 只广告 `promptCapabilities`[^69]，`session/new` 收到非空的 `mcpServers` 列表时直接抛出参数不支持的错误[^70]。
 
 **MCP 的配置权 100% 归 harness 组合方，客户端不能注入**——Grok 把 ACP 当内部 RPC 面，dsh 把 ACP 当"只读的自动化插头"，边界画得更死。
 
-自有 SDK 协议只有 3 个请求（`initialize` / `session/prompt` / `shutdown`）+ 4 个通知（`session.event` / `session.status` / `subagent.started` / `subagent.finished`），无版本协商、无 cancel 方法（`packages/sdk/protocol/src/types.ts:92-105` 与 `packages/sdk/protocol/README.md` 的 Known Limitations）。
+自有 SDK 协议只有 3 个请求（`initialize` / `session/prompt` / `shutdown`）+ 4 个通知（`session.event` / `session.status` / `subagent.started` / `subagent.finished`），无版本协商、无 cancel 方法[^71]。
 
 Python SDK 不另起协议：它 spawn 一个打包好的单文件 Node exe（`dsh-jsonrpc-agent-pkg-<platform>-<arch>`，`python/sdk-runtime/platforms.json`）说同一套 JSON-RPC。
 
@@ -1064,19 +1056,19 @@ Python SDK 不另起协议：它 spawn 一个打包好的单文件 Node exe（`d
 
 本章曾指出 `codex_mcp_interface.md` 与代码对不上——文档说 `codex mcp-server` 暴露 `thread/*` `turn/*`，代码里那套 RPC 其实归 app-server。
 
-**一个完全独立的第三方实现给了佐证**：dsh 的 `subagent-codex` 起的是 `codex app-server --stdio`（`packages/subagent/subagent-codex/README.md:5`），发的是 `thread/start` / `turn/start` / `turn/interrupt`，收的是 `turn/started` / `turn/completed`（`wire.ts:154,180,212,321,356`），并处理 `mcpServer/elicitation/request`（`wire.ts:307-309`，无人值守下一律 `{ action: 'decline' }`）。
+**一个完全独立的第三方实现给了佐证**：dsh 的 `subagent-codex` 起的是 `codex app-server --stdio`[^72]，发的是 `thread/start` / `turn/start` / `turn/interrupt`，收的是 `turn/started` / `turn/completed`[^73]，并处理 `mcpServer/elicitation/request`——无人值守下一律回复拒绝[^74]。
 
 **没有任何人对着 `codex mcp-server` 实现这套方法**——本章"以代码为准"的判断可以从存疑升级为结论。
 
-顺带补上本章第 7 节缺的那一项：elicitation 在四家里第一次有了明确处理——不是不做，是**在无人值守语境下显式拒绝**，并把"没有合法无人值守回应的请求一律 fail run"写成规则（`subagent-codex/README.md:13`）。
+顺带补上本章第 7 节缺的那一项：elicitation 在四家里第一次有了明确处理——不是不做，是**在无人值守语境下显式拒绝**，并把"没有合法无人值守回应的请求一律 fail run"写成规则[^75]。
 
 ### 9.9 文档与代码不一致（一处，且方向是文档更保守）
 
-`examples/mcp-memory/README.md:82` 原话：
+`examples/mcp-memory/README.md` 原话[^76]：
 
 > "Restart or HMR is needed only after an MCP child crashes because **the current generic client does not auto-reconnect**"
 
-而代码里重连默认是**开**的（`connection.ts:41` `enabled: true`），`packages/mcp/mcp-client/README.md` 有整段准确描述。
+而代码里重连默认是**开**的[^77]，`packages/mcp/mcp-client/README.md` 有整段准确描述。
 
 git 时间线解释了原因：这句话最后一次改动是 2026-08-10（`d00590c707`），`connection.ts` 最后一次改动是 2026-08-11（`e2556c51bf fix(mcp-client): distinguish failure from loss`）。
 
@@ -1086,7 +1078,7 @@ git 时间线解释了原因：这句话最后一次改动是 2026-08-10（`d005
 
 - **最像 LangChain 的定位 + Codex 的实现细节**。定位上 MCP 就是众多工具来源之一，核心（`packages/core/tools`）不知道 MCP 存在，桥接是可插拔的一个包；实现上命名规范化、两阶段换代、错误二分法与 Codex 逐条对应。它不是"中立管道"——LangChain 的 adapter 是约 600 行的一层类型转换，dsh 的是带监管器的 929 行。
 - **第五种答案有两条**：（1）把 MCP server 当**被监管的长驻插件**（backoff + 稳定窗口 + 尝试预算 + generation 换代 + list_changed 热重注册），四家里独一份；（2）**凭据默认 deny**——不是把密钥送进去，是先把像密钥的环境变量全删掉再显式加回。
-- **不推翻本章任何结论，但给第 7 节的核心论断补了一个反例的边界**。第 7 节说"没有人会为不存在的问题写这么多代码"——dsh 是第一个**全面接了 MCP 却一层降本机制都没做**的样本。但它不构成反证：它同时也是唯一一个**官方入口是 Web UI 而不是 CLI**（`README.md:20` 快速开始即 `npx @deepseek-ai/dsh web`）、且 MCP 需要用户手工写 `cordis.yml` row 才会存在的样本，装 3 个 server 是显式动作而非默认配置，常驻税的暴露面本来就小。README 把这笔税明明白白写在 "Token effect" 一节（`README.md:89`）——它是知情地不做，不是没想到。
+- **不推翻本章任何结论，但给第 7 节的核心论断补了一个反例的边界**。第 7 节说"没有人会为不存在的问题写这么多代码"——dsh 是第一个**全面接了 MCP 却一层降本机制都没做**的样本。但它不构成反证：它同时也是唯一一个**官方入口是 Web UI 而不是 CLI**（快速开始即 `npx @deepseek-ai/dsh web`）[^78]、且 MCP 需要用户手工写 `cordis.yml` row 才会存在的样本，装 3 个 server 是显式动作而非默认配置，常驻税的暴露面本来就小。README 把这笔税明明白白写在 "Token effect" 一节[^79]——它是知情地不做，不是没想到。
 - 对照表新增一行的话：**"MCP 配置的落点"**——Pi 无、Codex `config.toml` 的 `[mcp_servers.*]`、LangChain 用户代码里的 dict、Grok `.mcp.json` + config.toml、**dsh 的 DI 插件树 row**。五家的答案摊开来看，正好对应五种"谁来决定接哪个 server"的哲学：
 
 ```mermaid
@@ -1111,7 +1103,92 @@ flowchart TD
 
 ### 9.11 本节未确认
 
-- ⚠️ `packages/acp/acp` 广告的 ACP `PROTOCOL_VERSION` 具体数值来自 `@agentclientprotocol/sdk` 0.25.1 的导出常量，仓库未安装 `node_modules`，未取到字面值（`packages/acp/acp/src/index.ts:238` 只做了转发）。
+- ⚠️ `packages/acp/acp` 广告的 ACP `PROTOCOL_VERSION` 具体数值来自 `@agentclientprotocol/sdk` 0.25.1 的导出常量，仓库未安装 `node_modules`，未取到字面值——转发点只做了转发，没有硬编码具体版本号[^80]。
 - ⚠️ `tools/pre-execute` waterfall 上是否有**现成的**按 `mcp__` 前缀卡审批的插件未逐一排查（`packages/guard/` 下只有 `repeat-tool-reminder` 与 `timeout-policy`，均非审批用途）；结论"要卡得自己写"是从"mcp-client 与 `packages/core/tools` 均未消费 annotations"推出的，不是穷举全部 219 个包得出的。
-- ⚠️ Streamable HTTP 路径下 MCP SDK 自身的 SSE 重连行为、以及连接/发现阶段"SDK 的 60 秒默认超时"这一数值，均只有 `mcp-client/README.md:112-113` 的文档声称，本仓库未安装依赖，未进 SDK 源码核对。
+- ⚠️ Streamable HTTP 路径下 MCP SDK 自身的 SSE 重连行为、以及连接/发现阶段"SDK 的 60 秒默认超时"这一数值，均只有文档声称[^81]，本仓库未安装依赖，未进 SDK 源码核对。
 - ⚠️ 第 9.7 节的"6 + 1"是按"跨进程 wire 协议"口径手工枚举 `packages/` 下的协议包与 subagent provider 得出的，可能漏掉未被 `package.json` description 点名的小面（如 `packages/lsp/lsp-stdio`、e2b 等能力 seam 内部使用的协议未计入）。
+
+## 出处
+
+[^1]: 调用条件判断：`system-prompt.ts:65`。
+[^2]: `registerTool()` 定义：`packages/coding-agent/src/core/extensions/types.ts:1246`；动态工具示例：`examples/extensions/dynamic-tools.ts`。
+[^3]: 配置根键声明：`codex-rs/config/src/config_toml.rs:260`。
+[^4]: 默认超时定义：`codex-rs/codex-mcp/src/rmcp_client.rs:91`。
+[^5]: 两种传输结构体定义：`codex-rs/config/src/mcp_types.rs:463`。
+[^6]: `normalize_tools_for_model_with_prefix()`：`codex-rs/codex-mcp/src/tools.rs:113`。
+[^7]: `capture_step_context_with_required_mcp_servers()`：`codex-rs/core/src/session/mod.rs:3076`。
+[^8]: `McpToolCatalogCache` 容量与 TTL：`codex-rs/codex-mcp/src/tool_catalog_cache.rs:28`。
+[^9]: `ToolExposure` 六态定义：`codex-rs/tools/src/tool_executor.rs:51`。
+[^10]: `defer_loading: Some(true)` 字段：`codex-rs/tools/src/responses_api.rs:162`。
+[^11]: `MAX_SERIALIZED_MCP_TOOL_BYTES` 与降级逻辑：`codex-rs/tools/src/responses_api.rs:136`。
+[^12]: `allow_persistent` 字段：`codex-rs/core/src/mcp_tool_call.rs:1018`。
+[^13]: `mcp_init_error_display()`：`codex-rs/codex-mcp/src/connection_manager/startup.rs:76`。
+[^14]: cursor/server 校验：`codex-rs/core/src/tools/handlers/mcp_resource.rs:88`。
+[^15]: 两个工具的定义位置：`codex-rs/mcp-server/src/codex_tool_config.rs:106` 与 `:225`。
+[^16]: `handle_unsupported_request()`：`codex-rs/mcp-server/src/message_processor.rs:518`。
+[^17]: `LLMToolSelectorMiddleware`：`langchain/agents/middleware/tool_selection.py:123`。
+[^18]: 三种传输配置：`servers.rs:856-857, 4356-4366`（`xai-org/grok-build`）。
+[^19]: `SafeTokioChildProcess` 修 Drop-spawn：`servers.rs:2043-2231`；HTTP 退避包装修 SSE 重连：`mcp_http_client.rs`（`xai-org/grok-build`）。
+[^20]: OAuth 实现：`src/oauth.rs`；工具命名拼接：`servers.rs:42-46`（`xai-org/grok-build`）。
+[^21]: `search_tool` / `use_tool` 实现：`implementations/search_tool/mod.rs:1`、`use_tool/mod.rs:1-27`（`xai-org/grok-build`）。
+[^22]: `MCP_MAX_OUTPUT_BYTES = 20_000` 截断逻辑：`util/mcp_truncate.rs:34-42`。
+[^23]: `SharedMcpPool` 快照与共享传输：`servers.rs:928-935`（`xai-org/grok-build`）。
+[^24]: `mcp_inheritance: All|None|Named|Except`：`xai-grok-agent/src/config.rs:935-941`。
+[^25]: CLI 子命令全集：`pager/src/app/cli.rs:9-146`（`xai-org/grok-build`）。
+[^26]: ACP 反向桥实现：`acp_transport.rs:1-20`（`xai-org/grok-build`）。
+[^27]: `CompoundResolver`：`xai-computer-hub-core/src/lib.rs:1-29`。
+[^28]: CLI mode 定义：`apps/cli/src/args.ts:22,32,41`（`deepseek-ai/deepseek-harness`）。
+[^29]: overlay 开关示例：`examples/mcp-memory/README.md`。
+[^30]: `serverName` 正则校验：`packages/mcp/mcp-client/src/index.ts:37`。
+[^31]: 重名实例的加载期报错：`index.ts:154-158`。
+[^32]: 传输类型定义：`packages/mcp/mcp-client/src/transport.ts:31-49`。
+[^33]: `publicToolName()`：`packages/mcp/mcp-client/src/tools.ts:96-102`。
+[^34]: 字符替换/截断/哈希追加逻辑：`tools.ts:45,50-51,100-101`。
+[^35]: 模块契约注释：`packages/mcp/mcp-client/src/tools.ts:6-10`。
+[^36]: cookbook 点名：`docs/cookbook/extension-cookbook.md:113`（`deepseek-ai/deepseek-harness`）。
+[^37]: `ctx.tools.restrict()` 消费点：`packages/subagent/subagent/src/child-agent.ts:174`。
+[^38]: README 原文：`packages/mcp/mcp-client/README.md:89`。
+[^39]: 无 OAuth 的配置字段：`packages/mcp/mcp-client/src/index.ts:88`。
+[^40]: README 原文：`packages/mcp/mcp-client/README.md:111`。
+[^41]: `tools/pre-execute` waterfall：`packages/core/tools/src/index.ts:152`。
+[^42]: 参数透传：`packages/mcp/mcp-client/src/tools.ts:149`。
+[^43]: `register()` 只校验 `output.schema`：`packages/core/tools/src/index.ts:1037-1045`。
+[^44]: `extractText`：`packages/mcp/mcp-client/src/tools.ts:288-317`。
+[^45]: `await connection.ready`：`packages/mcp/mcp-client/src/index.ts:177`。
+[^46]: Known Limitation 说明：`packages/mcp/mcp-client/README.md:112`。
+[^47]: 默认重连策略：`packages/mcp/mcp-client/src/connection.ts:40-45`。
+[^48]: 稳定窗口清零逻辑：`connection.ts:203`。
+[^49]: crash-loop 停手逻辑：`connection.ts:206-214`。
+[^50]: `isCurrent()` 守卫：`connection.ts:153,173-178`。
+[^51]: 5 秒未关闭即停止重连：`connection.ts:288-292`。
+[^52]: `syncTools()` 两阶段实现：`packages/mcp/mcp-client/src/tools.ts:128-174`。
+[^53]: 注册冲突回滚：`tools.ts:164-172`。
+[^54]: README 说明：`packages/mcp/mcp-client/README.md:113`。
+[^55]: `scrubbedParentEnv()`：`packages/subprocess/subprocess/src/index.ts:44,60-66`。
+[^56]: canonical 值结构：`packages/mcp/mcp-client/src/tools.ts:36-39`。
+[^57]: `render()` 占位符替换：`tools.ts:200-215,288-317`。
+[^58]: execution-local 说明原文：`packages/core/tools/src/index.ts:558`。
+[^59]: 错误转换逻辑：`packages/mcp/mcp-client/src/tools.ts:266-269`。
+[^60]: `execution.taskSupport === 'required'` 拒绝逻辑：`packages/mcp/mcp-client/src/tools.ts:151,235-237`。
+[^61]: `packages/mcp/mcp-client/`。
+[^62]: `packages/acp/acp/package.json`。
+[^63]: `packages/subagent/subagent-acp/package.json`。
+[^64]: `packages/sdk/protocol/src/types.ts:100-105`。
+[^65]: `packages/subagent/subagent-codex/src/wire.ts:2`。
+[^66]: `packages/subagent/subagent-claude-code/package.json`。
+[^67]: `docs/api-gateway.md`。
+[^68]: 测试引用位置：`packages/mcp/mcp-client/tests/fixture-server.ts:8-12`、`tests/mcp-client.e2e.ts:18,434`。
+[^69]: `initialize` 能力广告：`packages/acp/acp/src/index.ts:240-242`。
+[^70]: `mcpServers` 拒绝逻辑：`index.ts:435`。
+[^71]: 协议定义：`packages/sdk/protocol/src/types.ts:92-105`；已知限制：`packages/sdk/protocol/README.md`。
+[^72]: 启动方式：`packages/subagent/subagent-codex/README.md:5`。
+[^73]: 请求/通知收发点：`wire.ts:154,180,212,321,356`。
+[^74]: elicitation 处理与默认拒绝：`wire.ts:307-309`。
+[^75]: 规则原文：`packages/subagent/subagent-codex/README.md:13`。
+[^76]: 原文出处：`examples/mcp-memory/README.md:82`。
+[^77]: 默认启用重连：`connection.ts:41`。
+[^78]: 快速开始命令：`README.md:20`。
+[^79]: "Token effect" 一节：`README.md:89`。
+[^80]: 转发点：`packages/acp/acp/src/index.ts:238`。
+[^81]: 文档声称位置：`packages/mcp/mcp-client/README.md:112-113`。
+[^82]: 包描述原话出处：`xai-grok-mcp/Cargo.toml:6`（`xai-org/grok-build`）。

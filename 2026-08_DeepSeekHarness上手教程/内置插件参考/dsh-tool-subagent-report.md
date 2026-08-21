@@ -1,8 +1,8 @@
 # tool-subagent-report
 
-> `@deepseek-ai/dsh-tool-subagent-report` · bundle：`base` · 配置树 id：`tool-subagent-report` · v0.1.0-rc.5（commit `47f9438`）2026-08-14 核对
+> `@deepseek-ai/dsh-tool-subagent-report` · bundle：`base` · 配置树 id：`tool-subagent-report` · v0.1.0-rc.5（commit `47f9438`）2026-08-14 核对。出处收在文末脚注。
 
-> ⚠️ **本篇未通过对抗式引用核验**：起草已完成，但逐条打开源码比对行号/字段名/英文引文的那一遍因会话额度耗尽未执行。文中 `path:line` 与配置字段请以源码为准，核验后本行会被移除。
+> ⚠️ **本篇未通过对抗式引用核验**：起草已完成，但逐条打开源码比对行号/字段名/英文引文的那一遍因会话额度耗尽未执行。文中脚注坐标与配置字段请以源码为准，核验后本行会被移除。
 
 **一句话**：给每个**可续的进程内子** agent 装上作用域局部的 `report` 工具和配套 prompt 段——子到父的返回通道，`ctx.subagents.reportFrom()` 的薄适配层。
 
@@ -13,9 +13,7 @@
       name: '@deepseek-ai/dsh-tool-subagent-report'
 ```
 
-两行，没有 `config`，所以 `reportDelivery` 吃默认值 `wakeup`。上方那行注释已经把定位讲完了：可选的直接子返回通道，root 和一次性 agent 身上都没有。
-
-出处：`packages/bundle/base/cordis.patch.yml:332-333`，注释在 `:331`。
+两行，没有 `config`，所以 `reportDelivery` 吃默认值 `wakeup`。上方那行注释已经把定位讲完了：可选的直接子返回通道，root 和一次性 agent 身上都没有[^1]。
 
 模块的依赖声明是这一行：
 
@@ -23,19 +21,19 @@
 export const inject = ['subagents', 'tools', 'systemPrompt']
 ```
 
-这里有个我第一遍看漏的地方。真正的注册只经过 `childCtx.tools` 和 `childCtx.systemPrompt`，父作用域的 `tools`、`systemPrompt` 其实用不上——那为什么还要声明？为了让 Loader 排序在**加载时**就失败，而不是拖到下一次子物化才炸。声明多了不是冗余，是把错误提前。
+这里有个我第一遍看漏的地方。真正的注册只经过 `childCtx.tools` 和 `childCtx.systemPrompt`，父作用域的 `tools`、`systemPrompt` 其实用不上——那为什么还要声明？为了让 Loader 排序在**加载时**就失败，而不是拖到下一次子物化才炸。声明多了不是冗余，是把错误提前[^2]。
 
-出处：`packages/subagent/tool-subagent-report/src/index.ts:21`，理由写在 `:18-20`。
-
-web-app **不禁用**这一行。理由挺绕，值得抄下来：它注册的是 singleton 上的一份 continuable setup，而不是本 agent 调用的工具；而这个 setup 列表**不是 scope-aware** 的——每个挂载的 preset 各来一份，于是第二个在线 session 上就会抛错（`packages/bundle/web-app/cordis.patch.yml:386-390`）。
+web-app **不禁用**这一行。理由挺绕，值得抄下来：它注册的是 singleton 上的一份 continuable setup，而不是本 agent 调用的工具；而这个 setup 列表**不是 scope-aware** 的——每个挂载的 preset 各来一份，于是第二个在线 session 上就会抛错[^3]。
 
 ## 它注册了什么
 
+它一共注册三样东西[^4]：
+
 | 类型 | 名字 | 说明 |
 |---|---|---|
-| continuable setup 贡献 | 匿名 | `ctx.subagents.registerContinuableSetup(...)`，`src/index.ts:140-141` |
-| 工具（子作用域） | `report` | `childCtx.tools.register(...)`，`src/index.ts:65-104` |
-| prompt 段（子作用域） | `tool:report`（order 117） | `childCtx.systemPrompt.section(...)`，`src/index.ts:24`、`:54-62` |
+| continuable setup 贡献 | 匿名 | 调用 `ctx.subagents.registerContinuableSetup(...)` 注册 |
+| 工具（子作用域） | `report` | 调用 `childCtx.tools.register(...)` 注册 |
+| prompt 段（子作用域） | `tool:report`（order 117） | 调用 `childCtx.systemPrompt.section(...)` 注册 |
 
 **没有事件监听**（无 waterfall），也**没有全局工具**。以下几种角色都永远看不到、也执行不了它：root、一次性子、远端 provider 的子、兄弟作用域、以及无 agent 的工具执行。
 
@@ -48,7 +46,7 @@ web-app **不禁用**这一行。理由挺绕，值得抄下来：它注册的�
 发信方 = exec.agent                    // 精确到那个在线 Agent，同时就是权限凭据
 ```
 
-也就是说，"你是谁"和"你能发给谁"是同一个事实的两面，模型没有任何插手余地（`src/index.ts:98-101`）。
+也就是说，"你是谁"和"你能发给谁"是同一个事实的两面，模型没有任何插手余地[^5]。
 
 调用成功时返回的是父侧**已接受消息**的稳定 `MessageId`。这个"接受"的语义窄得需要单独列一下：
 
@@ -62,9 +60,9 @@ web-app **不禁用**这一行。理由挺绕，值得抄下来：它注册的�
 
 ### 安装体与回滚
 
-安装体导出为 `installReportTool(childCtx, ctx, delivery)`（`src/index.ts:49-53`），返回一个同时撤销工具与 prompt 段的 disposer。生成工具目录走的就是这条路径——因为全局 registry 没办法暴露一个作用域局部的 schema。
+安装体导出为 `installReportTool`，接收 `childCtx`、`ctx`、`delivery` 三个参数，返回一个同时撤销工具与 prompt 段的 disposer[^6]。生成工具目录走的就是这条路径——因为全局 registry 没办法暴露一个作用域局部的 schema。
 
-注册路径上的失败处理是这样的：
+注册路径上的失败处理是这样的[^7]：
 
 ```
 先注册 prompt 段
@@ -73,15 +71,13 @@ web-app **不禁用**这一行。理由挺绕，值得抄下来：它注册的�
         回滚也失败 → 抛 AggregateError（两个错都带上）
 ```
 
-出处：`:105-115`。
-
 ## 配置项
+
+只有一个字段[^8]：
 
 | 字段 | 类型 | 默认值 | 作用 |
 |---|---|---|---|
 | `reportDelivery` | `'quiet' \| 'wakeup'` | `wakeup` | 每条被接受的 report 在父侧怎么调度 |
-
-字段定义在 `src/index.ts:36-38`。
 
 两个值在父侧引发的动作完全不同：
 
@@ -140,7 +136,7 @@ flowchart TD
 
 **子侧结果**：`report accepted by the agent that started you as message <messageId>`。
 
-**父侧可见**：一条 user-role 消息，帧头 `Background subagent <child-id> reported:`（`packages/subagent/subagent/src/continuation.ts:638`）后跟子的原样 `output`，来源标成 `{ kind: 'subagent-report', senderSessionId: <child-id> }`。
+**父侧可见**：一条 user-role 消息，帧头是 `Background subagent <child-id> reported:`，后跟子的原样 `output`，来源标记为 `subagent-report`，并带着发信子的 session id[^9]。
 
 token 上就是完整 `output` 加一行帧头，本包**不设上限**。
 
@@ -167,3 +163,17 @@ token 上就是完整 `output` 加一行帧头，本包**不设上限**。
 **没有限流。** 默认 `wakeup` 在嵌套子频繁 report 时会放大模型工作量；宁可容忍未读 report 的部署应该选 `quiet`。
 
 它也是 [fork provider](./dsh-subagent-fork-in-process.md) 至今不做可续子的直接原因：`report` 工具和它的 prompt 段排在继承历史之前，会作废整段前缀复用。
+
+---
+
+## 出处
+
+[^1]: 树上这两行见 `packages/bundle/base/cordis.patch.yml:332-333`，上方注释在 `:331`。
+[^2]: `inject` 声明见 `packages/subagent/tool-subagent-report/src/index.ts:21`，理由写在同文件 `:18-20`。
+[^3]: `packages/bundle/web-app/cordis.patch.yml:386-390`。
+[^4]: 三处注册分别在 `packages/subagent/tool-subagent-report/src/index.ts:140-141`（continuable setup）、`:65-104`（report 工具）、`:24` 与 `:54-62`（prompt 段）。
+[^5]: `packages/subagent/tool-subagent-report/src/index.ts:98-101`。
+[^6]: `installReportTool(childCtx, ctx, delivery)` 的完整签名与安装体实现见 `packages/subagent/tool-subagent-report/src/index.ts:49-53`。
+[^7]: 失败处理顺序见同文件 `:105-115`。
+[^8]: `reportDelivery` 字段定义在 `packages/subagent/tool-subagent-report/src/index.ts:36-38`。
+[^9]: 帧头格式见 `packages/subagent/subagent/src/continuation.ts:638`；来源标记的字段结构（`kind: 'subagent-report'` 与 `senderSessionId`）在同一处。

@@ -67,7 +67,7 @@ if random.random() < 0.1:
 
 **这行代码是错的。**
 
-错在哪里，两段伪代码摆一起就看出来了 —— 区别只在「骰子从哪来」：
+错在哪里？两段伪代码摆一起看，区别只在「骰子从哪来」：
 
 ```
 # 方案 A：每个服务自己掷骰子
@@ -105,7 +105,7 @@ python3 demos/demo03_sampling.py
 
 （traceID 是真随机的，所以每次跑具体数字会变，但这个量级差是稳定的。）
 
-掷骰子方案剩下的那 3511 条是断成几截的残片 —— 存了，占空间，但排查问题时啥也看不出来。
+掷骰子方案剩下的那 3511 条是断成几截的残片：存了，占空间，但排查问题时啥也看不出来。
 
 两种判定方式画成树是这样：
 
@@ -168,7 +168,7 @@ class TraceIdRatioBased(Sampler):
 
 北京限行按尾号：尾号 1 和 6 周一不能上路。
 
-这个规则的妙处在于 —— **全城每个路口的交警，不用互相打电话商量，看一眼车牌就能做出完全相同的判断**。
+这个规则的妙处在于：**全城每个路口的交警不用互相打电话商量，看一眼车牌就能做出完全相同的判断**。
 
 trace 采样就是这个思路。一条 trace 经过 5 个微服务、3 层 collector，**每一处都独立算，但算出来的答案必然一致**。
 
@@ -192,7 +192,7 @@ processors:
 
 但底下有两套完全不同的算法。
 
-**`hash_seed` 模式**（`fnvhasher.go`）—— 对 traceID 做 FNV-1a 32 位哈希：
+**`hash_seed` 模式**（`fnvhasher.go`）对 traceID 做 FNV-1a 32 位哈希：
 
 ```go
 func computeHash(b []byte, seed uint32) uint32 {
@@ -203,11 +203,11 @@ func computeHash(b []byte, seed uint32) uint32 {
 }
 ```
 
-⚠️ **同一层级的所有 collector 必须配同一个 `hash_seed`**，否则一致性就破了。就好比全城交警必须用同一套限行表 —— 一个路口按尾号 1、隔壁路口按尾号 2，那就乱套了。
+⚠️ **同一层级的所有 collector 必须配同一个 `hash_seed`**，否则一致性就破了。就好比全城交警必须用同一套限行表，一个路口按尾号 1、隔壁路口按尾号 2，那就乱套了。
 
 而且这个模式的实际精度只有 1/16384（14 bit）。README 里的说法是："This mode uses 14 bits of information in its sampling decision."
 
-**`proportional` / `equalizing` 模式**（`pkg/sampling/randomness.go`）—— 直接从 traceID 取位，无哈希：
+**`proportional` / `equalizing` 模式**（`pkg/sampling/randomness.go`）直接从 traceID 取位，无哈希：
 
 ```go
 const leastHalfTraceIDThresholdMask = MaxAdjustedCount - 1   // 2^56 - 1
@@ -231,13 +231,13 @@ func TraceIDToRandomness(id pcommon.TraceID) Randomness {
 
 **新项目直接用 `proportional` / `equalizing`。**
 
-决策结果会写回 W3C `tracestate` 的 `ot` section（`th=` 是 threshold，`rv=` 是 randomness）。下游任何 collector 读到 `th` 就知道上游用了多少采样率，可以算出 adjusted count 做无偏还原 —— 这个设计非常漂亮，把「我采了多少」这个信息随数据一起传下去了。
+决策结果会写回 W3C `tracestate` 的 `ot` section（`th=` 是 threshold，`rv=` 是 randomness）。下游任何 collector 读到 `th` 就知道上游用了多少采样率，可以算出 adjusted count 做无偏还原。这个设计非常漂亮：把「我采了多少」这个信息随数据一起传下去了。
 
 ### tail_sampling：先看完再决定留谁
 
 head sampling 的致命问题：**你在门口掷骰子的时候，还不知道这条请求会不会报错**。
 
-tail_sampling 反过来 —— 把整条 trace 在内存里缓冲一段时间，等 span 到齐后再用一组策略投票。机制是这样：
+tail_sampling 反过来，把整条 trace 在内存里缓冲一段时间，等 span 到齐后再用一组策略投票。机制是这样：
 
 ```
 收到 span:
@@ -250,7 +250,7 @@ tail_sampling 反过来 —— 把整条 trace 在内存里缓冲一段时间，
     else:                        抽 10%
 ```
 
-注意所有判断都作用在**整条 trace** 上，不是单条 span —— 这才是它能保证「错误一条不漏」的原因。对应配置：
+注意所有判断都作用在**整条 trace** 上，不是单条 span，这才是它能保证「错误一条不漏」的原因。对应配置：
 
 ```yaml
 processors:
@@ -340,7 +340,7 @@ InitialSamplingProbability:   0.001,
 MinSamplingProbability:       1e-5,     // 十万分之一
 ```
 
-它的概率调整算法有个很值得学的设计 —— **涨得慢、跌得快**。先看示意：
+它的概率调整算法有个很值得学的设计：**涨得慢、跌得快**。先看示意：
 
 ```
 factor = 目标QPS / 当前QPS
@@ -433,7 +433,7 @@ flowchart TD
 为什么？
 
 - **数量**：你数客流，「每 10 个人只数 1 个」，数到 500，真实是 5000。不乘回去，监控大盘上 QPS 啪一下掉到十分之一，值班同学以为出故障了，连夜起来排查。
-- **分布**：抽 500 个人量身高算出的平均身高，跟量 5000 个人算出来的差不多 —— **抽样不改变分布的形状，只改变样本数量**。给 P99 乘 100 就荒唐了。
+- **分布**：抽 500 个人量身高算出的平均身高，跟量 5000 个人算出来的差不多：**抽样不改变分布的形状，只改变样本数量**。给 P99 乘 100 就荒唐了。
 - **瞬时值**：CPU 87% 乘 10 变成 870%，你自己看着办。
 
 statsd 的实现（`stats.js`）就是这个逻辑：
@@ -456,7 +456,7 @@ if (metric_type === "ms") {
 }
 ```
 
-对应的线格式是 `gorets:1|c|@0.1` —— 那个 `@0.1` 就是采样率。
+对应的线格式是 `gorets:1|c|@0.1`，那个 `@0.1` 就是采样率。
 
 DataDog 的 dogstatsd 一样（`pkg/metrics/counter.go`）：
 
@@ -497,7 +497,7 @@ mqtt {
 
 **drop-oldest**。新消息永远进队，队头最老的被踢出去。
 
-这对行情推送、设备状态上报是**正确**的策略 —— 五分钟前的温度读数没有意义。
+这对行情推送、设备状态上报是**正确**的策略：五分钟前的温度读数没有意义。
 
 ### Mosquitto：丢最新的
 
@@ -655,11 +655,11 @@ def maybe_report(value, threshold=0.5, max_silence=60):
         last_sent = (now, value)
 ```
 
-那个 `max_silence` 很重要 —— 没有它的话，一个读数稳定的设备会永远沉默，服务端分不清「稳定」和「掉线」。
+那个 `max_silence` 很重要：没有它，一个读数稳定的设备会永远沉默，服务端分不清「稳定」和「掉线」。
 
 **2. 批量上报**
 
-10 条读数攒一个包发。省的是包头和握手开销 —— MQTT 每条消息的固定开销可能比 payload 还大。
+10 条读数攒一个包发。省的是包头和握手开销：MQTT 每条消息的固定开销可能比 payload 还大。
 
 **3. 按设备 ID 一致性采样**
 
@@ -691,7 +691,7 @@ def is_detailed_device(device_id: str, rate: float = 0.01) -> bool:
 
 **4. 采样不改变分布，但会改变尾部的分辨率**
 
-P50 采样前后几乎一样。P99.99 就不行了 —— 你采 1% 之后，P99.99 对应的样本可能只有几个，噪声极大。**高分位数需要更高的采样率，或者干脆全量。**
+P50 采样前后几乎一样。P99.99 就不行了：你采 1% 之后，P99.99 对应的样本可能只有几个，噪声极大。**高分位数需要更高的采样率，或者干脆全量。**
 
 **5. `MAXLEN ~` 的 `~` 不是可有可无的**
 
@@ -702,7 +702,7 @@ Redis Stream 精确裁剪（`MAXLEN 10000`）在高写入下会成为瓶颈。�
 ## 一句话记住
 
 > 你控制不了设备发多少，只能控制自己收多少。
-> 能采样就别丢弃 —— 采样是有预算、可还原、可解释的；丢弃只是溢出。
+> 能采样就别丢弃：采样是有预算、可还原、可解释的；丢弃只是溢出。
 > 而采样的第一原则是：**同一个东西，在任何地方都要得出同一个答案。**
 
 ---

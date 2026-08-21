@@ -5,6 +5,7 @@
 > Star 数：约 84.5k
 > 最近更新：2026-05-14，提交信息「升级支持Spring Boot 3.5」（commit `0504e86`）
 > 技术栈：Spring Boot 3.5 + JDK 17 + MyBatis / MyBatisGenerator + MySQL + Redis + RabbitMQ + Elasticsearch + MongoDB + Spring Security + JWT + Druid + Docker
+> 精确到行号的代码坐标收在文末脚注。
 
 ---
 
@@ -740,7 +741,7 @@ public ConfirmOrderResult generateConfirmOrder(List<Long> cartIds) {
 
 **对应代码在哪**
 
-`mall-portal/src/main/java/com/macro/mall/portal/service/impl/OmsPortalOrderServiceImpl.java` 第 93~250 行。
+`mall-portal/src/main/java/com/macro/mall/portal/service/impl/OmsPortalOrderServiceImpl.java` 的 `generateOrder()` 方法[^1]。
 
 事务注解声明在**接口**上（`mall-portal/.../service/OmsPortalOrderService.java`）：
 
@@ -831,7 +832,7 @@ return true
 
 **对应代码在哪**
 
-`OmsPortalOrderServiceImpl` 第 738 行：
+`OmsPortalOrderServiceImpl` 的 `hasStock()` 方法[^2]：
 
 ```java
 /**
@@ -914,7 +915,7 @@ for 每个下单商品:
 
 **对应代码在哪**
 
-`OmsPortalOrderServiceImpl.java` 第 724~733 行：
+`OmsPortalOrderServiceImpl.java` 的 `lockStock()` 方法[^3]：
 
 ```java
 /**
@@ -945,7 +946,7 @@ private void lockStock(List<CartPromotionItem> cartPromotionItemList) {
         0 + 1 = 1
 
 第 3 行：updateByPrimaryKeySelective(skuStock)
-        ↓ 生成 SQL（见 mall-mbg/.../PmsSkuStockMapper.xml 第 283~285 行）
+        ↓ 生成 SQL（见 mall-mbg/.../PmsSkuStockMapper.xml 的 set 子句[^4]）
         UPDATE pms_sku_stock
         SET product_id = ?, sku_code = ?, price = ?, stock = ?, ...,
             lock_stock = 1,          ←←← 注意！这是一个「绝对值」，不是 lock_stock+1
@@ -1249,7 +1250,7 @@ public void sendDelayMessageCancelOrder(Long orderId) {
 }
 ```
 
-数据库里 `oms_order_setting` 的初始数据（`document/sql/mall.sql` 第 848 行）：
+数据库里 `oms_order_setting` 的初始数据（`document/sql/mall.sql`[^5]）：
 
 ```sql
 INSERT INTO `oms_order_setting` VALUES (1, 60, 120, 15, 7, 7);
@@ -1615,7 +1616,7 @@ if (promotionType == 1) {
 }
 ```
 
-再看 `promotion_type` 的字典定义（`PmsProduct.java` 第 103 行的注解，跟 `mall.sql` 第 1125 行的注释一致）：
+再看 `promotion_type` 的字典定义（`PmsProduct.java` 的字段注解，跟 `mall.sql` 的建表注释一致[^6]）：
 
 ```java
 @Schema(title = "促销类型：0->没有促销使用原价;1->使用促销价；2->使用会员价；3->使用阶梯价格；4->使用满减价格；5->限时购")
@@ -1918,7 +1919,7 @@ druid:
 
 **刀 1【最小成本，先止血】把 lockStock 改成原子条件更新**
 
-位置：`mall-portal/.../service/impl/OmsPortalOrderServiceImpl.java` 第 727 行；`mall-portal/src/main/resources/dao/PortalOrderDao.xml`（加一条新语句）。
+位置：`mall-portal/.../service/impl/OmsPortalOrderServiceImpl.java` 的 `lockStock()`[^3]；`mall-portal/src/main/resources/dao/PortalOrderDao.xml`（加一条新语句）。
 
 现在是「SELECT → Java 加 → UPDATE SET lock_stock = 绝对值」，改成一条 SQL 搞定，让数据库自己判断够不够：
 
@@ -2086,12 +2087,12 @@ secure:
 
 | 级别 | 问题 | 位置 | 后果 |
 |---|---|---|---|
-| 🔴 | `lockStock` 读-算-写非原子，且是绝对值赋值 | `OmsPortalOrderServiceImpl:727` | 高并发超卖 |
-| 🔴 | `paySuccess` 不校验订单状态 | 同上 `:253` | 重复扣库存 |
+| 🔴 | `lockStock` 读-算-写非原子，且是绝对值赋值 | `OmsPortalOrderServiceImpl`[^3] | 高并发超卖 |
+| 🔴 | `paySuccess` 不校验订单状态 | 同一个类的 `paySuccess()`[^7] | 重复扣库存 |
 | 🟠 | `releaseSkuStockLock` 无下限保护 | `PortalOrderDao.xml` | `lock_stock` 变负 → 可用库存虚高 |
 | 🟠 | 限时购价格/限量/限购全部不生效（`promotionType==5` 无分支） | `OmsPromotionServiceImpl` | 活动形同虚设 |
 | 🟠 | 下单接口无限流、无幂等、无活动时间校验 | 全局 | 可被脚本刷 |
-| 🟡 | 首页 `content()` 串行 6~9 次 DB，零缓存 | `HomeServiceImpl:41` | 首页 QPS 上不去 |
+| 🟡 | 首页 `content()` 串行 6~9 次 DB，零缓存 | `HomeServiceImpl`[^8] | 首页 QPS 上不去 |
 | 🟡 | 一个下单事务里做 8~14 次 DB 往返（连接池 `max-active` 只有 20） | `generateOrder` | 事务长，锁持有久 |
 | 🟡 | TTL 队列队头阻塞（当前配置下不会触发，但一旦区分秒杀/普通超时时间就会踩） | `RabbitMqConfig` | 未来扩展的雷 |
 | 🟡 | 定时任务与 MQ 同时开会重复取消 | `OrderTimeOutCancelTask` | 已被注释规避 |
@@ -2229,3 +2230,16 @@ rabbitmqctl set_permissions -p /mall mall ".*" ".*" ".*"
 > **但完全可以拿它当「一个完整电商长什么样」的教材**（它是最好的之一），
 > 然后按第 5.6 节那六把刀，自己动手把秒杀链路补上 —— 那才是这个 84.5k star 项目真正的用法：
 > **它给你一块干净的地基，剩下的楼你自己盖。**
+
+---
+
+## 出处
+
+[^1]: `mall-portal/src/main/java/com/macro/mall/portal/service/impl/OmsPortalOrderServiceImpl.java` 第 93~250 行，`generateOrder()` 方法全文。
+[^2]: 同上文件第 738 行，`hasStock()` 方法。
+[^3]: 同上文件第 724~733 行，`lockStock()` 方法；文中提到的单独一行 UPDATE 语句是第 727 行。
+[^4]: `mall-mbg/src/main/resources/com/macro/mall/mapper/PmsSkuStockMapper.xml` 第 283~285 行，`updateByPrimaryKeySelective` 的 `lock_stock` 赋值子句。
+[^5]: `document/sql/mall.sql` 第 848 行，`oms_order_setting` 表的初始化 `INSERT` 语句。
+[^6]: `mall-mbg/.../model/PmsProduct.java` 第 103 行 `promotionType` 字段的 `@Schema` 注解；`document/sql/mall.sql` 第 1125 行同字段的建表注释，两处文字一致。
+[^7]: `OmsPortalOrderServiceImpl.java` 第 253 行，`paySuccess()` 方法。
+[^8]: `mall-portal/src/main/java/com/macro/mall/portal/service/impl/HomeServiceImpl.java` 第 41 行，`content()` 方法起始处。

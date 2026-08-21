@@ -1,12 +1,12 @@
 # subagent-spawn-in-process
 
-> `@deepseek-ai/dsh-subagent-spawn-in-process` · bundle：`base` · 配置树 id：`subagent-spawn-in-process` · v0.1.0-rc.5（commit `47f9438`）2026-08-14 核对
+> `@deepseek-ai/dsh-subagent-spawn-in-process` · bundle：`base` · 配置树 id：`subagent-spawn-in-process` · v0.1.0-rc.5（commit `47f9438`）2026-08-14 核对。出处收在文末脚注。
 
-> ⚠️ **本篇未通过对抗式引用核验**：起草已完成，但逐条打开源码比对行号/字段名/英文引文的那一遍因会话额度耗尽未执行。文中 `path:line` 与配置字段请以源码为准，核验后本行会被移除。
+> ⚠️ **本篇未通过对抗式引用核验**：起草已完成，但逐条打开源码比对行号/字段名/英文引文的那一遍因会话额度耗尽未执行。文中坐标与配置字段请以源码为准，核验后本行会被移除。
 
-**一句话**：往 `ctx.subagents` 上注册名为 `spawn` 的 provider——在当前进程里开一个**全新**子 Agent，自己的 session、零父对话历史，复用宿主的 agent factory 与 LLM/工具服务。
+看名字容易先入为主：以为这个"spawn"和 Node 的 `child_process.spawn` 一回事——开一条新的操作系统进程，独立的资源、独立的地址空间。不是的，真相写在包名后半截：`in-process`。新开的只是一个全新的子 Agent session，进程还是原来那个进程，宿主的 agent factory、LLM 服务、工具服务全部照旧复用，只是这个子从零开始，一点父对话的历史都不带。
 
-这个包小到可以一口气读完。真正干活的代码在别处（共享 driver），它只负责把一个 provider 挂上去，然后把请求原样转出去。
+这个包本身小到一口气能读完。真正干活的代码在别处——共享的 driver 扛下所有重活，这里只做两件事：把一个 provider 挂上去，把请求原样转发出去。
 
 ## 它在树上长什么样
 
@@ -17,36 +17,32 @@
         providerName: spawn
 ```
 
-YAML 里没写 `inject`，但依赖是有的：模块自己导出了 `export const inject = ['subagents']`，配置目录也把它记成 `Requires: subagents`。
+配置块里没写 `inject`，但依赖是有的：模块自己在导出里声明了对 `subagents` 服务的依赖，配置目录也把它记成 `Requires: subagents`[^1]。
 
-有一处反直觉，源码里特意注了一笔：`tools` **不注入**。子 factory 在 setup 期已经把它提供好了，再写进 `inject` 只会平白改变本 provider 的 apply 时机，没有任何好处。
-
-出处：树上的挂载见 `packages/bundle/base/cordis.patch.yml:295-298`；`inject` 见 `packages/subagent/subagent-spawn-in-process/src/index.ts:22`，`docs/config-catalog.md:2192`；`tools` 不注入的说明见 `src/index.ts:20-21`。
+有一处反直觉，源码里特意注了一笔：`tools` **不注入**。子 factory 在 setup 期已经把它提供好了，再写进 `inject` 只会平白改变本 provider 的 apply 时机，没有任何好处[^2]。
 
 ## 它注册了什么
 
 | 类型 | 名字 | 说明 |
 |---|---|---|
-| provider | `spawn`（`config.providerName`） | `ctx.subagents.registerProvider(...)`，`src/index.ts:62-64` |
+| provider | `spawn`（由 `providerName` 配置） | 挂在 `ctx.subagents` 上的一个新 provider[^3] |
 
 没有工具、没有 prompt 段、**没有任何事件监听**，所以也谈不上 waterfall 拦截。
 
 不过注册这个动作本身会让缝发出一条 `subagent/provider-added`，[tool-subagent](./dsh-tool-subagent.md) 就是靠这个事件决定什么时候挂载委派工具的。
 
-### 两个静态面
+### 两个静态面：能力全开，但不继承父上下文
 
 | 面 | 值 |
 |---|---|
 | `capabilities` | `{ outputSchema: true, depthLimit: true, toolFilter: true, persona: true }` |
 | `inheritsParentContext` | `false` |
 
-四个能力全支持，理由是「it controls the child's creation window and can enforce all four features」——它控制着子的创建窗口，所以四项都强制得了。
+四个能力全支持，理由是「it controls the child's creation window and can enforce all four features」——它控制着子的创建窗口，所以四项都强制得了[^4]。
 
 `inheritsParentContext: false` 不只是个内部标记，它会直接改变模型看到的工具描述文案，细节见 [tool-subagent](./dsh-tool-subagent.md)。
 
-以上见 `src/index.ts:41-46`。
-
-### 两个方法
+### 两个方法：一个照转，一个交白卷
 
 方法只有两个，都短到可以写成伪代码：
 
@@ -58,11 +54,9 @@ prepareContinuable():
     return {}                               // 新开的子没有种子可贡献
 ```
 
-`start()` 把请求原样丢给共享的 `startInProcessRun`，不带 seed；`prepareContinuable()` 返回空对象，因为全新的子没有什么可以贡献给续跑，后续一切由 continuation manager 拥有。
+`start` 方法把请求原样丢给共享的 `startInProcessRun`，不带 seed[^5]。`prepareContinuable` 返回空对象，因为全新的子没有什么可以贡献给续跑，后续一切由 continuation manager 拥有[^6]。
 
 关键在于**有 `prepareContinuable` 就等于有可续能力**——缝就是这么判定的，不看返回值内容。所以 base 里 `tool-subagent` 能对它设 `backgroundMode: continuable`。
-
-出处：`start()` 见 `src/index.ts:48-53`，`prepareContinuable()` 见 `:55-59`。
 
 ## 配置项
 
@@ -70,7 +64,7 @@ prepareContinuable():
 |---|---|---|---|
 | `providerName` | `string` | `spawn` | 在 `ctx.subagents` 上的注册名 |
 
-定义在 `src/index.ts:30-32`。base 显式写了 `spawn`，与默认值一致。
+base 显式写了 `spawn`，与默认值一致[^7]。
 
 ## 模型看得见什么
 
@@ -121,6 +115,17 @@ flowchart TD
 
 **fresh 意味着没有父的 transcript。** 子继承 cwd、lineage、model 和显式配置的 persona/工具限制，但**一条父对话都不继承**。需要已完成 turn 的上下文，就得用 fork。
 
-启动失败不会留下已发布的子；反过来，fulfillment 之后卸载 provider 也不会撤销已经交给持有者的 run（README「Behavior」）。
+启动失败不会留下已发布的子；反过来，fulfillment 之后卸载 provider 也不会撤销已经交给持有者的 run[^8]。
 
-最后一条是省时间的：深度检查、persona 与 tool-filter 安装、结构化输出、必需 signal 的取消、一次性执行、结果读取和静默销毁**都不在本包**，全部由共享的 in-process driver 负责。读源码时别在这里找。
+最后一条是省时间的：深度检查、persona 与 tool-filter 安装、结构化输出、必需 signal 的取消、一次性执行、结果读取和静默销毁**都不在本包**，全部由共享的 in-process driver 负责。读源码时别在这里找——这也是为什么这个包能小到一口气读完。
+
+## 出处
+
+[^1]: 挂载片段：`packages/bundle/base/cordis.patch.yml:295-298`。`inject` 声明：`packages/subagent/subagent-spawn-in-process/src/index.ts:22`；配置目录记录：`docs/config-catalog.md:2192`。
+[^2]: `tools` 不注入的说明：`src/index.ts:20-21`。
+[^3]: `ctx.subagents.registerProvider` 调用：`src/index.ts:62-64`。
+[^4]: 两个静态面（`capabilities`、`inheritsParentContext`）及注释原文：`src/index.ts:41-46`。
+[^5]: `start` 方法实现：`src/index.ts:48-53`。
+[^6]: `prepareContinuable` 方法实现：`src/index.ts:55-59`。
+[^7]: `providerName` 字段定义：`src/index.ts:30-32`。
+[^8]: 启动失败与卸载后 run 不被撤销的说明：README「Behavior」一节。

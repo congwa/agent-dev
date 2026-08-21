@@ -1,8 +1,8 @@
 # tool-subagent
 
-> `@deepseek-ai/dsh-tool-subagent` · bundle：`base` · 配置树 id：`tool-subagent`、`tool-subagent-fork` · v0.1.0-rc.5（commit `47f9438`）2026-08-14 核对
+> `@deepseek-ai/dsh-tool-subagent` · bundle：`base` · 配置树 id：`tool-subagent`、`tool-subagent-fork` · v0.1.0-rc.5（commit `47f9438`），2026-08-14 核对。出处收在文末脚注，点角标可跳转。
 
-> ⚠️ **本篇未通过对抗式引用核验**：起草已完成，但逐条打开源码比对行号/字段名/英文引文的那一遍因会话额度耗尽未执行。文中 `path:line` 与配置字段请以源码为准，核验后本行会被移除。
+> ⚠️ **本篇未通过对抗式引用核验**：起草已完成，但逐条打开源码比对行号/字段名/英文引文的那一遍因会话额度耗尽未执行。脚注里的坐标与配置字段请以源码为准，核验后本行会被移除。
 
 **一句话**：模型可见的委派工具，一个插件实例绑定一个 `ctx.subagents` provider 和一个工具名；换 provider 只换传输，不换执行契约。base 装了两份。
 
@@ -24,22 +24,22 @@
         backgroundMode: one-shot
 ```
 
-两份实例的差别只有三个字段：绑哪个 provider、叫什么工具名、后台模式是哪种。
+两份实例的差别只有三个字段：绑哪个 provider、叫什么工具名、后台模式是哪种[^1]。
 
-第二行上方那段注释解释了 fork 为什么保持 one-shot：可续子的 `report` 工具与 prompt 段排在「fork 存在就是为了复用的那段继承历史」之前，一次性 fork 子两样都不装，父的请求前缀得以保留。
+第二行配置上方那段注释解释了 fork 为什么保持 one-shot：可续子的 `report` 工具与 prompt 段排在「fork 存在就是为了复用的那段继承历史」之前，一次性 fork 子两样都不装，父的请求前缀得以保留[^1]。这个模块对外的导出是 `inject = ['tools', 'subagents', 'systemPrompt']`[^2]。
 
-出处：两段 yaml 见 `packages/bundle/base/cordis.patch.yml:313-318` 与 `:324-329`；模块导出 `export const inject = ['tools', 'subagents', 'systemPrompt']` 见 `packages/subagent/tool-subagent/src/index.ts:23`。
-
-web-app bundle 把这两行都 `disabled: true`（`packages/bundle/web-app/cordis.patch.yml:380-384`）：registry 和后端留在 host plane，preset 自己决定它的 agent 看见哪些委派工具。
+web-app bundle 把这两行都设成 `disabled: true`[^3]：registry 和后端留在 host plane，preset 自己决定它的 agent 看见哪些委派工具。
 
 ## 它注册了什么
 
+它注册一个工具、一段 prompt，再监听两个事件，四处出处见脚注[^4]：
+
 | 类型 | 名字 | 说明 |
 |---|---|---|
-| 工具 | `config.toolName`（默认 `subagent`） | 只在其 provider 存在期间注册，`src/index.ts:297` |
-| prompt 段 | `tool:<toolName>`（order 116.5） | 仅 `backgroundMode: continuable` 且开了后台时注册，`src/index.ts:26`、`:455-466` |
-| 事件（收） | `subagent/provider-added`（emit） | provider 出现即挂载工具，`src/index.ts:440-442` |
-| 事件（收） | `subagent/provider-removed`（emit） | provider 消失即卸载工具，`src/index.ts:443-447` |
+| 工具 | `config.toolName`（默认 `subagent`） | 只在其 provider 存在期间注册 |
+| prompt 段 | `tool:<toolName>`（order 116.5） | 仅 `backgroundMode: continuable` 且开了后台时注册 |
+| 事件（收） | `subagent/provider-added`（emit） | provider 出现即挂载工具 |
+| 事件（收） | `subagent/provider-removed`（emit） | provider 消失即卸载工具 |
 
 工具的生死完全跟着 provider 走：
 
@@ -56,11 +56,11 @@ apply 时 provider 还不在：
 
 两个监听都是 `emit`，**不是 waterfall**，它不拦截任何调用。
 
-之所以要跟着生命周期走而不是 apply 时一次性绑定，是因为 Cordis 可能并发加载兄弟插件，配置顺序不证明注册顺序。等待日志见 `src/index.ts:448-454`。
+之所以要跟着生命周期走而不是 apply 时一次性绑定，是因为 Cordis 可能并发加载兄弟插件，配置顺序不证明注册顺序[^5]。
 
-工具描述文案随 `provider.inheritsParentContext` 变（`src/index.ts:211-236`）：fresh 子的文案是「it does not see this conversation」，fork 子则是「a child agent seeded with all completed turns so far」——对 fork 说前一句是**假的**，所以这段分支是必需的。
+工具描述文案跟着 `provider.inheritsParentContext` 变[^6]：fresh 子的文案是「it does not see this conversation」，fork 子则是「a child agent seeded with all completed turns so far」——对 fork 说前一句是**假的**，所以这段分支是必需的。
 
-三条执行路线（`src/index.ts:369-430`）：
+三条执行路线[^7]：
 
 | 路线 | 触发 | 返回 | 渲染 |
 |---|---|---|---|
@@ -79,7 +79,7 @@ apply 时 provider 还不在：
         结果 = errored(headline + withPartialText(子已经写出来的部分输出))
 ```
 
-截断的答案既不会被当成成功，也不会被静默丢掉。`withPartialText` 在 `src/index.ts:149-155`。
+截断的答案既不会被当成成功，也不会被静默丢掉[^8]。
 
 可续路线相反：在 inbox 接受时就 resolve，此后子自己拥有 turn，这次调用既不等待也不收集结果。
 
@@ -123,13 +123,13 @@ flowchart TD
 | `toolFilter` | `{ allow?, deny? }` | 省略 | 每子全局工具限制，需要 `toolFilter` 能力 |
 | `maxDepth` | `number \| 'provider-managed'` | `3` | 绝对委派深度上限，`0` 完全禁止委派 |
 
-Schema 在 `src/index.ts:81-99`。三处 fail-loud，都不等到第一次委派才发作：
+配置的 schema 定义在同一处[^9]。三处 fail-loud，都不等到第一次委派才发作，出处见脚注[^10]：
 
-| 配置 | 遇上什么 | 什么时候抛 | 出处 |
-|---|---|---|---|
-| `toolFilter` 写了但 `allow`/`deny` 都空 | —— | apply 直接抛 | `:272-274` |
-| 数值 `maxDepth` | provider 没有 `depthLimit` 能力 | **mount 时**抛 | `:285-290` |
-| `continuable` | provider 没有 `prepareContinuable` | mount 时抛 | `:292-296` |
+| 配置 | 遇上什么 | 什么时候抛 |
+|---|---|---|
+| `toolFilter` 写了但 `allow`/`deny` 都空 | —— | apply 直接抛 |
+| 数值 `maxDepth` | provider 没有 `depthLimit` 能力 | **mount 时**抛 |
+| `continuable` | provider 没有 `prepareContinuable` | mount 时抛 |
 
 ## 模型看得见什么
 
@@ -142,7 +142,7 @@ Schema 在 `src/index.ts:81-99`。三处 fail-loud，都不等到第一次委派
 | 可续 | 「runs in the background by default」；「the runtime sends the parent a notice containing its outcome and any final assistant message」；「`send_message` starts a later turn in the same child conversation」 |
 | 一次性 | 「This call waits for the result by default」；「collect with `job_output` and stop with `job_kill`」 |
 
-可续实例还额外贡献一段 `tool:<toolName>` 系统 prompt（order 116.5，`src/index.ts:459-465`），要求模型把独立的委派放在同一条 assistant 消息里一起发起、在它们跑的时候继续干活、只有下一步动作依赖结果时才设 `run_in_background: false`。工具不可见时这段文本为空串，渲染时会被略去。
+可续实例还额外贡献一段 `tool:<toolName>` 系统 prompt（order 116.5）[^11]，要求模型把独立的委派放在同一条 assistant 消息里一起发起、在它们跑的时候继续干活、只有下一步动作依赖结果时才设 `run_in_background: false`。工具不可见时这段文本为空串，渲染时会被略去。
 
 结果本身在父历史里都是**只追加**的：后台路线只留一行确认；可续子的输出永远不从这个工具返回，而是通过 [subagent 服务自己的结算通知](./dsh-subagent.md) 到达父那边。
 
@@ -157,10 +157,30 @@ Schema 在 `src/index.ts:81-99`。三处 fail-loud，都不等到第一次委派
 
 **后台 run 不通过本工具暴露结果。** 一次性任务的最终输出要走通用 task 面收集，可续子的输出留在它自己的 session 里，按 subagent id 读。结算通知说明它是怎么结束的、带上最后一条 assistant 消息，但那不是本次调用的返回值，也没法在这里 await。
 
-**等待中的一次性实例重名检测太晚**（`TODO(subagent-dup-toolname)`，`src/index.ts:436-439`）。可续实例在 apply 期就抢占 prompt 段名字因而更早失败；两个同名的等待中 one-shot fiber 要等 provider 出现才碰撞，重名抛出会回滚 provider 注册。
+**等待中的一次性实例重名检测太晚**，标记为 `TODO(subagent-dup-toolname)`[^12]。可续实例在 apply 期就抢占 prompt 段名字因而更早失败；两个同名的等待中 one-shot fiber 要等 provider 出现才碰撞，重名抛出会回滚 provider 注册。
 
 **子策略按实例固定。** 换 model、persona、工具过滤或深度上限，只能再开一个名字不同的工具。
 
-并发是安全的：子在自己的 session 里工作，run 从不改父 session，唯一一次父侧写入（注册 Task）是同步、可交换的插入，所以重叠的后台调用按 dispatch 竞争顺序拿到 job id（`isConcurrencySafe: () => true`，`src/index.ts:368`）。
+并发是安全的：子在自己的 session 里工作，run 从不改父 session，唯一一次父侧写入（注册 Task）是同步、可交换的插入，所以重叠的后台调用按 dispatch 竞争顺序拿到 job id[^13]。
 
-一次性后台路线需要 `ctx.jobs`，缺了会抛 `background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs`（`src/index.ts:400-403`）。base 里 `jobs` 在 `packages/bundle/base/cordis.patch.yml:69`、`tool-jobs` 在 `:218`。
+一次性后台路线需要 `ctx.jobs`，缺了会抛 `background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs`[^14]。base 里 `jobs` 与 `tool-jobs` 两个插件各自的挂载位置见脚注[^15]。
+
+---
+
+## 出处
+
+[^1]: 两段配置定义：`packages/bundle/base/cordis.patch.yml:313-318`（tool-subagent，含上方注释）与 `:324-329`（tool-subagent-fork）。
+[^2]: 模块导出 `export const inject = ['tools', 'subagents', 'systemPrompt']`：`packages/subagent/tool-subagent/src/index.ts:23`。
+[^3]: web-app bundle 禁用两个实例：`packages/bundle/web-app/cordis.patch.yml:380-384`。
+[^4]: 工具注册：`src/index.ts:297`；prompt 段注册条件：`:26`、`:455-466`；`subagent/provider-added` 挂载工具：`:440-442`；`subagent/provider-removed` 卸载工具：`:443-447`。
+[^5]: 等待日志：`src/index.ts:448-454`。
+[^6]: 文案随 `provider.inheritsParentContext` 分支：`src/index.ts:211-236`。
+[^7]: 三条执行路线：`src/index.ts:369-430`。
+[^8]: `withPartialText`：`src/index.ts:149-155`。
+[^9]: Schema 定义：`src/index.ts:81-99`。
+[^10]: 三处判断分别在 `src/index.ts:272-274`（`toolFilter` 空）、`:285-290`（`maxDepth` 无 `depthLimit`）、`:292-296`（`continuable` 无 `prepareContinuable`）。
+[^11]: 该 prompt 段：`src/index.ts:459-465`。
+[^12]: `TODO(subagent-dup-toolname)`：`src/index.ts:436-439`。
+[^13]: `isConcurrencySafe: () => true`：`src/index.ts:368`。
+[^14]: 报错与前置检查：`src/index.ts:400-403`。
+[^15]: base bundle 挂载：`jobs` 见 `packages/bundle/base/cordis.patch.yml:69`，`tool-jobs` 见 `:218`。

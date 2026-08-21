@@ -1,6 +1,6 @@
 # compaction-basic
 
-> `@deepseek-ai/dsh-compaction-basic` · bundle：`base` · 配置树 id：`compaction-basic` · v0.1.0-rc.5（commit `47f9438`）2026-08-14 核对
+> `@deepseek-ai/dsh-compaction-basic` · bundle：`base` · 配置树 id：`compaction-basic` · v0.1.0-rc.5（commit `47f9438`）2026-08-14 核对。出处收在文末脚注。
 
 > ⚠️ **本篇未通过对抗式引用核验**：起草已完成，但逐条打开源码比对行号/字段名/英文引文的那一遍因会话额度耗尽未执行。文中 `path:line` 与配置字段请以源码为准，核验后本行会被移除。
 
@@ -15,9 +15,7 @@
       name: '@deepseek-ai/dsh-compaction-basic'
 ```
 
-整行没有 `config`，所以后面配置表里的字段全部走默认值；也没有显式 `inject`，依赖由类上的 `static inject = ['llm', 'tokenMeter', 'sessions']` 声明。
-
-出处：树上这一行见 `packages/bundle/base/cordis.patch.yml:284-285`，`static inject` 见 `packages/compaction/compaction-basic/src/index.ts:104`。
+整行没有 `config`，所以后面配置表里的字段全部走默认值；也没有显式 `inject`，依赖靠类上的 `static inject` 声明——`llm`、`tokenMeter`、`sessions` 三个 service[^1]。
 
 web profile 把它关掉了：
 
@@ -26,21 +24,19 @@ web profile 把它关掉了：
   disabled: true
 ```
 
-上面那段注释解释了原因："The token METER stays on the host plane; only the compaction backend that reads it moves."——token-meter 留在 host 平面，压缩后端下沉到按 session 的 preset 平面。
-
-出处：`packages/bundle/web-app/cordis.patch.yml:358-359`（disabled 那两行）、`:351-352`（英文注释）。
+上面那段注释解释了原因："The token METER stays on the host plane; only the compaction backend that reads it moves."——token-meter 留在 host 平面，压缩后端下沉到按 session 的 preset 平面[^2]。
 
 ## 它注册了什么
 
 | 类型 | 名字 | 说明 |
 |---|---|---|
-| service | `ctx.compaction` | 由抽象基类 `CompactionEngine` 的 `super(ctx, 'compaction')` 完成注册（`packages/compaction/compaction/src/index.ts:98`）；本包提供 `compactIfNeeded` / `compactRegion` / `compactNow` 三个实现 |
-| 可选依赖 | `ctx.get('toolResultPruner')` | 软引用 [tool-result-pruner](./dsh-compaction-tool-result-pruner.md)，取不到就跳过剪枝（`packages/compaction/compaction-basic/src/index.ts:281`） |
-| 事件监听 | `agent/pre-step`（**waterfall**） | 在请求派生之前做压力检查，可以在这里先落地压缩再让 step 继续（`packages/compaction/compaction-basic/src/index.ts:147`；派发模式见 `docs/event-producer-consumer.md:18`） |
-| 事件监听 | `agent/request-error`（**waterfall**） | 只认 `CONTEXT_WINDOW_EXCEEDED`，压缩成功后返回 `{ kind: 'retry' }` 把这次请求重放（`packages/compaction/compaction-basic/src/index.ts:179`、`:222`；派发模式见 `docs/event-producer-consumer.md:20`） |
-| 事件监听 | `agent/status`（emit） | agent 转 `idle` 时清掉 overflow 重试计数（`packages/compaction/compaction-basic/src/index.ts:167`） |
-| 事件监听 | `session/event`（emit） | 见到 `assistant/message` 就重置 overflow 序列（`packages/compaction/compaction-basic/src/index.ts:173`） |
-| 会话事件 | `compaction/start` / `compaction/summary` / `compaction/end` | 三个都是 log-only，不进 surface；替换本身骑在一条带 `surfaceOp: { op: 'replace' }` 的 `user/message` 上（`docs/subsystems/compaction.md:11-19`） |
+| service | `ctx.compaction` | 由抽象基类 `CompactionEngine` 的构造函数完成注册；本包提供 `compactIfNeeded` / `compactRegion` / `compactNow` 三个实现[^3] |
+| 可选依赖 | `toolResultPruner` | 软引用 [tool-result-pruner](./dsh-compaction-tool-result-pruner.md)，取不到就跳过剪枝[^4] |
+| 事件监听 | `agent/pre-step`（**waterfall**） | 在请求派生之前做压力检查，可以在这里先落地压缩再让 step 继续[^5] |
+| 事件监听 | `agent/request-error`（**waterfall**） | 只认 `CONTEXT_WINDOW_EXCEEDED`，压缩成功后返回一个 retry 信号把这次请求重放[^6] |
+| 事件监听 | `agent/status`（emit） | agent 转 `idle` 时清掉 overflow 重试计数[^7] |
+| 事件监听 | `session/event`（emit） | 见到 `assistant/message` 就重置 overflow 序列[^8] |
+| 会话事件 | `compaction/start` / `compaction/summary` / `compaction/end` | 三个都是 log-only，不进 surface；替换本身挂在一条带 `surfaceOp: { op: 'replace' }` 的 `user/message` 上[^9] |
 
 没有注册工具，也没有 prompt 段。
 
@@ -65,9 +61,7 @@ on session/event:
     if e 是 assistant/message:  重置 overflow 序列
 ```
 
-两个 waterfall 监听各自守着一条触发路径，压力检查在请求前，溢出恢复在请求后；两条路径最后都汇到同一个压缩动作上。
-
-安装条件见 `packages/compaction/compaction-basic/src/index.ts:129`，四个监听分别在 `:147`、`:179`/`:222`、`:167`、`:173`。
+两个 waterfall 监听各自守着一条触发路径，压力检查在请求前，溢出恢复在请求后；两条路径最后都汇到同一个压缩动作上[^10]。
 
 ```mermaid
 flowchart TD
@@ -100,20 +94,18 @@ flowchart TD
 
 | 字段 | 类型 | 默认值 | 作用 |
 |---|---|---|---|
-| `thresholdRatio` | number | `0.8` | 在 `floor(routedContextWindow × ratio)` 处触发压缩 |
+| `thresholdRatio` | number | `0.8` | 在 `routedContextWindow` × `thresholdRatio` 取整（向下）之处触发压缩 |
 | `retainRatio` | number | `0.16` | 逐字保留的近期 surface 预算占窗口比例；与 `retainTokens` 互斥 |
 | `retainTokens` | number | 无 | 绝对近期预算，必须低于解析出的阈值 |
-| `summarizationProvider` | string | `''` | 与 `summarizationModel` 成对设置；空对表示回落到最近一次落库的请求目标，再回落到 `AgentOptions` |
+| `summarizationProvider` | string | `''` | 与 `summarizationModel` 成对设置；空值表示回落到最近一次落库的请求目标，再回落到 `AgentOptions` |
 | `summarizationModel` | string | `''` | 同上 |
 | `maxTokens` | number | `8192` | 摘要调用的生成上限，可能包含 reasoning token |
 | `compactionRetries` | number | `1` | 首次之外的额外尝试次数，压力仍高于阈值时继续 |
 | `maxOverflowRetries` | number | `1` | canonical 溢出后的最大重试；`0` 只禁用恢复 |
-| `modelPolicies` | array | `[]` | 精确 `{ provider, model, ...partialPolicy }` 覆盖，匹配不依赖 `listModels()` |
+| `modelPolicies` | array | `[]` | 精确 `{ provider, model, ...partialPolicy }` 覆盖，匹配不依赖 `listModels` |
 | `auto` | boolean | `true` | 是否注册 step 压力与溢出恢复监听 |
 
-有四种写法会直接让插件加载失败，不是运行期才报：未知键、重复目标、互斥的两种保留写法同时出现、以及合并后 `retainRatio` 不低于 `thresholdRatio`。
-
-默认值出处：`packages/compaction/compaction-basic/src/config.ts:20`、`:23`、`:86-95`。
+有四种写法会直接让插件加载失败，不是运行期才报：未知键、重复目标、互斥的两种保留写法同时出现、以及合并后 `retainRatio` 不低于 `thresholdRatio`[^11]。
 
 ## 模型看得见什么
 
@@ -133,19 +125,17 @@ flowchart TD
 This is an automatically generated checkpoint condensing an earlier span of the conversation to free up context. Treat the captured context as established background and build on it without restating it. Continue the task directly from the messages that follow, without acknowledging this checkpoint.
 ```
 
-摘要是怎么来的？一次独立的 `ctx.llm.stream()` 调用，`purpose: 'compaction'`。这次私有请求里"重放什么、新增什么、只收什么"是三件不同的事：
+摘要是怎么来的？一次独立的 `ctx.llm.stream` 调用，`purpose` 字段是 `compaction`[^12]。这次私有请求里"重放什么、新增什么、只收什么"是三件不同的事：
 
 | 这次私有请求 | 内容 |
 |---|---|
 | 逐字重放 | 对话自己的 system prompt、tools、被影子化区间的消息 |
 | 末尾追加 | 一条固定的压缩指令 user 消息 |
-| 只收 | 文本；图像输出会以 `UNSUPPORTED_CONTENT` 失败，而不是被悄悄丢掉 |
+| 只收 | 文本；图像输出会以 `UNSUPPORTED_CONTENT` 失败，而不是被悄悄丢掉[^13] |
 
 为什么要逐字重放而不是只发要压的那段？README 的 KV Cache effect 一节说明这样做是为了复用 provider 的热前缀缓存，只有那条指令和输出是未缓存的。
 
 会话模型永远看不到这次私有请求，只有返回的**文本**进检查点。
-
-出处：`packages/compaction/compaction-basic/src/summarizer.ts:161`（独立调用与 purpose）、`:220-221`（图像失败）。
 
 ```mermaid
 flowchart TD
@@ -198,7 +188,7 @@ flowchart TD
 
 **只想手动压缩**：`auto: false`，自动监听全部不注册，只留 [command-compact](./dsh-command-compact.md) 的 `/compact` 和程序化调用。
 
-**换摘要方式**：`summarize()` 是唯一的子类钩子，模板摘要或远程摘要写个子类覆盖它即可，压力、保留、收敛校验仍走 `ctx.tokenMeter`。钩子位置见 `packages/compaction/compaction-basic/src/index.ts:236`。
+**换摘要方式**：`summarize()` 是唯一的子类钩子，模板摘要或远程摘要写个子类覆盖它即可，压力、保留、收敛校验仍走 `ctx.tokenMeter`[^14]。
 
 **整包换掉**：写一个别的 `CompactionEngine` 子类注册 `ctx.compaction`，`/compact` 是后端无关的，会自动跟着新后端走。
 
@@ -214,7 +204,7 @@ flowchart TD
 
 摘要失败时保留最新的持久 surface：在任何替换落地之前，自动路径只 warn 并带着超预算的完整历史继续；`maxTokens` 截断（可能被隐藏的 reasoning token 吃掉）同样按此处理。
 
-最后一条最容易读反：**低于压力线的 step 根本不剪枝**。pruner 不是"顺手每步清一清"，它只在压力或溢出已经合格之后才跑：
+最后一条最容易读反：**低于压力线的 step 根本不剪枝**。pruner 不是"顺手每步清一清"，它只在压力或溢出已经合格之后才跑[^15]：
 
 ```
 if 压力 < 阈值:
@@ -226,4 +216,20 @@ pruner = ctx.get('toolResultPruner')
 if pruner: 剪枝                 # 软引用，取不到就跳过
 ```
 
-阈值检查处见 `packages/compaction/compaction-basic/src/index.ts:308`。
+## 出处
+
+[^1]: 树上这一行：`packages/bundle/base/cordis.patch.yml:284-285`。`static inject = ['llm', 'tokenMeter', 'sessions']` 声明：`packages/compaction/compaction-basic/src/index.ts:104`。
+[^2]: `packages/bundle/web-app/cordis.patch.yml:358-359`（disabled 那两行）、`:351-352`（英文注释）。
+[^3]: `super(ctx, 'compaction')` 完成注册：`packages/compaction/compaction/src/index.ts:98`。
+[^4]: `ctx.get('toolResultPruner')` 软查：`packages/compaction/compaction-basic/src/index.ts:281`。
+[^5]: `packages/compaction/compaction-basic/src/index.ts:147`；派发模式见 `docs/event-producer-consumer.md:18`。
+[^6]: `packages/compaction/compaction-basic/src/index.ts:179`、`:222`；派发模式见 `docs/event-producer-consumer.md:20`。
+[^7]: `packages/compaction/compaction-basic/src/index.ts:167`。
+[^8]: `packages/compaction/compaction-basic/src/index.ts:173`。
+[^9]: `docs/subsystems/compaction.md:11-19`。
+[^10]: 安装条件：`packages/compaction/compaction-basic/src/index.ts:129`；四个监听分别挂在 `:147`（pre-step）、`:179`/`:222`（request-error）、`:167`（status）、`:173`（session/event）。
+[^11]: 默认值与加载失败校验出处：`packages/compaction/compaction-basic/src/config.ts:20`、`:23`、`:86-95`。
+[^12]: 独立调用与 purpose：`packages/compaction/compaction-basic/src/summarizer.ts:161`。
+[^13]: 图像失败：`packages/compaction/compaction-basic/src/summarizer.ts:220-221`。
+[^14]: 钩子位置：`packages/compaction/compaction-basic/src/index.ts:236`。
+[^15]: 阈值检查处：`packages/compaction/compaction-basic/src/index.ts:308`。

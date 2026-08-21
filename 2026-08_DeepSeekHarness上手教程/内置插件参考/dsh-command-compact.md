@@ -1,10 +1,12 @@
 # command-compact
 
-> `@deepseek-ai/dsh-command-compact` · bundle：`base` · 配置树 id：`command-compact` · v0.1.0-rc.5（commit `47f9438`）2026-08-14 核对
+> `@deepseek-ai/dsh-command-compact` · bundle：`base` · 配置树 id：`command-compact` · v0.1.0-rc.5（commit `47f9438`）2026-08-14 核对；出处收在文末脚注。
 
 > ⚠️ **本篇未通过对抗式引用核验**：起草已完成，但逐条打开源码比对行号/字段名/英文引文的那一遍因会话额度耗尽未执行。文中 `path:line` 与配置字段请以源码为准，核验后本行会被移除。
 
 **一句话**：把 `/compact` 这个人类命令接到 `ctx.compaction.compactNow()` 上——在自动阈值之下也强制做一次有用的压缩，不占用一次模型 turn。
+
+直觉是：这条命令大概就是替用户手动按一下"自动压缩本来会做的事"。不完全对——`compactNow()` 是绕开阈值判断的强制入口：哪怕历史远没攒到自动压缩的门槛，只要这次压缩确实有东西可换，命令照样会真的执行一次替换，而不是因为"还没到时候"被打回来。真正会让它空手而归的，是另一件事：压根没有可压缩的历史。
 
 ## 它在树上长什么样
 
@@ -17,19 +19,15 @@
 
 四行，没有 `config`——这个插件根本不导出 `Config`。
 
-web profile 里它是关掉的：`disabled: true`。
-
-出处：树上这段见 `packages/bundle/base/cordis.patch.yml:287-290`；web profile 的开关见 `packages/bundle/web-app/cordis.patch.yml:361-362`。
+web profile 里它是关掉的：`disabled: true`[^1]。
 
 ## 它注册了什么
 
 | 类型 | 名字 | 说明 |
 |---|---|---|
-| 命令 | `compact` | `ctx.commands.register({ name: 'compact', description: 'Compact older conversation history', handler })` |
-| inject | `commands`、`compaction` | `export const inject = ['commands', 'compaction']` |
+| 命令 | `compact` | `ctx.commands.register({ name: 'compact', description: 'Compact older conversation history', handler })`[^2] |
+| inject | `commands`、`compaction` | `export const inject = ['commands', 'compaction']`[^3] |
 | 会话事件 | `command/run` / `command/done` | 由命令执行器写入的 log-only 配对，都不进模型历史；成功时 `command/done.sourceEventSeq` 指向本次事务的 `compaction/summary` |
-
-出处：命令注册见 `packages/compaction/command-compact/src/index.ts:100-104`，inject 见同文件 `:11`。
 
 **没有 service、没有事件监听、没有工具、没有 prompt 段。**
 
@@ -97,7 +95,7 @@ handler(参数):
 | `/compact`（无可压缩历史） | `No compactable history yet.`，不写 marker、不改 surface |
 | `/compact <任何参数>` | `Usage: /compact (no arguments)`，压根不调后端 |
 
-预期内的 `ManualCompactionError` 会被翻译成稳定的直接错误文案：
+预期内的 `ManualCompactionError` 会被翻译成稳定的直接错误文案[^4]：
 
 | code | 直接结果 |
 |---|---|
@@ -108,9 +106,7 @@ handler(参数):
 | `commit` | `Compaction did not finish cleanly; some session history may have changed. Inspect the current session state before retrying.` |
 | `persistence` | `Compaction finished, but the session could not be saved.` |
 
-这些 code 不是命令自己编的，是后端的区域事务分类产生的。非预期的实现失败则不做翻译，直接让 dispatch 失败。
-
-出处：文案映射见 `packages/compaction/command-compact/src/index.ts:23-55`；code 的产地见 `packages/compaction/compaction-basic/src/region.ts:256-277`、`:244-250`。
+这些 code 不是命令自己编的，是后端的区域事务分类产生的[^5]。非预期的实现失败则不做翻译，直接让 dispatch 失败。
 
 ## 模型看得见什么
 
@@ -143,8 +139,20 @@ for marker in 活的未配对 marker:
     return busy
 ```
 
-见 `packages/compaction/compaction-basic/src/region.ts:288-296`。
+只挡当前生命周期的证据，不会被上一次进程留下的陈旧 marker 误伤[^6]。
 
-取消始终优先。后端仍会走完必需的 close/flush 清理，命令内部结算为 `Compaction cancelled.`，而命令执行器带着取消错误停止等待。插件销毁时的顺序也是先注销 `/compact`，再排空已经开始的 handler（`packages/compaction/command-compact/src/index.ts:96-105`）。
+取消始终优先。后端仍会走完必需的 close/flush 清理，命令内部结算为 `Compaction cancelled.`，而命令执行器带着取消错误停止等待。插件销毁时的顺序也是先注销 `/compact`，再排空已经开始的 handler[^7]。
 
 压缩期间提交的 prompt 仍按普通 FIFO 接受，但要等压缩的显式持久化检查点和 admission 释放之后才开始。
+
+---
+
+## 出处
+
+[^1]: 树上这段见 `packages/bundle/base/cordis.patch.yml:287-290`；web profile 的开关见 `packages/bundle/web-app/cordis.patch.yml:361-362`。
+[^2]: `packages/compaction/command-compact/src/index.ts:100-104`。
+[^3]: `packages/compaction/command-compact/src/index.ts:11`。
+[^4]: 文案映射见 `packages/compaction/command-compact/src/index.ts:23-55`。
+[^5]: code 的产地见 `packages/compaction/compaction-basic/src/region.ts:256-277`、`:244-250`。
+[^6]: busy 判定的 marker 新旧过滤见 `packages/compaction/compaction-basic/src/region.ts:288-296`。
+[^7]: 插件销毁顺序（先注销 `/compact`，再排空已开始的 handler）见 `packages/compaction/command-compact/src/index.ts:96-105`。

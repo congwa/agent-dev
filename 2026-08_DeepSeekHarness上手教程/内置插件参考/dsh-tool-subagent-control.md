@@ -1,6 +1,6 @@
 # tool-subagent-control
 
-> `@deepseek-ai/dsh-tool-subagent-control` · bundle：`base` · 配置树 id：`tool-subagent-control` · v0.1.0-rc.5（commit `47f9438`）2026-08-14 核对
+> `@deepseek-ai/dsh-tool-subagent-control` · bundle：`base` · 配置树 id：`tool-subagent-control` · v0.1.0-rc.5（commit `47f9438`）2026-08-14 核对。出处收在文末脚注。
 
 > ⚠️ **本篇未通过对抗式引用核验**：起草已完成，但逐条打开源码比对行号/字段名/英文引文的那一遍因会话额度耗尽未执行。文中 `path:line` 与配置字段请以源码为准，核验后本行会被移除。
 
@@ -13,20 +13,20 @@
       name: '@deepseek-ai/dsh-tool-subagent-control'
 ```
 
-无 config。上方注释写着：可续后台子按委派工具逐个选择，而这个单独加载的 follow-up 工具注册的是**唯一一份全局 `send_message`**。
+无 config。上方注释写着：可续后台子按委派工具逐个选择，而这个单独加载的 follow-up 工具注册的是**唯一一份全局 `send_message`**[^1]。
 
-依赖只有两条，模块导出 `export const inject = ['tools', 'subagents']`，文档目录里也记为 `requires tools · subagents`。注意它**不要求** `agents`——那是 list-agents 子插件的事。
+依赖只有两条：`tools` 和 `subagents`，文档目录里也记为 `requires tools · subagents`[^2]。注意它**不要求** `agents`——那是 list-agents 子插件的事。
 
-出处：树上这两行见 `packages/bundle/base/cordis.patch.yml:307-308`，上方注释 `:305-306`；inject 见 `packages/subagent/tool-subagent-control/src/index.ts:19`；依赖记录见 `docs/config-catalog.md:3090`。
-
-之所以和 provider 绑定的 [tool-subagent](./dsh-tool-subagent.md) 分开：多个委派工具（base 里就有 `subagent` 和 `subagent_fork` 两个）不该各自注册一份重复的全局控制工具。web-app 把这一行 `disabled: true`（`packages/bundle/web-app/cordis.patch.yml:374-375`）。
+之所以和 provider 绑定的 [tool-subagent](./dsh-tool-subagent.md) 分开：多个委派工具（base 里就有 `subagent` 和 `subagent_fork` 两个）不该各自注册一份重复的全局控制工具。web-app 把这一行禁用了[^3]。
 
 ## 它注册了什么
 
+两个工具，坐标收在脚注里[^4]：
+
 | 类型 | 名字 | 说明 |
 |---|---|---|
-| 工具 | `send_message` | `src/index.ts:26-77` |
-| 工具 | `interrupt_agent` | `src/index.ts:79-119` |
+| 工具 | `send_message` | 把消息投进子的 inbox |
+| 工具 | `interrupt_agent` | 打断子当前的 turn |
 
 **没有事件监听**（因此也没有 waterfall），没有 prompt 段，没有 service。
 
@@ -34,7 +34,7 @@
 
 ### send_message：投进 inbox 就结束
 
-`send_message` 把 `exec.agent` 作为「授权投递的那个精确在线父」传下去，并把消息来源记成 `{ kind: 'coordinator', form: 'relay', senderSessionId: parent.id }`（`src/index.ts:71`）。
+`send_message` 把 `exec.agent` 作为「授权投递的那个精确在线父」传下去，并把消息来源记成一个 coordinator/relay 标记，附带发送方的 session id[^5]。
 
 服务保留这个来源，但**从不把它当成权限**。
 
@@ -42,7 +42,7 @@
 
 ### interrupt_agent：权限交给服务去判
 
-`interrupt_agent(agent_id)` 把 `exec.agent` 作为「精确在线祖先」权限交给 `ctx.subagents.interrupt()`（`src/index.ts:116`）。目标可以是直接子，也可以是更深的后代，**由服务而不是这个工具**去比对目标 Activation 记录的谱系。
+`interrupt_agent(agent_id)` 把 `exec.agent` 作为「精确在线祖先」权限交给 `ctx.subagents.interrupt()`[^6]。目标可以是直接子，也可以是更深的后代，**由服务而不是这个工具**去比对目标 Activation 记录的谱系。
 
 它只停当前 turn（`keepInbox`），停完之后的世界是这样的：
 
@@ -60,7 +60,7 @@
 | 目标不存在 / 已结束 | 被接受的 no-op |
 | self / 兄弟 / 过期 / 非祖先调用者 | errored 结果 |
 
-两个工具都在 `exec.agent` 缺失时直接抛（`src/index.ts:60-64`、`:109-113`）：父权限和祖先权限都要求一个精确的在线调用 agent。
+两个工具都在 `exec.agent` 缺失时直接抛[^7]：父权限和祖先权限都要求一个精确的在线调用 agent。
 
 两个工具都是「接受即返回」，但接受之后各自影响的范围完全不同：
 
@@ -118,7 +118,7 @@ token 上两者都只有一行短确认；被打断那一 turn 的中止只在�
 
 **列表是快照，不是投递承诺。** 这条属于 list-agents，但会影响这里的用法——`interrupt_agent` 自己做权威的在线谱系检查，所以发现层的过期数据无法授予权限。
 
-源码侧还有一个容易误判的地方：`interrupt` 在 `SubagentRuntime` 里是 `this.continuations?.interrupt(...)`，那个 `?.` 是关键。
+源码侧还有一个容易误判的地方：`SubagentRuntime` 里的 `interrupt` 方法包着一层可选链，只有组合里真的挂了 continuation manager 才会真正调用它。
 
 ```
 if 组合里没有 continuation manager:
@@ -127,4 +127,17 @@ if 组合里没有 continuation manager:
     工具照样返回 { accepted: true }     // 「被接受」不等于「真的打断了」
 ```
 
-也就是说，没有 continuation manager 的组合下它是被接受的 no-op。实现在 `packages/subagent/subagent/src/index.ts:256`。
+也就是说，没有 continuation manager 的组合下它是被接受的 no-op[^8]。
+
+---
+
+## 出处
+
+[^1]: 树上这两行见 `packages/bundle/base/cordis.patch.yml:307-308`，上方注释见 `:305-306`。
+[^2]: 模块导出 `export const inject = ['tools', 'subagents']` 见 `packages/subagent/tool-subagent-control/src/index.ts:19`；依赖记录见 `docs/config-catalog.md:3090`。
+[^3]: web-app bundle 把这一行 `disabled: true`：`packages/bundle/web-app/cordis.patch.yml:374-375`。
+[^4]: `send_message` 的实现见 `packages/subagent/tool-subagent-control/src/index.ts:26-77`，`interrupt_agent` 见同文件 `:79-119`。
+[^5]: 消息来源记录见 `src/index.ts:71`。
+[^6]: `src/index.ts:116`。
+[^7]: `src/index.ts:60-64`、`:109-113`。
+[^8]: 实现在 `packages/subagent/subagent/src/index.ts:256`。

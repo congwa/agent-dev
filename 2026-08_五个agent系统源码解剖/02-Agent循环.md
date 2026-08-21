@@ -93,7 +93,7 @@ while true:
 
 **两个入口，一个循环体。** `agentLoop(prompts, ...)` 用于「带着新消息开始」，`agentLoopContinue(context, ...)` 用于「不加新消息、直接从当前历史继续」，两者最终都调用同一个 `runLoop()`。
 
-`agentLoopContinue` 存在的唯一理由就是重试和恢复：出错后应用层把失败的 assistant 消息从历史里摘掉，然后 `continue()`，循环就会拿着「最后一条是 user 或 toolResult」的历史重新发一次请求。这个前置条件是硬校验的，因为 provider 不接受以 assistant 结尾的请求（`agent-loop.ts:74`）。
+`agentLoopContinue` 存在的唯一理由就是重试和恢复：出错后应用层把失败的 assistant 消息从历史里摘掉，然后 `continue()`，循环就会拿着「最后一条是 user 或 toolResult」的历史重新发一次请求。这个前置条件是硬校验的，因为 provider 不接受以 assistant 结尾的请求[^1]。
 
 **双层循环的分工。** 先看形状：
 
@@ -115,21 +115,21 @@ while true:                                            // 外层：只在「agen
 
 内层 `while (hasMoreToolCalls || pendingMessages.length > 0)` 负责一轮接一轮地跑 turn；外层 `while (true)` 只在内层跑完之后做一件事：问 `getFollowUpMessages()` 还有没有排队的消息，有就塞回 `pendingMessages` 继续内层。
 
-这对应两条独立队列——`steer()` 队列在**每个 turn 结束后**被排空并注入下一次请求，`followUp()` 队列只在**agent 本来要停了**的时候才被查看。两条队列各有 `"all"` / `"one-at-a-time"` 两种排空模式。出处：`agent.ts:283-290`（两条队列的查看时机）、`agent.ts:141-154`（排空模式）。
+这对应两条独立队列——`steer()` 队列在**每个 turn 结束后**被排空并注入下一次请求，`followUp()` 队列只在**agent 本来要停了**的时候才被查看。两条队列各有 `"all"` / `"one-at-a-time"` 两种排空模式[^2]。
 
 **三种停止方式。** 除了「模型没返回 tool_call」这个默认出口，还有三个：
 
 | 出口 | 触发条件 | 典型用途 |
 |---|---|---|
 | `shouldStopAfterTurn` 回调 | 返回 true | 「上下文快满了，本轮结束后先去压缩」这类优雅停机 |
-| 整批 `terminate: true` | 这一批**全部**工具都标了 terminate 才真的停 | `shouldTerminateToolBatch`（`agent-loop.ts:582`） |
+| 整批 `terminate: true` | 这一批**全部**工具都标了 terminate 才真的停 | `shouldTerminateToolBatch`[^3] |
 | `stopReason` | 为 `"error"` 或 `"aborted"` | 直接返回 |
 
 **截断消息的特殊处理。** 如果 `stopReason === "length"`，说明输出被 token 上限砍断，这时流式解析器会用「尽力挽救」的 JSON 解析器把半截参数补全成一个能通过 schema 校验的对象——于是你会得到一个**看起来合法但静默残缺**的 tool_call。
 
 Pi 的选择是：整批全部不执行，每个都返回一条错误 tool_result，让模型重发（`failToolCallsFromTruncatedMessage`）。
 
-**两步上下文转换。** `AgentMessage` 是 `Message`（LLM 认识的三种角色）的**超集**，应用可以通过 TypeScript 声明合并往里加自定义消息类型（`types.ts:310-319`）。
+**两步上下文转换。** `AgentMessage` 是 `Message`（LLM 认识的三种角色）的**超集**，应用可以通过 TypeScript 声明合并往里加自定义消息类型[^4]。
 
 每次请求前先跑可选的 `transformContext()`（`AgentMessage[] → AgentMessage[]`，用于压缩/剪枝），再跑必需的 `convertToLlm()`（`AgentMessage[] → Message[]`，用于过滤掉纯 UI 消息）。这让「会话里有 UI 专属消息」和「发给模型的必须干净」两个需求解耦。
 
@@ -175,9 +175,7 @@ flowchart TD
 
 ### 2.3 源码
 
-主循环全貌，注意内外两层的边界：
-
-`packages/agent/src/agent-loop.ts:163`
+主循环全貌，注意内外两层的边界[^5]：
 
 ```typescript
 	let currentContext = initialContext;
@@ -224,7 +222,7 @@ flowchart TD
 
 注意 steering 消息是在**发请求之前**注入的，也就是说它排在上一轮的 tool_result 之后、这一轮的采样之前，模型能看到它。
 
-`agent-loop.ts:203` 起是这一轮的收尾：
+这一轮的收尾紧接着上面这段代码往下[^6]：
 
 ```typescript
 			const toolCalls = message.content.filter((c) => c.type === "toolCall");
@@ -259,9 +257,7 @@ flowchart TD
 
 `prepareNextTurn` 是个容易忽略的扩展点：它允许在两轮之间**换模型、换整个 context、换 thinking level**，压缩（compaction）就是靠它把压缩后的历史换进去的。
 
-并行工具执行的排序处理，是这段代码里最有信息量的部分：
-
-`packages/agent/src/agent-loop.ts:522`
+并行工具执行的排序处理，是这段代码里最有信息量的部分[^7]：
 
 ```typescript
 		finalizedCalls.push(async () => {
@@ -286,7 +282,7 @@ flowchart TD
 
 两种顺序被刻意分开了：`tool_execution_end` 事件在每个工具的闭包里发，所以**按完成先后**到达 UI（快的工具先出结果，体验好）；而 `toolResult` 消息在 `Promise.all` 之后按数组下标发，所以**按 assistant 里的源顺序**进历史（provider 要求的顺序）。
 
-预处理阶段（参数校验、`beforeToolCall` 权限检查）仍然是串行的，只有 `execute()` 并发。另外，只要批次里有任何一个工具声明了 `executionMode: "sequential"`，整批降级为串行——写文件类工具就是这么保护自己的（`agent-loop.ts:419-425`）。
+预处理阶段（参数校验、`beforeToolCall` 权限检查）仍然是串行的，只有 `execute()` 并发。另外，只要批次里有任何一个工具声明了 `executionMode: "sequential"`，整批降级为串行——写文件类工具就是这么保护自己的[^8]。
 
 两条顺序线在哪里分岔、又在哪里各走各的，画出来更直观：
 
@@ -318,9 +314,7 @@ flowchart TD
     class F,G data
 ```
 
-重试逻辑**不在这个文件里**。它在应用层：
-
-`packages/coding-agent/src/core/agent-session.ts:1063`
+重试逻辑**不在这个文件里**。它在应用层[^9]：
 
 ```typescript
 	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
@@ -402,7 +396,7 @@ loop:
 
 **内层：`run_sampling_request` 与 `try_run_sampling_request`。** 前者是重试壳：拿 `provider.info().stream_max_retries()` 做预算，失败就 `handle_retryable_response_stream_error` 退避后重来。后者才是真正处理 SSE / WebSocket 事件流的地方。
 
-**steer 的语义。** UI 在 Task 运行中发来的 `Op::UserInput` 走 `steer_input`（`session/mod.rs:3989`）：拿 `active_turn` 锁，检查任务类型可 steer（`Review` 和 `Compact` 任务拒绝 steer），然后追加到该 turn 的 `pending_input`。**不打断正在跑的采样请求**。
+**steer 的语义。** UI 在 Task 运行中发来的 `Op::UserInput` 走 `steer_input`[^10]：拿 `active_turn` 锁，检查任务类型可 steer（`Review` 和 `Compact` 任务拒绝 steer），然后追加到该 turn 的 `pending_input`。**不打断正在跑的采样请求**。
 
 下一次循环开头的 `get_pending_input` 会把它排进历史。`can_drain_pending_input` 这个布尔变量控制两个例外：turn 刚开始时不排（让本次的新输入先被采样）、自动压缩之后不排（让模型/工具的续接先恢复，再谈 steer）。
 
@@ -452,9 +446,7 @@ flowchart TD
 
 ### 3.3 源码
 
-外层循环，全文只有这几行有实质逻辑：
-
-`codex-rs/core/src/tasks/regular.rs:71`
+外层循环，全文只有这几行有实质逻辑[^11]：
 
 ```rust
         let mut next_input = input;
@@ -478,9 +470,7 @@ flowchart TD
 
 `next_input = Vec::new()` 是关键：第二次及以后的 `run_turn` 不带新输入，因为待处理输入已经在 `input_queue` 里，由 `run_turn` 内部自己去排。这和 Pi 的「外层循环查 follow-up 队列」是同构的设计。
 
-中层循环的排空点与上下文冻结：
-
-`codex-rs/core/src/session/turn.rs:273`
+中层循环的排空点与上下文冻结[^12]：
 
 ```rust
     let mut next_step_context = Some(first_step_context);
@@ -513,9 +503,7 @@ flowchart TD
 
 注意 `None` 分支的区别：如果这一轮有新的用户输入，要先 `required_mcp_servers_for_input` 重新算一遍这条消息可能需要哪些 MCP server（用户可能 @ 了一个之前没启用的插件），再捕获 StepContext。「有没有新输入」直接影响这一步的工具集合。
 
-采样后的分支决策：
-
-`codex-rs/core/src/session/turn.rs:423`
+采样后的分支决策[^13]：
 
 ```rust
                 let should_roll_over = needs_follow_up
@@ -545,9 +533,7 @@ flowchart TD
 
 那句注释值得注意——压缩后 `continue` 回到循环顶部，如果压缩没能把 token 降下去，这里就是个死循环。代码的防御手段是「相信压缩效果」，没有硬性的迭代上限。这是个有意识接受的风险。
 
-重试与降级：
-
-`codex-rs/core/src/responses_retry.rs:31`
+重试与降级[^14]：
 
 ```rust
     if *retries >= max_retries
@@ -578,9 +564,7 @@ flowchart TD
 
 `*retries = 0` 那一行是全文最实用的一个技巧：预算耗尽不等于放弃，而是「换一条路再给一次完整预算」。`err.retry_delay()` 优先用 provider 在 429 响应里给的建议延迟，没有才退回本地指数退避。
 
-边流边执行工具：
-
-`codex-rs/core/src/session/turn.rs:2344`
+边流边执行工具[^15]：
 
 ```rust
                 let output_result =
@@ -595,7 +579,7 @@ flowchart TD
                 }
 ```
 
-以及流结束后的收尾（`turn.rs:2705`）：`if in_flight.is_empty() { None } else { Some(begin_tool_blocking()) }` —— 这里专门开了一个计时器区分「等模型」和「等工具」两段时间，说明这两段的重叠程度是他们持续在观测的指标。
+以及流结束后的收尾[^16]：`if in_flight.is_empty() { None } else { Some(begin_tool_blocking()) }` —— 这里专门开了一个计时器区分「等模型」和「等工具」两段时间，说明这两段的重叠程度是他们持续在观测的指标。
 
 把这段时序摊开看，工具执行和模型剩余输出的传输是这样重叠的：
 
@@ -664,7 +648,7 @@ flowchart LR
 
 **图的形状。** 节点只有两个必需的：`model` 和 `tools`。中间件按 hook 类型展开成额外节点：`X.before_agent`、`X.before_model`、`X.after_model`、`X.after_agent`。
 
-`factory.py:1606-1632` 计算出四个关键位置——`entry_node`（整个 run 的入口，含 before_agent）、`loop_entry_node`（**循环的入口，不含 before_agent**，所以 before_agent 只跑一次）、`loop_exit_node`（每轮末尾）、`exit_node`（含 after_agent 或 END）。
+四个关键位置由一段代码统一计算出来[^17]——`entry_node`（整个 run 的入口，含 before_agent）、`loop_entry_node`（**循环的入口，不含 before_agent**，所以 before_agent 只跑一次）、`loop_exit_node`（每轮末尾）、`exit_node`（含 after_agent 或 END）。
 
 tools → model 的边指向 `loop_entry_node` 而非 `entry_node`，这一个字的差别就是「每轮都跑」和「只跑一次」的区别。
 
@@ -683,7 +667,7 @@ tools → model 的边指向 `loop_entry_node` 而非 `entry_node`，这一个�
 
 在 Pregel 里这意味着**同一个超步内的 N 个独立任务**，由 runner 并发执行，结果在超步结束时统一写回 `messages` 通道。并行是运行时白送的，`create_agent` 自己没写一行并发代码。
 
-**Pregel 的超步语义。** 这是它和手写 while 最本质的差别：`main.py:2959` 的注释写得很直白——「与 BSP / Pregel 模型类似，计算按步推进，只要还有 channel 更新就继续；第 N 步的 channel 更新只在第 N+1 步可见；在一步之内 channel 保证不可变，更新只在步与步的过渡点应用」。
+**Pregel 的超步语义。** 这是它和手写 while 最本质的差别，代码注释写得很直白[^18]——「与 BSP / Pregel 模型类似，计算按步推进，只要还有 channel 更新就继续；第 N 步的 channel 更新只在第 N+1 步可见；在一步之内 channel 保证不可变，更新只在步与步的过渡点应用」。
 
 `loop.tick()` 计算这一步该跑哪些任务（`prepare_next_tasks`），runner 并发跑完，`loop.after_tick()` 一次性 `apply_writes` 提交所有写入。没有任务可跑了，`status = "done"`，循环结束。
 
@@ -720,7 +704,7 @@ flowchart TD
 
 **迭代上限是 `recursion_limit`。** `tick()` 开头就是 `if self.step > self.stop: self.status = "out_of_steps"`，`stop = step + recursion_limit + 1`。
 
-有意思的是 `create_agent` 把它硬编码成 `9_999`（`factory.py:1792`，附了一条 langgraph issue 链接）——因为中间件节点把每一轮 agent 迭代拆成了好几个超步，默认的 25 步限制会被中间件数量而不是 agent 行为提前耗尽。这是「图化」带来的一个真实副作用。
+有意思的是 `create_agent` 把它硬编码成 `9_999`[^19]——因为中间件节点把每一轮 agent 迭代拆成了好几个超步，默认的 25 步限制会被中间件数量而不是 agent 行为提前耗尽。这是「图化」带来的一个真实副作用。
 
 **循环控制以中间件形式暴露。** 这一点是 LangChain v1 与另外两家最大的分工差异：Pi 和 Codex 把「重试几次」「最多几轮」写死在循环里，LangChain 把它们做成可插拔的中间件：
 
@@ -739,9 +723,7 @@ flowchart TD
 
 ### 4.3 源码
 
-条件边的接线：
-
-`libs/langchain_v1/langchain/agents/factory.py:1646`
+条件边的接线[^20]：
 
 ```python
         graph.add_conditional_edges(
@@ -774,9 +756,7 @@ flowchart TD
 
 第三个参数是「可能的目的地列表」，只用于画图和校验；实际路由由那个闭包在运行时返回。
 
-退出判断本体：
-
-`libs/langchain_v1/langchain/agents/factory.py:1892`
+退出判断本体[^21]：
 
 ```python
     def model_to_tools(state: dict[str, Any]) -> str | list[Send] | None:
@@ -810,9 +790,7 @@ flowchart TD
 
 第 4 步的 `pending_tool_calls` 过滤是为了支持 HITL：中间件可以「伪造」ToolMessage 塞进 state（比如用户拒绝了某个调用），那个 tool_call 就不再 pending，也就不会真的执行。第 6 步（有 tool_call 但全都不 pending）回到 model，正是这个场景的收尾。
 
-超步调度：
-
-`libs/langgraph/langgraph/pregel/_loop.py:599`
+超步调度[^22]：
 
 ```python
     def tick(self) -> bool:
@@ -842,9 +820,7 @@ flowchart TD
 
 注意这里的退出条件跟 agent 语义毫无关系——它只关心「还有没有被触发的节点」。agent 的「模型没调工具就停」被翻译成了「model_to_tools 边返回 END，于是没有新任务被触发」。这个翻译层是整套设计的核心，也是它的代价来源。
 
-循环控制中间件的典型形态：
-
-`libs/langchain_v1/langchain/agents/middleware/model_call_limit.py:167`
+循环控制中间件的典型形态[^23]：
 
 ```python
     @hook_config(can_jump_to=["end"])
@@ -875,7 +851,7 @@ flowchart TD
 
 第一，**调试路径变长**：一次「模型 → 工具 → 模型」在栈上是若干个超步、若干次 channel 写入、若干个 RunnableCallable，出错时的 traceback 跟你脑子里的 agent 循环对不上。
 
-第二，**流式是旁路的**：`model_node` 里是老老实实的 `model_.invoke(messages)`（`factory.py:1427`），token 流靠 `StreamMessagesHandler` 这个回调处理器从 LLM 侧捞出来（`pregel/_messages.py:49`），不是循环结构的一部分。这意味着「边流边执行工具」这类优化在这个架构里做不了——超步的语义要求节点跑完才提交写入。
+第二，**流式是旁路的**：`model_node` 里是老老实实的 `model_.invoke(messages)`[^24]，token 流靠 `StreamMessagesHandler` 这个回调处理器从 LLM 侧捞出来[^25]，不是循环结构的一部分。这意味着「边流边执行工具」这类优化在这个架构里做不了——超步的语义要求节点跑完才提交写入。
 
 第三，`recursion_limit=9999` 这个 hack 说明抽象是有泄漏的：图的步数和 agent 的轮数不是一回事，而用户配的限制是按前者算的。
 
@@ -890,7 +866,7 @@ flowchart TD
 | 默认退出条件 | assistant 消息里无 toolCall | `needs_follow_up == false`（无工具调用且无 pending input） | `model_to_tools` 边返回 `end_destination` → 无任务可调度 |
 | 额外退出口 | `shouldStopAfterTurn` 回调、整批 `terminate:true`、`stopReason` 为 error/aborted | stop hook 的 `should_stop`、错误分类后 `break`、`Op::Interrupt` | 中间件 `jump_to:"end"`、`return_direct` 工具、结构化输出产出 |
 | 硬迭代上限 | 无 | 无（压缩后 `continue`，靠「压缩有效」假设兜底） | `recursion_limit`（create_agent 设为 9999）+ 可选 `ModelCallLimitMiddleware` |
-| 模型请求重试 | **不在循环内**；应用层摘掉失败消息后 `agentLoopContinue()`（`agent-session.ts:1084`） | 循环内 `run_sampling_request`，预算来自 provider；耗尽后降级传输并**重置计数** | `ModelRetryMiddleware.wrap_model_call`（用户自选是否装）+ Pregel 节点级 `RetryPolicy` |
+| 模型请求重试 | **不在循环内**；应用层摘掉失败消息后 `agentLoopContinue()`[^26] | 循环内 `run_sampling_request`，预算来自 provider；耗尽后降级传输并**重置计数** | `ModelRetryMiddleware.wrap_model_call`（用户自选是否装）+ Pregel 节点级 `RetryPolicy` |
 | 工具错误处理 | 捕获异常转成错误 tool_result 回喂模型 | 同左（`ResponseInputItem` 携带错误输出） | `ToolRetryMiddleware` 重试，耗尽后产 `status="error"` 的 ToolMessage |
 | 工具并行 | 默认 parallel；预处理串行、`execute` 并发；事件按完成序、消息按源序；任一工具标 `sequential` 则整批降级 | 边收流边 `push_back` 到 `FuturesOrdered`，与模型输出传输重叠；结果按入队序落历史 | 每个 tool_call 一个 `Send`，同超步内由 runner 并发；无源序/完成序区分（超步末统一提交） |
 | 用户 steer 时机 | turn 边界注入；两条队列（steer 每轮查 / followUp 仅在将停时查），各有 all / one-at-a-time 模式 | 下一次采样请求前排空 `input_queue`；`can_drain_pending_input` 在回合首和压缩后临时关闭；Review/Compact 任务拒绝 steer | 无原生 steer；只能 `interrupt()` + checkpoint + `Command(resume=...)` 重新进入 |
@@ -906,13 +882,13 @@ flowchart TD
 
 适用条件：你的历史是可变数组且能安全地 pop 最后一条；如果历史已经落盘或已发给下游，得先设计好回滚。
 
-**2. 重试预算耗尽时先换路，再放弃。** Codex 在 `responses_retry.rs:44` 用 `*retries = 0` 实现「WebSocket 重试用完 → 降级到 HTTP → 重新给满预算」。任何有多条传输路径（多 provider、多 region、多协议）的系统都该有这一层。
+**2. 重试预算耗尽时先换路，再放弃。** Codex 用 `*retries = 0` 实现「WebSocket 重试用完 → 降级到 HTTP → 重新给满预算」[^27]。任何有多条传输路径（多 provider、多 region、多协议）的系统都该有这一层。
 
 前提是要有明确的「降级是单向的、session 级的」语义，否则会在两条路之间反复横跳。
 
-**3. 并行工具要区分两种顺序。** 事件顺序（给 UI，按完成先后最自然）和消息顺序（给 provider，必须按源顺序）是两件事。Pi 用「闭包内发事件 + `Promise.all` 后按下标发消息」把它们分开（`agent-loop.ts:522-548`）。如果你只维护一种顺序，要么 UI 卡顿要么 provider 报错。
+**3. 并行工具要区分两种顺序。** 事件顺序（给 UI，按完成先后最自然）和消息顺序（给 provider，必须按源顺序）是两件事。Pi 用「闭包内发事件 + `Promise.all` 后按下标发消息」把它们分开[^28]。如果你只维护一种顺序，要么 UI 卡顿要么 provider 报错。
 
-**4. 给「有副作用的工具」一个降级开关。** Pi 的 `executionMode: "sequential"` 是**工具级**声明，而且只要批次里有一个这样的工具，整批降级串行（`agent-loop.ts:419-425`）。比逐工具加锁简单得多，代价是偶尔过度保守。适合工具数量不多、写操作工具占少数的场景。
+**4. 给「有副作用的工具」一个降级开关。** Pi 的 `executionMode: "sequential"` 是**工具级**声明，而且只要批次里有一个这样的工具，整批降级串行[^8]。比逐工具加锁简单得多，代价是偶尔过度保守。适合工具数量不多、写操作工具占少数的场景。
 
 **5. 输出被截断时，整批工具调用都别执行。** 这是个真实的坑：流式 JSON 解析器为了鲁棒性会「尽力挽救」半截参数，挽救出来的对象可能通过 schema 校验但语义残缺（少了一个数组元素、路径被截短）。`stopReason === "length"` 时全批失败、回喂错误让模型重发，比赌一把安全得多。
 
@@ -925,8 +901,8 @@ flowchart TD
 ## 7. 本章存疑
 
 - **Pi 的 `harness/` 实际完成度。** `docs/harness-v2.md` 自己声明「§1–20 描述的是目标状态，§21 才是真相来源」，我没有逐条核对 §21 与 `src/harness/*.ts` 的对应关系。文中关于 lanes / operation log / `drive: "manual"` 的描述均按设计文档转述，**⚠️ 未确认**其中哪些已经可运行。
-- **Codex 压缩后 `continue` 的死循环防护。** `turn.rs:434` 的注释说「只要压缩能把 token 降到远低于上限，就不用担心死循环」，但我没有找到显式的迭代计数或熔断。若压缩本身持续失败（比如摘要模型不可用且 fallback 也失败），是否真的会无限循环，**⚠️ 未确认**。
-- **Codex `preempt_for_mailbox_mail` 的完整语义。** `turn.rs:2360` 有一条在 reasoning / commentary item 之后检查 mailbox 并提前 `break` 出流循环的分支，注释标了「todo: remove before stabilizing multi-agent v2」。这条路径与常规 steer 的关系（是否会丢弃已收到但未处理的流内容）**⚠️ 未确认**。
+- **Codex 压缩后 `continue` 的死循环防护。** 那段注释说「只要压缩能把 token 降到远低于上限，就不用担心死循环」[^29]，但我没有找到显式的迭代计数或熔断。若压缩本身持续失败（比如摘要模型不可用且 fallback 也失败），是否真的会无限循环，**⚠️ 未确认**。
+- **Codex `preempt_for_mailbox_mail` 的完整语义。** 有一条在 reasoning / commentary item 之后检查 mailbox 并提前 `break` 出流循环的分支[^30]，注释标了「todo: remove before stabilizing multi-agent v2」。这条路径与常规 steer 的关系（是否会丢弃已收到但未处理的流内容）**⚠️ 未确认**。
 - **LangChain `Send("tools", ...)` 的并发上限。** 每个 tool_call 一个 Send，同超步并发执行，但 runner 是否有并发度限制、由哪个配置控制，我没有在 `pregel/_runner.py` 里定位到确切答案，**⚠️ 未确认**。
 - **任务指引中提到的 LangChain `agents/_execution.py`** 在 1.3.14 的代码树里不存在；同名文件位于 `agents/middleware/_execution.py`，内容是持久化 shell 的执行策略（子进程/沙箱/Docker），与 agent 循环无关。本章据此改用 `factory.py` + LangGraph Pregel 作为循环执行的证据来源。
 
@@ -942,21 +918,21 @@ flowchart TD
 
 | 层 | 位置 | 职责 |
 |---|---|---|
-| L0 会话 actor | `xai-grok-shell/src/session/acp_session_impl/run_loop.rs:123` `run_session()`，`loop { tokio::select! { biased; … } }` | 事件多路复用：命令通道、状态事件、定时器、model-switch watch |
-| L1 prompt 外层轮 | `turn.rs:849` | goal-loop 续跑 + stop gate 重开轮 |
-| L2 采样内层轮 | `turn.rs:2004`（`process_conversation_turn` 内） | 经典 build request → sample → 执行工具 → continue |
+| L0 会话 actor | `run_session()`，`loop { tokio::select! { biased; … } }`[^31] | 事件多路复用：命令通道、状态事件、定时器、model-switch watch |
+| L1 prompt 外层轮 | 见脚注[^32] | goal-loop 续跑 + stop gate 重开轮 |
+| L2 采样内层轮 | `process_conversation_turn` 内[^33] | 经典 build request → sample → 执行工具 → continue |
 
-一次只跑一个 turn：prompt 进 `VecDeque` FIFO，单个 `running_task` 槽，"arming a new one aborts the previous"（tasks_cancel.rs:109）。
+一次只跑一个 turn：prompt 进 `VecDeque` FIFO，单个 `running_task` 槽，"arming a new one aborts the previous"[^34]。
 
 与 Pi 的双层 while、Codex 的 Task→run_turn→sampling 三层同构——四个样本里三个产品全部收敛到"手写嵌套 loop"，图调度依然只有 LangChain 一家。
 
 ### 8.2 停止条件：无 toolCall 只是必要条件，还要过三道闸
 
-`turn.rs:2499` 起，`tool_calls.is_empty()` 之后依次是：
+`tool_calls.is_empty()` 之后依次是[^35]：
 
-1. **TodoGate**：todos 未清时注入 reminder 并 `continue` 强迫模型继续，每 prompt 有 `max_fires_per_prompt` 上限（turn.rs:2506-2551）——Pi 的立场是 "to-dos confuse models" 干脆不做，Codex 用 prompt 约束按住，Grok 则把 todo 完成度做成了**停止条件的一部分**；
-2. **插话二次排水**：pending 插话排到了就 `continue` 不停（turn.rs:2554-2570，两次检查夹住收尾竞态窗口）；
-3. **stop gate**：`Completed` 后还要问一道 `StopGateDecision`，`KeepWorking { feedback }` 时把 feedback 作为用户消息 push 进对话并重开一轮（turn.rs:896-906）——Claude Code stop-hook 的同款语义，对照 Codex 的 `should_stop`。
+1. **TodoGate**：todos 未清时注入 reminder 并 `continue` 强迫模型继续，每 prompt 有 `max_fires_per_prompt` 上限[^36]——Pi 的立场是 "to-dos confuse models" 干脆不做，Codex 用 prompt 约束按住，Grok 则把 todo 完成度做成了**停止条件的一部分**；
+2. **插话二次排水**：pending 插话排到了就 `continue` 不停[^37]（两次检查夹住收尾竞态窗口）；
+3. **stop gate**：`Completed` 后还要问一道 `StopGateDecision`，`KeepWorking { feedback }` 时把 feedback 作为用户消息 push 进对话并重开一轮[^38]——Claude Code stop-hook 的同款语义，对照 Codex 的 `should_stop`。
 
 三道闸的先后顺序、以及各自怎么把循环拉回去，画出来是这样：
 
@@ -988,7 +964,7 @@ flowchart TD
     class F data
 ```
 
-硬上限：`max_turns` 是 `Option<usize>`，`None` = 无限（来自 CLI `--max-turns`），检查在 turn.rs:2697-2708。默认值来源只追到 spawn 参数，⚠️ 未确认全部调用方的默认。
+硬上限：`max_turns` 是 `Option<usize>`，`None` = 无限（来自 CLI `--max-turns`），检查代码见脚注[^39]。默认值来源只追到 spawn 参数，⚠️ 未确认全部调用方的默认。
 
 ### 8.3 防转圈：四个样本里唯一的显式 stationarity 熔断
 
@@ -1035,9 +1011,9 @@ flowchart TD
 
 本章写过 Pi 的 steer 队列和 Codex 的 abort-and-replace。Grok 两个都要：
 
-- **默认 Pi 式排队，且更激进**：插话进 `InterjectionBuffer`（抽成共享 crate `xai-interjection-core`，注释说是为了 "so the server-side agent loop can adopt the same semantics"），"An interjection never cancels the turn"（interjection.rs:332）；排水点在**同一 turn 内**的循环边界（内层 loop 顶部 turn.rs:2078 + 收尾前两次），不必等 turn 结束——Pi 是 turn 边界注入，Grok 是循环边界注入。注入形态是独立的合成用户消息，"never appended to tool results"。
-- **显式 Codex 式硬中断**：普通 prompt 可带 `send_now` 标志（commands.rs:233 "Cancel-and-send: cancel the running turn and run this prompt next"），走真 `task.abort()` + 先杀前台终端进程。
-- **唯一能被插话打断的工具**是 sleep/wait 类：用 `tokio::select!` 挂在 `wait_for_pending_interjection` 上，插话到达即中止该工具返回合成结果（tool_calls.rs:562-580）。采样流本身不被插话打断——此推断基于排水点分布，⚠️ 未逐行核验 `run_turn_via_sampler` 内部。
+- **默认 Pi 式排队，且更激进**：插话进 `InterjectionBuffer`（抽成共享 crate `xai-interjection-core`，注释说是为了 "so the server-side agent loop can adopt the same semantics"），"An interjection never cancels the turn"[^40]；排水点在**同一 turn 内**的循环边界（内层 loop 顶部 + 收尾前两次）[^41]，不必等 turn 结束——Pi 是 turn 边界注入，Grok 是循环边界注入。注入形态是独立的合成用户消息，"never appended to tool results"。
+- **显式 Codex 式硬中断**：普通 prompt 可带 `send_now` 标志（"Cancel-and-send: cancel the running turn and run this prompt next"[^42]），走真 `task.abort()` + 先杀前台终端进程。
+- **唯一能被插话打断的工具**是 sleep/wait 类：用 `tokio::select!` 挂在 `wait_for_pending_interjection` 上，插话到达即中止该工具返回合成结果[^43]。采样流本身不被插话打断——此推断基于排水点分布，⚠️ 未逐行核验 `run_turn_via_sampler` 内部。
 
 ### 8.5 本节未确认
 
@@ -1056,13 +1032,13 @@ flowchart TD
 
 | 层 | 位置 | 循环体 | 职责 |
 |---|---|---|---|
-| L0 turn | `packages/core/agent-loop/src/agent.ts:212`（`kick()`） | `while (await this.turn()) {}` | 排队的 prompt 一个一个开 turn |
-| L1 step | `agent.ts:263`（`turn()`） | `while (true)` | claim inbox → 一次模型请求 → 跑工具 → 再来一步 |
-| L2 request | `agent.ts:339`（`step()`） | `while (true)` | 一次请求的重试壳，turn/step 号不变 |
+| L0 turn | `kick()`[^44] | `while (await this.turn()) {}` | 排队的 prompt 一个一个开 turn |
+| L1 step | `turn()`[^45] | `while (true)` | claim inbox → 一次模型请求 → 跑工具 → 再来一步 |
+| L2 request | `step()`[^46] | `while (true)` | 一次请求的重试壳，turn/step 号不变 |
 
 与 Codex 的 `Task → run_turn → sampling`、Grok 的 L0/L1/L2 完全同构——**五个样本里四个产品全部收敛到手写嵌套 loop，图调度依然只有 LangChain 一家**。
 
-差别在体量：三层加起来是 `agent.ts:210-401`，192 行（`packages/core/agent-loop/src/` 六个文件共 1643 行，其中 `index.ts` 713 行全是工厂与生命周期，与循环无关）；对照 Codex 一个 `run_turn` 就 400 行。
+差别在体量：三层加起来是 192 行[^47]（`packages/core/agent-loop/src/` 六个文件共 1643 行，其中 `index.ts` 713 行全是工厂与生命周期，与循环无关）；对照 Codex 一个 `run_turn` 就 400 行。
 
 五个样本收敛成的两派，到这里可以合成一张全景图：
 
@@ -1095,13 +1071,13 @@ flowchart TD
 
 ### 9.2 turn / step 的定义：文档给了定义，代码逐条对得上
 
-`docs/architecture.md:65` 原话：`A **step** is one model request plus the tools it calls. A **turn** is zero or more steps: it opens before its first input is claimed and closes once nothing is owed.`
+文档原话[^48]：`A **step** is one model request plus the tools it calls. A **turn** is zero or more steps: it opens before its first input is claimed and closes once nothing is owed.`
 
 所以 dsh 的 **step ≈ Pi 的 turn**，dsh 的 **turn ≈ Codex 的 Turn**（本章 §3.2 已指出 Codex 的 Turn 更接近 Pi 的整个 run）。
 
-`docs/architecture.md:63-83` 那张 Turn flow 时序逐条对到代码，无偏差：`turn/start`(agent.ts:255) → claim(`packages/core/agent/src/inbox.ts:71`) → `agent/pre-step`(agent.ts:234) → `step/start`(:279) → `user/message`(:283) → `agent/request`(:438) → `assistant/chunk*`(:349) → `assistant/message`(:381) → `tool/call*`(tool-calls.ts:263) → `tool/result*`(:281) → `step/end`(agent.ts:292) → `agent/turn-stopping`(:296) → `turn/end`(:319)。
+那张 Turn flow 时序逐条对到代码，无偏差[^49]：`turn/start` → claim → `agent/pre-step` → `step/start` → `user/message` → `agent/request` → `assistant/chunk*` → `assistant/message` → `tool/call*` → `tool/result*` → `step/end` → `agent/turn-stopping` → `turn/end`。
 
-关键差异：**turn / step 边界是 durable session event，不是 UI 事件流**。Pi 的 `turn_start`、Grok 的轮次都是发给上层的活事件，dsh 直接写进日志——重启后还能数出这个会话跑过几个 turn（`agent.ts:92` 就是靠 `findLast(event => event.type === 'turn/start')` 恢复计数的）。
+关键差异：**turn / step 边界是 durable session event，不是 UI 事件流**。Pi 的 `turn_start`、Grok 的轮次都是发给上层的活事件，dsh 直接写进日志——重启后还能数出这个会话跑过几个 turn——靠 `findLast(event => event.type === 'turn/start')` 恢复计数[^50]。
 
 ### 9.3 停止条件：一个 serial 事件 + 一次重读 inbox（第五种答案）
 
@@ -1130,15 +1106,15 @@ if 该停了 and inbox.nextStep 为空:        // 同一个条件再读一次
     break                                 // 还是空 → 真停；被塞了东西 → 循环继续
 ```
 
-`agent/turn-stopping` 是 serial、**没有 `next()`**（`docs/architecture.md:84` 原话："`agent/turn-stopping` is serial and has no `next()`"），监听器既不能否决也不能返回决定。它想续跑，办法是在监听器里调 `agent.steer(...)`（或任何往 next-step 塞消息的 API，如 `agent.inject(...)`）往 inbox 塞一条消息——于是紧接着的**第二次** `this.inbox.nextStep.length === 0` 读到非空，`break` 不成立，循环继续。事件声明处的原话把这个设计说透了（`packages/core/agent/src/runtime-types.ts:266`）：
+`agent/turn-stopping` 是 serial、**没有 `next()`**（原话："`agent/turn-stopping` is serial and has no `next()`"[^51]），监听器既不能否决也不能返回决定。它想续跑，办法是在监听器里调 `agent.steer(...)`（或任何往 next-step 塞消息的 API，如 `agent.inject(...)`）往 inbox 塞一条消息——于是紧接着的**第二次** `this.inbox.nextStep.length === 0` 读到非空，`break` 不成立，循环继续。事件声明处的原话把这个设计说透了[^52]：
 
 > Data decides, so listener order cannot change the outcome.
 
 这是本章的第五种答案。Pi 的 `shouldStopAfterTurn` 回调、Codex 的 `stop_outcome.should_block`、Grok 的 `StopGateDecision::KeepWorking` **都是返回值决定**——监听器顺序有意义，只有一个能赢；dsh 把停止决策改成读共享队列，几个插件可以同时想续跑而不打架。
 
-测试直接叫它 `/loop pattern`（`packages/core/agent-loop/tests/loop.spec.ts:766`），生产用例是把 Claude Code / Codex 的 Stop hook 桥成 `steer`（`packages/hooks/hooks-claude-code/src/index.ts:270`、`packages/hooks/hooks-codex/src/index.ts:260`）。
+测试直接叫它 `/loop pattern`[^53]，生产用例是把 Claude Code / Codex 的 Stop hook 桥成 `steer`[^54]。
 
-反向也是数据：任一工具结果带 `concludesTurn` 就提前收尾（`tool-calls.ts:157` → `agent.ts:399`）。对照 Pi 的 `terminate: true` 要**整批**都标才生效，dsh 是**任一**即可，但文档明确它不短路已提交的 next-step 工作。默认出口仍是老规矩：assistant 消息里没有 tool call（`agent.ts:394`）。
+反向也是数据：任一工具结果带 `concludesTurn` 就提前收尾[^55]。对照 Pi 的 `terminate: true` 要**整批**都标才生效，dsh 是**任一**即可，但文档明确它不短路已提交的 next-step 工作。默认出口仍是老规矩：assistant 消息里没有 tool call[^56]。
 
 「回调决定」和「数据决定」这两条路径的分岔点：
 
@@ -1172,11 +1148,11 @@ flowchart TD
 
 核心循环之外确实有上限，但一个都不在 loop 里：
 
-| 上限 | 值 | 管什么 | 出处 |
-|---|---|---|---|
-| goal 子系统 `maxGoalRounds` | 默认 **256** | 只约束 `goal-round-driver` 那条自动续跑线；超了是 `ctx.goals.block(...)` 把目标标成 `round-limit`，不是停循环 | `packages/goal/goal/src/index.ts:187`；block 逻辑在 `goal-round-driver/src/index.ts:166-170` |
-| ralph 工具 `maxRounds` | schema 默认 **256**，CLI 三个 preset 都配成 **64** | 工具脚本里 `for` 循环开新 subagent 的预算，管不到 agent loop | `packages/workflow/tool-ralph/src/index.ts:37`、`:153` |
-| subagent `maxDepth` | 默认 **3** | 递归上限 | `packages/subagent/tool-subagent/src/index.ts:98` |
+| 上限 | 值 | 管什么 |
+|---|---|---|
+| goal 子系统 `maxGoalRounds`[^57] | 默认 **256** | 只约束 `goal-round-driver` 那条自动续跑线；超了是 `ctx.goals.block(...)` 把目标标成 `round-limit`，不是停循环 |
+| ralph 工具 `maxRounds`[^58] | schema 默认 **256**，CLI 三个 preset 都配成 **64** | 工具脚本里 `for` 循环开新 subagent 的预算，管不到 agent loop |
+| subagent `maxDepth`[^59] | 默认 **3** | 递归上限 |
 
 两处 hook 桥接直接承认这个洞，其中一处点名了 Codex：
 
@@ -1193,30 +1169,30 @@ flowchart TD
 
 ### 9.5 防转圈：第二个做 stationarity 检测的样本，第一个明确选择不熔断
 
-`packages/guard/repeat-tool-reminder`（base bundle 默认装载，`packages/bundle/base/cordis.patch.yml:390-394`）：签名 = `[tool 名, 参数深度 key 排序后 stringify]`（`src/index.ts:195`，参数规范化在 `:89-105`），连续命中同一签名，在 3 / 5 / 8 次时注入提醒——3 次是温和版，5/8 次是详细版（点名工具、连续次数、参数原文，参数预览截到 500 字符）。
+`packages/guard/repeat-tool-reminder`（base bundle 默认装载[^60]）：签名 = `[tool 名, 参数深度 key 排序后 stringify]`[^61]，连续命中同一签名，在 3 / 5 / 8 次时注入提醒——3 次是温和版，5/8 次是详细版（点名工具、连续次数、参数原文，参数预览截到 500 字符）。
 
 两个值得抄的细节。其一，计数放在 `tools/post-execute` 而不是 pre，因为**被拒绝的调用也走这条 waterfall**——注释原话是 "a model hammering a denied call is exactly the loop worth breaking"（`:184-187`）。其二，`agent/pre-step` 里只要 claim 到的消息带 `source.kind === 'user'` 就清零计数链（`:229-231`）——用户插话换了上下文，跨插话的重复不算转圈。
 
 但它 **never vetoes**（`:209` "Observe-and-enrich, never veto"），没有任何次数会终止循环。对照 Grok 的 8 次 nudge / 16 次 `StationarityEnded` 硬停：**§8.3「四个样本里唯一的显式熔断」这个结论在第五个样本之后依然成立**。
 
-工具层另有 `packages/guard/timeout-policy`：合作式超时，工具声明 `timeoutMs`，wrapper 把 `exec.signal` 临时换成 deadline signal，超时后把结果整个替换成结构化的 `TOOL_TIMEOUT`，不 race、不抛弃 tool promise（`src/index.ts:56-80`）。
+工具层另有 `packages/guard/timeout-policy`：合作式超时，工具声明 `timeoutMs`，wrapper 把 `exec.signal` 临时换成 deadline signal，超时后把结果整个替换成结构化的 `TOOL_TIMEOUT`，不 race、不抛弃 tool promise[^62]。
 
 ### 9.6 重试与压缩共用一个 waterfall，重试次数写在日志里
 
-L2 循环体本身不知道「重试」是什么：出错就发 `agent/request-error` waterfall，默认返回 `undefined` = 终止，监听器返回 `{ kind: 'retry' }` 才 `continue`（`agent.ts:354-370`）。重试**不新开 step**，turn/step 号不变。
+L2 循环体本身不知道「重试」是什么：出错就发 `agent/request-error` waterfall，默认返回 `undefined` = 终止，监听器返回 `{ kind: 'retry' }` 才 `continue`[^63]。重试**不新开 step**，turn/step 号不变。
 
 两个真实监听器共用这一个点：
 
-- `packages/llm/llm-retry`：退避 + 追加 `llm/retry` 会话事件；下一次的重试序号是用 `agent.session.events.findLast(...)` 从**日志**里读回来的（`src/index.ts:182-189`），不是本地计数器——重试预算跨进程重启存活。
-- `packages/compaction/compaction-basic`：只认 `CONTEXT_WINDOW_EXCEEDED_CODE`，压缩后确认 `surface.replaceGeneration` 真的推进了才返回 retry，并自带 `maxOverflowRetries`（`src/index.ts:179-222`）。
+- `packages/llm/llm-retry`：退避 + 追加 `llm/retry` 会话事件；下一次的重试序号是用 `agent.session.events.findLast(...)` 从**日志**里读回来的[^64]，不是本地计数器——重试预算跨进程重启存活。
+- `packages/compaction/compaction-basic`：只认 `CONTEXT_WINDOW_EXCEEDED_CODE`，压缩后确认 `surface.replaceGeneration` 真的推进了才返回 retry，并自带 `maxOverflowRetries`[^65]。
 
 对照 §6 经验 1「把重试和循环分开」：Pi 是应用层摘掉失败消息后 `continue()`，dsh 更彻底——循环连历史数组都不持有，所以重试根本不需要摘任何东西。
 
-截断处理则是 §6 经验 5 的第二次独立验证：`if (finish.kind === 'max-tokens') return { kind: 'max-tokens' }` 写在取 `toolCalls` **之前**（`agent.ts:391-393`），半截 tool call 一个都不执行；而且 max-tokens 在一个 turn 内是 sticky 的（`:288-290`），后面正常完成的 step 不会把 turn 结局降级回 completed。
+截断处理则是 §6 经验 5 的第二次独立验证：`if (finish.kind === 'max-tokens') return { kind: 'max-tokens' }` 写在取 `toolCalls` **之前**[^66]，半截 tool call 一个都不执行；而且 max-tokens 在一个 turn 内是 sticky 的[^67]，后面正常完成的 step 不会把 turn 结局降级回 completed。
 
 ### 9.7 历史不在循环里：request.messages 必须逐字等于 deriveMessages()
 
-`buildRequest` 的消息直接来自 `this.session.deriveMessages()`（`agent.ts:341`），而 agent-loop 自带一个 invariant 插件在 `llm/stream` 上 prepend 全局监听器做断言：
+`buildRequest` 的消息直接来自 `this.session.deriveMessages()`[^68]，而 agent-loop 自带一个 invariant 插件在 `llm/stream` 上 prepend 全局监听器做断言：
 
 ```typescript
 // packages/core/agent-loop/src/invariant.ts:39-41
@@ -1227,11 +1203,11 @@ if (JSON.stringify(options.messages) !== JSON.stringify(expected)) {
 
 四个既有样本的循环都持有一个可变消息数组（Pi 的 `currentContext.messages`、Codex 的 turn 历史、LangChain 的 `messages` 通道），**dsh 的循环里没有任何「当前历史」变量**。
 
-代价是硬的：任何模型可见的东西必须先变成 session event 才能进请求，插件不能顺手改 messages——`agent/request` waterfall 的文档原话是 "Model-visible content must use logged channels; this waterfall cannot mutate messages."（`runtime-types.ts:235-236`）。
+代价是硬的：任何模型可见的东西必须先变成 session event 才能进请求，插件不能顺手改 messages——`agent/request` waterfall 的文档原话是 "Model-visible content must use logged channels; this waterfall cannot mutate messages."[^69]。
 
 ### 9.8 用户插话：一个 inbox、两个队列、排队不打断，但 inbox 本身是持久的
 
-inbox 只有两个 target（`'next-turn'` / `'next-step'`），三个别名 API 是它的固定组合（`agent.ts:122-132`）：
+inbox 只有两个 target（`'next-turn'` / `'next-step'`），三个别名 API 是它的固定组合[^70]：
 
 | API | 进哪个队列 | 是否唤醒 |
 |---|---|---|
@@ -1239,15 +1215,15 @@ inbox 只有两个 target（`'next-turn'` / `'next-step'`），三个别名 API 
 | `steer` | next-step | 唤醒 |
 | `inject` | next-step | **不唤醒** |
 
-`docs/architecture.md:86` 那句 "Some messages wake it immediately; injected context waits in the inbox until another message does" 说的就是 `inject` 的 `wakeup: false`。
+那句 "Some messages wake it immediately; injected context waits in the inbox until another message does"[^71] 说的就是 `inject` 的 `wakeup: false`。
 
-claim 发生在 pre-step，顺序是「先全部 next-step，再最多**一条** next-turn」（`packages/core/agent/src/inbox.ts:71-77`）——等于把 Pi 的 `"all"` / `"one-at-a-time"` 两种排空模式**分别定死**给了两个队列。注入粒度是 **step 边界**（同 Grok 的循环边界，比 Pi 的 turn 边界细）；采样流和正在跑的工具都不会被插话打断。
+claim 发生在 pre-step，顺序是「先全部 next-step，再最多**一条** next-turn」[^72]——等于把 Pi 的 `"all"` / `"one-at-a-time"` 两种排空模式**分别定死**给了两个队列。注入粒度是 **step 边界**（同 Grok 的循环边界，比 Pi 的 turn 边界细）；采样流和正在跑的工具都不会被插话打断。
 
-两点是四家都没有的。其一，**inbox 是 durable projection**——每次 splice 写一条 `agent/inbox/spliced` 事件（`inbox.ts:186`），构造时从日志重放（`:32-39`），所以「用户排了三条还没被消费的话」也能跨重启恢复。
+两点是四家都没有的。其一，**inbox 是 durable projection**——每次 splice 写一条 `agent/inbox/spliced` 事件[^73]，构造时从日志重放[^74]，所以「用户排了三条还没被消费的话」也能跨重启恢复。
 
-其二，**打断与补话是一个原子操作**：`cancel(cause)` 默认清空 inbox 并 abort 当前 turn 的 signal（`agent.ts:134-139`），而 abort 之后再发来的唤醒消息会被自动改写 target 到 `next-turn` 并 latch 住，等旧 driver 收敛到 idle 后自动开新 turn（`agent.ts:116-119` + `:172-193`）。
+其二，**打断与补话是一个原子操作**：`cancel(cause)` 默认清空 inbox 并 abort 当前 turn 的 signal[^75]，而 abort 之后再发来的唤醒消息会被自动改写 target 到 `next-turn` 并 latch 住，等旧 driver 收敛到 idle 后自动开新 turn[^76]。
 
-`AgentCancelCause` 是 `user | parent | hook | disposed` 的类型级枚举，durable `turn/end` 也照原样记下它——`{ kind: 'aborted'; reason: TurnEndCancelCause }`（`packages/core/session/src/types.ts:143-158`，`agent.ts:304` 写入），只有历史导入的粗粒度记录才落到 `legacy` 变体。
+`AgentCancelCause` 是 `user | parent | hook | disposed` 的类型级枚举，durable `turn/end` 也照原样记下它——`{ kind: 'aborted'; reason: TurnEndCancelCause }`[^77]，只有历史导入的粗粒度记录才落到 `legacy` 变体。
 
 三个写入口、两个队列、claim 时的排空顺序：
 
@@ -1295,6 +1271,90 @@ flowchart TD
 
 ### 9.10 本节未确认
 
-- ⚠️ `docs/architecture.md:119` 的表格写 "`agent/turn-stopping` stops a turn"，但代码里这个事件既不能否决也不能提前结束（它本来就在停止边界上），实际能力是**反向**的强制续跑。这处措辞与代码不符，我没有在任何测试或注释里找到与「stop a turn」对应的实现。
+- ⚠️ 文档表格写 "`agent/turn-stopping` stops a turn"[^78]，但代码里这个事件既不能否决也不能提前结束（它本来就在停止边界上），实际能力是**反向**的强制续跑。这处措辞与代码不符，我没有在任何测试或注释里找到与「stop a turn」对应的实现。
 - ⚠️ 全仓有 13 个包共 14 处注册 `agent/pre-step`，我只逐行读了 `goal-round-driver`、`compaction-basic`、`repeat-tool-reminder` 三个；是否有别的插件在 pre-step 里实现了步数上限，未逐个核对。
-- `DEFAULT_MAX_PARALLEL_TOOL_CALLS = 10`（`packages/core/agent-loop/src/constants.ts:6`）：全仓 bundle / preset 的 yml、yaml、json 里 grep `maxParallelToolCalls` 零命中，没有任何一处覆盖它；⚠️ 运行时用户配置（settings 分节）能否改成别的值，未核。
+- `DEFAULT_MAX_PARALLEL_TOOL_CALLS = 10`[^79]：全仓 bundle / preset 的 yml、yaml、json 里 grep `maxParallelToolCalls` 零命中，没有任何一处覆盖它；⚠️ 运行时用户配置（settings 分节）能否改成别的值，未核。
+
+---
+
+## 出处
+
+[^1]: `agentLoopContinue` 的前置校验：`packages/agent/src/agent-loop.ts:74`。
+[^2]: 两条队列的查看时机：`packages/agent/src/agent.ts:283-290`；排空模式：`agent.ts:141-154`。
+[^3]: `shouldTerminateToolBatch` 的实现：`packages/agent/src/agent-loop.ts:582`。
+[^4]: 声明合并扩展消息类型的实现：`packages/agent/src/types.ts:310-319`。
+[^5]: 主循环全貌：`packages/agent/src/agent-loop.ts:163`。
+[^6]: 这一轮收尾代码起点：`packages/agent/src/agent-loop.ts:203`。
+[^7]: 并行工具排序处理代码：`packages/agent/src/agent-loop.ts:522`。
+[^8]: `executionMode: "sequential"` 降级串行的实现：`packages/agent/src/agent-loop.ts:419-425`。
+[^9]: 应用层重试入口：`packages/coding-agent/src/core/agent-session.ts:1063`。
+[^10]: `steer_input` 的实现：`codex-rs/core/src/session/mod.rs:3989`。
+[^11]: 外层循环代码：`codex-rs/core/src/tasks/regular.rs:71`。
+[^12]: 中层循环排空点代码：`codex-rs/core/src/session/turn.rs:273`。
+[^13]: 采样后分支决策代码：`codex-rs/core/src/session/turn.rs:423`。
+[^14]: 重试与传输降级代码：`codex-rs/core/src/responses_retry.rs:31`。
+[^15]: 边流边执行工具代码：`codex-rs/core/src/session/turn.rs:2344`。
+[^16]: 流结束后收尾代码：`codex-rs/core/src/session/turn.rs:2705`。
+[^17]: 四个关键位置的计算：`libs/langchain_v1/langchain/agents/factory.py:1606-1632`。
+[^18]: 超步语义的注释原文：`libs/langgraph/langgraph/pregel/main.py:2959`。
+[^19]: 硬编码 `9_999` 处，附了一条 langgraph issue 链接：`libs/langchain_v1/langchain/agents/factory.py:1792`。
+[^20]: 条件边接线代码：`libs/langchain_v1/langchain/agents/factory.py:1646`。
+[^21]: 退出判断代码：`libs/langchain_v1/langchain/agents/factory.py:1892`。
+[^22]: 超步调度代码：`libs/langgraph/langgraph/pregel/_loop.py:599`。
+[^23]: 循环控制中间件代码：`libs/langchain_v1/langchain/agents/middleware/model_call_limit.py:167`。
+[^24]: `model_node` 内联调用：`libs/langchain_v1/langchain/agents/factory.py:1427`。
+[^25]: `StreamMessagesHandler` 回调实现：`libs/langgraph/langgraph/pregel/_messages.py:49`。
+[^26]: `agentLoopContinue()` 调用点：`packages/coding-agent/src/core/agent-session.ts:1084`。
+[^27]: `*retries = 0` 重置计数的实现：`codex-rs/core/src/responses_retry.rs:44`。
+[^28]: 事件与消息两种顺序分离的实现：`packages/agent/src/agent-loop.ts:522-548`。
+[^29]: 该注释原文位置：`codex-rs/core/src/session/turn.rs:434`。
+[^30]: `preempt_for_mailbox_mail` 分支位置：`codex-rs/core/src/session/turn.rs:2360`。
+[^31]: `run_session()` 位置：`xai-grok-shell/src/session/acp_session_impl/run_loop.rs:123`。
+[^32]: `turn.rs:849`。
+[^33]: `process_conversation_turn` 内：`turn.rs:2004`。
+[^34]: 引文出处：`tasks_cancel.rs:109`。
+[^35]: 起点：`turn.rs:2499`。
+[^36]: TodoGate 实现：`turn.rs:2506-2551`。
+[^37]: 插话二次排水实现：`turn.rs:2554-2570`。
+[^38]: stop gate 实现：`turn.rs:896-906`。
+[^39]: 检查代码：`turn.rs:2697-2708`。
+[^40]: 引文出处：`interjection.rs:332`。
+[^41]: 排水点位置：`turn.rs:2078`（内层 loop 顶部）。
+[^42]: 引文出处：`commands.rs:233`。
+[^43]: 实现位置：`tool_calls.rs:562-580`。
+[^44]: `kick()` 位置：`packages/core/agent-loop/src/agent.ts:212`。
+[^45]: `turn()` 位置：`agent.ts:263`。
+[^46]: `step()` 位置：`agent.ts:339`。
+[^47]: 三层循环代码范围：`agent.ts:210-401`。
+[^48]: 原文出处：`docs/architecture.md:65`。
+[^49]: 时序表原文：`docs/architecture.md:63-83`；逐条代码坐标：`turn/start`(`agent.ts:255`)、claim(`packages/core/agent/src/inbox.ts:71`)、`agent/pre-step`(`agent.ts:234`)、`step/start`(`agent.ts:279`)、`user/message`(`agent.ts:283`)、`agent/request`(`agent.ts:438`)、`assistant/chunk*`(`agent.ts:349`)、`assistant/message`(`agent.ts:381`)、`tool/call*`(`tool-calls.ts:263`)、`tool/result*`(`tool-calls.ts:281`)、`step/end`(`agent.ts:292`)、`agent/turn-stopping`(`agent.ts:296`)、`turn/end`(`agent.ts:319`)。
+[^50]: 恢复计数实现：`agent.ts:92`。
+[^51]: 原文出处：`docs/architecture.md:84`。
+[^52]: 事件声明处：`packages/core/agent/src/runtime-types.ts:266`。
+[^53]: 测试位置：`packages/core/agent-loop/tests/loop.spec.ts:766`。
+[^54]: 桥接实现：`packages/hooks/hooks-claude-code/src/index.ts:270`、`packages/hooks/hooks-codex/src/index.ts:260`。
+[^55]: `concludesTurn` 提前收尾实现：`tool-calls.ts:157` → `agent.ts:399`。
+[^56]: 默认出口判定：`agent.ts:394`。
+[^57]: `maxGoalRounds` 定义：`packages/goal/goal/src/index.ts:187`；`block` 逻辑：`goal-round-driver/src/index.ts:166-170`。
+[^58]: `maxRounds` 定义：`packages/workflow/tool-ralph/src/index.ts:37`、`:153`。
+[^59]: `maxDepth` 定义：`packages/subagent/tool-subagent/src/index.ts:98`。
+[^60]: 默认装载配置：`packages/bundle/base/cordis.patch.yml:390-394`。
+[^61]: 签名计算：`packages/guard/repeat-tool-reminder/src/index.ts:195`；参数规范化：`:89-105`。
+[^62]: 实现位置：`packages/guard/timeout-policy/src/index.ts:56-80`。
+[^63]: waterfall 实现：`agent.ts:354-370`。
+[^64]: 重试序号读取实现：`packages/llm/llm-retry/src/index.ts:182-189`。
+[^65]: 实现位置：`packages/compaction/compaction-basic/src/index.ts:179-222`。
+[^66]: 代码位置：`agent.ts:391-393`。
+[^67]: sticky 标记实现：`agent.ts:288-290`。
+[^68]: `buildRequest` 调用点：`agent.ts:341`。
+[^69]: 原文出处：`packages/core/agent/src/runtime-types.ts:235-236`。
+[^70]: 别名 API 实现：`agent.ts:122-132`。
+[^71]: 原文出处：`docs/architecture.md:86`。
+[^72]: claim 顺序实现：`packages/core/agent/src/inbox.ts:71-77`。
+[^73]: splice 写事件实现：`packages/core/agent/src/inbox.ts:186`。
+[^74]: 构造时日志重放实现：`packages/core/agent/src/inbox.ts:32-39`。
+[^75]: `cancel(cause)` 实现：`agent.ts:134-139`。
+[^76]: latch 与自动开新 turn 实现：`agent.ts:116-119`、`:172-193`。
+[^77]: 类型定义：`packages/core/session/src/types.ts:143-158`；写入点：`agent.ts:304`。
+[^78]: 该表格位置：`docs/architecture.md:119`。
+[^79]: 常量定义：`packages/core/agent-loop/src/constants.ts:6`。

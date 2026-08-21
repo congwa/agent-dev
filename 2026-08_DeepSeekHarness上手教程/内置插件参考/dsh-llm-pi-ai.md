@@ -1,6 +1,6 @@
 # llm-pi-ai
 
-> `@deepseek-ai/dsh-llm-pi-ai` · bundle：`base` · 配置树 id：`llm-pi-ai` · v0.1.0-rc.5（commit `47f9438`）2026-08-14 核对
+> `@deepseek-ai/dsh-llm-pi-ai` · bundle：`base` · 配置树 id：`llm-pi-ai` · v0.1.0-rc.5（commit `47f9438`）2026-08-14 核对。出处收在文末脚注，可照抄的配置收在文末附录。
 
 **一句话**：基于 `@earendil-works/pi-ai` 的通用多 provider adapter，出厂**休眠挂载**（零路由），一旦 settings 里出现 `llm-pi-ai:` profiles 就把那些路由注册上去；它是 [llm-deepseek](./dsh-llm-deepseek.md) 的「另一半双胞胎」。
 
@@ -18,18 +18,18 @@
       name: '@deepseek-ai/dsh-llm-pi-ai'
 ```
 
-这一行**不带 config**，也就是 `providers` 默认为空 dict。源码级 `inject = ['llm']`。
-
-出处：挂载 `packages/bundle/base/cordis.patch.yml:88-96`；默认空 dict `packages/llm/llm-pi-ai/src/config.ts:256`；inject `src/index.ts:85`。
+这一行**不带 config**，也就是 `providers` 默认为空 dict。源码级 `inject = ['llm']`[^1]。
 
 ## 它注册了什么
 
+它注册了四类东西[^2]：
+
 | 类型 | 名字 | 说明 |
 |---|---|---|
-| adapter 路由 | 当前 profiles 的每一个 key | `src/index.ts:270`；**零路由时根本不调 `registerAdapter`**（`:266-269`），这就是休眠姿态 |
-| configurable provider 目录 | 已安装 catalog 中每个可用 API key 认证的 provider ∪ 当前 profiles 声明的每条路由 | 注册在 `src/index.ts:220`，条目形状见 `:120-147`，`settingsPath` 是 `['providers', <provider>]`（`:130`），`declared` 标记「pi-ai 根本没出这个 provider」（`:134`） |
-| model discovery | 命名空间 `llm-pi-ai` | `ctx.llm.registerModelDiscovery(NS, …)`，`src/index.ts:246`。配置面把用户正在编辑的**草稿**发过来问「这个端点有哪些模型」 |
-| settings section | 命名空间 `llm-pi-ai`，带 `validate: assertServiceable` | `src/index.ts:278-282` |
+| adapter 路由 | 当前 profiles 的每一个 key | 零路由时根本不调 `registerAdapter`，这就是休眠姿态 |
+| configurable provider 目录 | 已安装 catalog 中每个可用 API key 认证的 provider ∪ 当前 profiles 声明的每条路由 | `settingsPath` 是 `['providers', <provider>]`；`declared` 标记「pi-ai 根本没出这个 provider」 |
+| model discovery | 命名空间 `llm-pi-ai`，经 `ctx.llm.registerModelDiscovery(NS, …)` 注册 | 配置面把用户正在编辑的**草稿**发过来问「这个端点有哪些模型」 |
+| settings section | 命名空间 `llm-pi-ai` | 带 `validate: assertServiceable` 校验 |
 
 **不监听任何事件**（`src/` 下无 `ctx.on`），不注册工具 / prompt 段 / 命令。
 
@@ -45,7 +45,7 @@ stateDiagram-v2
     活跃 --> 活跃: profile 变化 → 整体 replace
 ```
 
-切换不是逐条增删，而是整体换集合。路由集与每条路由的 retry policy 都是**注册级事实**，任一变化就整体 `registration.replace(routes)`：
+切换不是逐条增删，而是整体换集合。路由集与每条路由的 retry policy 都是**注册级事实**，任一变化就整体替换注册：
 
 ```
 配置变化时:
@@ -60,32 +60,28 @@ stateDiagram-v2
         registeredFacts = facts          // 注册表真正吃下之后才前移
 ```
 
-也就是说：撞车不会把你已有的服务掀翻，而 `registeredFacts` 前移得晚一步，正是为了让失败的那次替换不留下假的「已生效」记录。
-
-出处：整体替换与事实前移见 `src/index.ts:253-275`；排序见 `:94-105`。
+也就是说：撞车不会把你已有的服务掀翻，而 `registeredFacts` 前移得晚一步，正是为了让失败的那次替换不留下假的「已生效」记录[^3]。
 
 ## 配置项
 
-顶层只有一个字段：
+顶层只有一个字段[^4]：
 
 | 字段 | 类型 | 默认值 | 作用 |
 |---|---|---|---|
-| `providers` | `Record<string, PiAiProviderProfile>` | `{}` | 按 provider 路由名做 key 的 profile 字典；dict 形状让重复路由不可表达。前 release 的数组形状会带迁移提示装载失败（`src/config.ts:304-306`） |
+| `providers` | `Record<string, PiAiProviderProfile>` | `{}` | 按 provider 路由名做 key 的 profile 字典；dict 形状让重复路由不可表达。前 release 的数组形状会带迁移提示装载失败 |
 
 单条 profile 的字段：`apiKeyEnv`、`displayName`、`api`、`baseURL`、`models`、`modelOverrides`、`compat`、`defaultContextWindow`、`defaultMaxTokens`、`defaultInput`、`headers`、`reasoning`、`thinkingBudgets`、`cacheRetention`、`transport`、`timeoutMs`、`websocketConnectTimeoutMs`、`streamIdleTimeoutMs`、`retryPolicy`。
 
-schema 在 `src/config.ts:232-252`，注释在 `:65-141`，另见 `docs/config-catalog.md:911-988`。
+其中四个兜底默认值值得单独记住[^5]：
 
-其中四个兜底默认值值得单独记住：
+| 字段 | 兜底默认值 |
+|---|---|
+| `defaultContextWindow` | 262,144 |
+| `defaultMaxTokens` | 32,768 |
+| `streamIdleTimeoutMs` | 300,000 |
+| `defaultInput` | `[text]` |
 
-| 字段 | 兜底默认值 | 出处 |
-|---|---|---|
-| `defaultContextWindow` | 262,144 | `src/config.ts:38` |
-| `defaultMaxTokens` | 32,768 | `:41` |
-| `streamIdleTimeoutMs` | 300,000 | `:35` |
-| `defaultInput` | `[text]` | `:53` |
-
-profile 写出来会落进四种形态，由 key 是否命中 catalog、以及写了哪些字段共同决定：
+profile 写出来会落进四种形态，由 key 是否命中 catalog、以及写了哪些字段共同决定[^6]：
 
 | 形态 | 什么时候是它 | 效果 |
 |---|---|---|
@@ -93,8 +89,6 @@ profile 写出来会落进四种形态，由 key 是否命中 catalog、以及�
 | catalog 路由 + `models` | 同上，且写了 `models` | 这份列表**整份替换**该路由的目录，每一项的未设字段再从同 id 的已装模型继承 |
 | `modelOverrides` | 只在「catalog 路由且没写 `models`」时有意义 | 只改指定几个已装模型，其余照旧服务；写错了会被拒绝而不是静默跳过 |
 | 手写路由 | pi-ai 没出的 key | 必须自带 `api`、`baseURL` 和非空 `models` |
-
-四种形态见 `README.md:74-100`。
 
 ```mermaid
 flowchart TD
@@ -125,7 +119,7 @@ flowchart TD
 
 ## 模型看得见什么
 
-Model Experience 分请求、响应两半。
+Model Experience 分请求、响应两半[^7]。
 
 请求侧：所选模型收到 `GenerateOptions.system`、历史、工具和 pi-ai 通用流式 API 支持的采样字段，**本包不加任何 prompt 文字**；只有当 adapter 校验通过时才恢复 provider 原生的 replay 元数据。
 
@@ -137,13 +131,40 @@ pi-ai 事件 → harness chunk:
     tool-call 的参数 = JSON.stringify(pi-ai 给的对象)   // 解析好的对象又被变回原始 JSON 字符串
 ```
 
-最后那一步第一遍读容易略过：pi-ai 给的本来是解析好的对象，这里重新 stringify，交回去的是**原始 JSON 字符串**。以上见 `README.md:160-188`。
+最后那一步第一遍读容易略过：pi-ai 给的本来是解析好的对象，这里重新 stringify，交回去的是**原始 JSON 字符串**。
 
 KV cache：转换不加文本、保持逻辑请求顺序，复用与否由所选 provider 的序列化和 replay 状态决定；换 adapter 实例、provider、model 或任何上游 token 都可能从第一处差异起失效。
 
 ## 什么时候你会想换掉它 / 怎么换
 
-不用换——它出厂就是空的，**你要做的是把它点亮**。往 `$DSH_HOME/settings.yaml` 写：
+不用换，它出厂就是空的，你要做的是把它点亮：往 `$DSH_HOME/settings.yaml` 写一段 `llm-pi-ai:` profiles，照抄[附录 A](#a-点亮-llm-pi-ai)。下一次请求即生效，不用重启[^8]，Web 的 Models 页写的就是这一段。
+
+想在 composition 层预置也可以：在 profile 的 `cordis.patch.yml` 里按 id 覆盖这一行的 `config`，照抄[附录 B](#b-在-composition-层预置-providers)。注意 patch 是**整份替换**目标行的 config，不是合并。
+
+但预置之前先看一眼坑与边界里那条：settings 层只能**加或覆盖**，删不掉 composition 给的路由。
+
+跟本组其它插件的分工有两处：`deepseek-official` 归 [llm-deepseek](./dsh-llm-deepseek.md) 独占，这里的 pi-ai catalog 名叫 `deepseek`，两者可以并存。
+
+每条 profile 的 `retryPolicy` 由 [llm-retry](./dsh-llm-retry.md) 在 agent 步骤边界执行，pi-ai SDK 自己的 `maxRetries` 被强制置零，这样才能保证一次 `stream()` 就是一次 provider 请求[^9]。
+
+## 坑与边界
+
+以下挑自 Known Limitations and Deferred Work，捡最容易踩的[^10]：
+
+- **只靠 OAuth 认证的 provider 不提供**：本 adapter 构建 `Models` 时不带凭据存储也不跑登录流，这类路由每次请求都会在发出前失败；目录里主动把它们扣下，`openai-codex` 是已装 catalog 里唯一一个。
+- **provider 原生凭据发现只读进程环境**：`~/.aws/credentials` 没有导出 `AWS_PROFILE` 就算未配置，harness 凭据 seam 里的值它也看不见。
+- **settings 能加路由、覆盖路由，但删不掉 composition 路由**；`replace` 只重置用户层。
+- **分层合并对 dict key 没有 delete**：base 声明过的 `reasoningEfforts` 档位、`modelOverrides` 条目、`compat` 字段，用户层只能覆盖不能移除；而 `reasoningEfforts` 的「缺席」本身就是语义（不提供该档），所以 base 声明过的档位会一直被提供。出厂 composition 让它休眠，正是为了避开这个。
+- **`headers` 里能塞进 redactor 看不见的凭据**：那是纯字符串 dict，写在里面的 `Authorization` 会被 `describe()` 原样吐出来给任何配置 UI。凭据请一律走 `apiKeyEnv`。
+- **路由的 catalog 永不自刷新**、**一条路由只能一种 wire 协议**。
+- **模态声明不被验证，且过度声明会拖累整个会话**：图片消息已经落到 session log 里了，只能换模型 / fork / 新会话。
+- **`GenerateOptions.stop` 直接被拒**（`UNSUPPORTED_OPTION`），**provider HTTP status 拿不到**（pi-ai 错误事件不给跨 provider 稳定的状态码）。
+
+---
+
+## 附录：可以照抄的模板
+
+### A. 点亮 llm-pi-ai
 
 ```yaml
 llm-pi-ai:
@@ -154,9 +175,7 @@ llm-pi-ai:
       reasoning: high
 ```
 
-下一次请求即生效，不用重启（`README.md:106`）。Web 的 Models 页写的就是这一段。
-
-想在 composition 层预置也可以——在 profile 的 `cordis.patch.yml` 里按 id 覆盖这一行的 `config`。注意 patch 是**整份替换**目标行的 config，不是合并：
+### B. 在 composition 层预置 providers
 
 ```yaml
 - id: llm-pi-ai
@@ -166,21 +185,17 @@ llm-pi-ai:
         apiKeyEnv: OPENAI_API_KEY
 ```
 
-但预置之前先看一眼 Known Limitations 里那条：settings 层只能**加或覆盖**，删不掉 composition 给的路由。
+---
 
-跟本组其它插件的分工有两处：`deepseek-official` 归 [llm-deepseek](./dsh-llm-deepseek.md) 独占，这里的 pi-ai catalog 名叫 `deepseek`，两者可以并存。
+## 出处
 
-每条 profile 的 `retryPolicy` 由 [llm-retry](./dsh-llm-retry.md) 在 agent 步骤边界执行，pi-ai SDK 自己的 `maxRetries` 被强制置零——保证一次 `stream()` 就是一次 provider 请求（`README.md:118`）。
-
-## 坑与边界
-
-以下挑自 `README.md:190-204` 的 Known Limitations and Deferred Work，捡最容易踩的：
-
-- **只靠 OAuth 认证的 provider 不提供**：本 adapter 构建 `Models` 时不带凭据存储也不跑登录流，这类路由每次请求都会在发出前失败；目录里主动把它们扣下，`openai-codex` 是已装 catalog 里唯一一个。
-- **provider 原生凭据发现只读进程环境**：`~/.aws/credentials` 没有导出 `AWS_PROFILE` 就算未配置，harness 凭据 seam 里的值它也看不见。
-- **settings 能加路由、覆盖路由，但删不掉 composition 路由**；`replace` 只重置用户层。
-- **分层合并对 dict key 没有 delete**：base 声明过的 `reasoningEfforts` 档位、`modelOverrides` 条目、`compat` 字段，用户层只能覆盖不能移除——而 `reasoningEfforts` 的「缺席」本身就是语义（不提供该档），所以 base 声明过的档位会一直被提供。出厂 composition 让它休眠，正是为了避开这个。
-- **`headers` 里能塞进 redactor 看不见的凭据**：那是纯字符串 dict，写在里面的 `Authorization` 会被 `describe()` 原样吐出来给任何配置 UI。凭据请一律走 `apiKeyEnv`。
-- **路由的 catalog 永不自刷新**、**一条路由只能一种 wire 协议**。
-- **模态声明不被验证，且过度声明会拖累整个会话**：图片消息已经落到 session log 里了，只能换模型 / fork / 新会话。
-- **`GenerateOptions.stop` 直接被拒**（`UNSUPPORTED_OPTION`），**provider HTTP status 拿不到**（pi-ai 错误事件不给跨 provider 稳定的状态码）。
+[^1]: 挂载位置：`packages/bundle/base/cordis.patch.yml:88-96`；默认空 dict：`packages/llm/llm-pi-ai/src/config.ts:256`；`inject = ['llm']`：`src/index.ts:85`。
+[^2]: adapter 路由与「零路由不调 registerAdapter」：`src/index.ts:270`、`:266-269`；provider 目录注册：`src/index.ts:220`，条目形状 `:120-147`，`settingsPath` `:130`，`declared` 标记 `:134`；model discovery：`src/index.ts:246`；settings section：`src/index.ts:278-282`。
+[^3]: 整体替换与事实前移：`src/index.ts:253-275`；候选集排序：`:94-105`。
+[^4]: schema：`src/config.ts:232-252`；前 release 数组形状迁移提示装载失败：`:304-306`；字段注释：`:65-141`；另见 `docs/config-catalog.md:911-988`。
+[^5]: `defaultContextWindow`：`src/config.ts:38`；`defaultMaxTokens`：`:41`；`streamIdleTimeoutMs`：`:35`；`defaultInput`：`:53`。
+[^6]: 四种形态：`README.md:74-100`。
+[^7]: Model Experience 一节，含请求侧、响应侧翻译与 tool-call 参数 stringify：`README.md:160-188`。
+[^8]: `README.md:106`。
+[^9]: `README.md:118`。
+[^10]: Known Limitations and Deferred Work：`README.md:190-204`。

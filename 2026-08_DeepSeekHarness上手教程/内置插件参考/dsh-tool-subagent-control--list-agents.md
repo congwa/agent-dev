@@ -1,8 +1,8 @@
 # tool-subagent-control/list-agents
 
-> `@deepseek-ai/dsh-tool-subagent-control/list-agents` · bundle：`base` · 配置树 id：`tool-subagent-list-agents` · v0.1.0-rc.5（commit `47f9438`）2026-08-14 核对
+> `@deepseek-ai/dsh-tool-subagent-control/list-agents` · bundle：`base` · 配置树 id：`tool-subagent-list-agents` · v0.1.0-rc.5（commit `47f9438`）2026-08-14 核对。出处收在文末脚注。
 
-> ⚠️ **本篇未通过对抗式引用核验**：起草已完成，但逐条打开源码比对行号/字段名/英文引文的那一遍因会话额度耗尽未执行。文中 `path:line` 与配置字段请以源码为准，核验后本行会被移除。
+> ⚠️ **本篇未通过对抗式引用核验**：起草已完成，但逐条打开源码比对行号/字段名/英文引文的那一遍因会话额度耗尽未执行。脚注里的 `path:line` 与配置字段请以源码为准，核验后本行会被移除。
 
 **一句话**：唯一的 `list_agents` 工具——把 `ctx.subagents` 的持久子目录投影成「只含可续子」的列表，并用在线 Agent registry 把状态细化成 `running` / `idle` / `ready`。
 
@@ -13,29 +13,29 @@
       name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
 ```
 
-它没有 config。它是 [`tool-subagent-control`](./dsh-tool-subagent-control.md) 同一个包的**子路径入口**，走 `package.json` 里的 `exports['./list-agents']`。
+它没有 config。它是 [`tool-subagent-control`](./dsh-tool-subagent-control.md) 同一个包的**子路径入口**，走 `package.json` 里的 `exports['./list-agents']`[^1]。
 
 之所以单独占一行而不是跟着根插件走，是为了让部署可以「只要投递、不要发现」——禁掉这行，模型就失去列举能力，投递能力照旧。
 
-出处：配置树那两行见 `packages/bundle/base/cordis.patch.yml:310-311`；子路径入口见 `packages/subagent/tool-subagent-control/package.json`。
+它的依赖比根插件多一层[^2]：
 
-它的依赖比根插件多一层：
-
-| 什么时候要 | 要什么 | 出处 |
-|---|---|---|
-| 加载时 inject | `['tools', 'subagents', 'agents']`，比根插件多一个 `agents` | `src/list-agents.ts:18` |
-| 调用时 | session store、projection registry（base 里 `session-projection` 这一行） | `packages/bundle/base/cordis.patch.yml:126` |
-| 任何时候 | **不需要任何 query 服务** | — |
+| 什么时候要 | 要什么 |
+|---|---|
+| 加载时 inject | `['tools', 'subagents', 'agents']`，比根插件多一个 `agents` |
+| 调用时 | session store、projection registry（base 里 `session-projection` 这一行） |
+| 任何时候 | **不需要任何 query 服务** |
 
 多出来的那个 `agents` 就是为了状态细化——不读在线 registry 就分不出 `running` 和 `idle`。
 
-web-app 把这一行 `disabled: true`（`packages/bundle/web-app/cordis.patch.yml:377-378`）。
+web-app 把这一行 `disabled: true`[^3]。
 
 ## 它注册了什么
 
-| 类型 | 名字 | 说明 |
-|---|---|---|
-| 工具 | `list_agents` | `src/list-agents.ts:92-191` |
+唯一注册的东西是一个工具[^4]：
+
+| 类型 | 名字 |
+|---|---|
+| 工具 | `list_agents` |
 
 **没有事件监听**（无 waterfall），没有 prompt 段，没有 service。整个插件就是一个工具。
 
@@ -51,7 +51,7 @@ else:                                 // children 是默认值
     rows = ctx.subagents.listChildren(caller, exec.signal)
 ```
 
-取 caller 与缺失即抛见 `src/list-agents.ts:165-169`，两个 scope 的分派见 `:173-185`。两者的差别：
+取 caller 与缺失即抛，以及两个 scope 的分派，都在这一段代码里[^5]。两者的差别：
 
 | scope | 读的服务方法 | 行内容 |
 |---|---|---|
@@ -77,7 +77,7 @@ for row in rows:
 
 `ready` 这个词是刻意挑的，意思是「可恢复而非终态」，不是一个等着被收取的结果。
 
-投影规则在 `project()`（`src/list-agents.ts:66-85`），状态判定在 `statusOf()`（`:59-63`）。
+投影规则在 `project()`，状态判定在 `statusOf()`[^6]。
 
 从持久子目录到最终渲染行，中间要经过一次过滤和一次在线状态查询：
 
@@ -121,7 +121,7 @@ flowchart TD
 
 无配置项。行为由三样东西决定：
 
-1. 调用 agent 的 session id（从 `exec.agent` 取，缺了直接抛，`src/list-agents.ts:165-169`）
+1. 调用 agent 的 session id（从 `exec.agent` 取，缺了直接抛[^5]）
 2. `ctx.subagents` 的枚举结果
 3. 在线 `ctx.agents` registry
 
@@ -136,7 +136,7 @@ schema 只有一个可选 `scope` 枚举（`children` / `descendants`）。输�
 | `descendants` 下 | 在破折号前插入 ` parent=<id> depth=<n>` |
 | 一行都没有 | `(no subagents)` |
 
-渲染实现在 `src/list-agents.ts:144-162`。诊断永远不暴露 descriptor 内容。
+渲染实现在这一段里[^7]。诊断永远不暴露 descriptor 内容。
 
 工具描述里明确劝阻轮询：「Use it to recall which ones you started, not to poll for completion — you are told when one finishes.」以及「The snapshot is not a delivery promise — `send_message` performs the authoritative check and may still fail.」
 
@@ -155,3 +155,13 @@ token 上它随列出的可续子数量线性增长。`descendants` 是整棵树
 - **projection registry 没挂就 fail loud**——服务以 `SUBAGENT_CONTROL_PROJECTIONS_UNAVAILABLE` 报错，缺 session store 则是 `SUBAGENT_CONTROL_SESSION_STORE_UNAVAILABLE`（见 [subagent](./dsh-subagent.md)）。
 - **取消会被观测**——每次持久化读都收到 `exec.signal`，读前后都重查取消，观察到的 abort 一律变成 `SubagentError` 的 `CANCELLED` 码。
 - 还在创建窗口里、descriptor 尚未追加的运行中子会被**省略**（不是诊断），这是服务侧枚举的规则。
+
+## 出处
+
+[^1]: 配置树两行：`packages/bundle/base/cordis.patch.yml:310-311`；子路径入口：`packages/subagent/tool-subagent-control/package.json`。
+[^2]: inject 清单：`src/list-agents.ts:18`；调用时依赖（`session-projection` 一行）：`packages/bundle/base/cordis.patch.yml:126`。
+[^3]: `packages/bundle/web-app/cordis.patch.yml:377-378`。
+[^4]: `src/list-agents.ts:92-191`。
+[^5]: 取 caller 与缺失即抛：`src/list-agents.ts:165-169`；两个 scope 的分派：`:173-185`。
+[^6]: `project()`：`src/list-agents.ts:66-85`；`statusOf()`：`:59-63`。
+[^7]: `src/list-agents.ts:144-162`。

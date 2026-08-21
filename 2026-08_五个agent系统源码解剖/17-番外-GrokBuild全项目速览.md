@@ -2,7 +2,7 @@
 
 > **一句话导读**：xAI 在一次"把用户家目录传上云"的数据事故后两天内开源了自家 coding agent「Grok Build」——155 万行 Rust、81 个 crate，架构上处处能看到本系列前 16 章讨论过的决策点被第四次回答：状态用 actor 无锁、并行工具用完成序回灌、压缩切在语义锚点、hook 走外部进程、扩展生态整个**寄生在 Claude Code 的文件约定上**。但它同时也是"开源 ≠ 开放"的标本：不收外部 PR、system prompt 在二进制里 XOR 混淆、遥测端点全部构建期注入——源码全给你看，控制权一点不给。
 >
-> 调研时间：**2026-08-06**。仓库 `xai-org/grok-build`，读的是当日 HEAD（commit `a5589e9`，2026-08-05 从内部 monorepo 同步，`SOURCE_REV = 4d6d1137…`）。调研方式：五路并行读源码 + 对关键结论抽样复核，文中所有 file:line 为当日实测。事故经过部分来自媒体报道，**属第三方来源**，已在文中标注。
+> 调研时间：**2026-08-06**。仓库 `xai-org/grok-build`，读的是当日 HEAD（commit `a5589e9`，2026-08-05 从内部 monorepo 同步，`SOURCE_REV = 4d6d1137…`）。调研方式：五路并行读源码 + 对关键结论抽样复核，出处收在文末脚注，均为当日实测。事故经过部分来自媒体报道，**属第三方来源**，已在文中标注。
 >
 > **本章定位**：番外，也是 Grok Build 的总入口。第 01–15 章各在章末有「第四个样本：Grok Build」小节承接本章、按各自维度展开，16 章总表已扩入 Grok 列；本章负责全项目的整体视图、事故背景与总判断。三个主样本的既有结论不受影响。
 
@@ -33,7 +33,7 @@
 
 后面两条也有细节：建仓时间不是转述，是 GitHub API 实测的 `created_at: 2026-07-14T20:04:23Z`。开源当天 Musk 称已上传数据将被 "completely and utterly deleted"，但受影响用户数未披露，也未提供数据已删除的验证途径。
 
-**开源的性质得说清楚：这是源码透明化，不是社区项目。** `CONTRIBUTING.md:3-4` 的原话是 "This repository does **not** accept external pull requests or unsolicited patches."，并且明确不提供 CLA。仓库本身是内部 monorepo 的周期性只读镜像（README.md:31-35），与 Codex 同款模式。截至调研日 24k+ star。
+**开源的性质得说清楚：这是源码透明化，不是社区项目。** `CONTRIBUTING.md` 的原话是 "This repository does **not** accept external pull requests or unsolicited patches."[^1]，并且明确不提供 CLA。仓库本身是内部 monorepo 的周期性只读镜像[^2]，与 Codex 同款模式。截至调研日 24k+ star。
 
 这个背景给读代码带来两个视角：一，代码里能找到**事故整改的直接痕迹**（第 6 节）；二，整个开源姿态是"你可以审计我，但别想改我"——这条张力贯穿全篇。
 
@@ -66,9 +66,7 @@
  无协议边界        协议形状的边界 + 直接链接        编译期可验证的边界
 ```
 
-证据是这样几条。TUI 那侧直接依赖 `xai-grok-shell`，但 agent 跑在同进程的独立线程上，两边经 `xai-acp-lib` 的内存 channel 收发 ACP 消息，源码注释自陈 "Simplified to only support GrokShell (in-process) mode. Subprocess and remote modes can be added later"。协议本体不是自研，**外采 Zed 的 `agent-client-protocol` 0.10.4**，并且内外统一：进程内 TUI、`grok agent stdio` 的 IDE 嵌入、headless 全走同一套 ACP 消息。
-
-对应 `xai-grok-pager/Cargo.toml:99`（依赖 shell）、`pager/src/acp/spawn.rs:1-4`（那句注释）、根 `Cargo.toml:97`（ACP 版本）。
+证据是这样几条。TUI 那侧直接依赖 `xai-grok-shell`[^3]，但 agent 跑在同进程的独立线程上，两边经 `xai-acp-lib` 的内存 channel 收发 ACP 消息，源码注释自陈 "Simplified to only support GrokShell (in-process) mode. Subprocess and remote modes can be added later"[^4]。协议本体不是自研，**外采 Zed 的 `agent-client-protocol` 0.10.4**[^5]，并且内外统一：进程内 TUI、`grok agent stdio` 的 IDE 嵌入、headless 全走同一套 ACP 消息。
 
 ACP 在这里已经从"编辑器协议"膨胀成整个产品的内部 RPC 面——`xai-grok-shell/src/extensions/` 下有 150+ 个 `x.ai/*` 扩展方法。
 
@@ -81,7 +79,7 @@ ACP 在这里已经从"编辑器协议"膨胀成整个产品的内部 RPC 面—
 | headless | `run_headless`（:409） | CI 场景 |
 | 常驻 leader 服务 | `run_leader`（:974） | socket + WebSocket bridge 多客户端接入 |
 
-四条里有一条反直觉，值得单独停一下：**headless 强制要求 grok.com 登录会话，唯一传输是 relay WebSocket，没有本地 fallback**，API-key 用户被直接指去 stdio 模式（app.rs:421-424）。也就是说，最像"跑在无人服务器上"的 CI 场景，反而是四种形态里绑云最深的那个。
+四条里有一条反直觉，值得单独停一下：**headless 强制要求 grok.com 登录会话，唯一传输是 relay WebSocket，没有本地 fallback**，API-key 用户被直接指去 stdio 模式[^6]。也就是说，最像"跑在无人服务器上"的 CI 场景，反而是四种形态里绑云最深的那个。
 
 四种形态怎么从同一个入口分岔、又怎么收敛回同一套协议，画出来更直观：
 
@@ -116,7 +114,7 @@ flowchart TD
     class D,G note
 ```
 
-还有一处姿态：入口二进制启用了 obfstr/cryptify 做**编译期字符串 + 控制流混淆**，Cargo.toml 里那段依赖的分组注释就写着 "Binary hardening"（xai-grok-pager-bin/Cargo.toml:66-68）。开源项目给自己的发行二进制上混淆，全系列仅此一家。
+还有一处姿态：入口二进制启用了 obfstr/cryptify 做**编译期字符串 + 控制流混淆**，Cargo.toml 里那段依赖的分组注释就写着 "Binary hardening"[^7]。开源项目给自己的发行二进制上混淆，全系列仅此一家。
 
 ---
 
@@ -166,11 +164,11 @@ flowchart TD
                             （rewind 不删日志，追加 RewindMarker）
 ```
 
-**无锁在这里是写进注释的设计宣言。** `xai-chat-state/src/lib.rs:12` 的 ASCII 架构图里直接标着 "State (no locks needed)"，persistence trait 用 `&mut self`，注释明言 "no locks, no atomics, no shared state"。
+**无锁在这里是写进注释的设计宣言。** 那份内部 ASCII 架构图里直接标着 "State (no locks needed)"[^8]，persistence trait 用 `&mut self`，注释明言 "no locks, no atomics, no shared state"。
 
-代价落在读者视图上：`GetConversation` 是**全量深拷贝**，代码里还打了一行 "cloning full conversation" 的 debug log 自认成本（actor/mod.rs:305-311）。它没有 Codex 的 Arc COW，比 Pi 的 `.slice()` 浅拷贝更贵，上界靠对话 pruning 压着。
+代价落在读者视图上：`GetConversation` 是**全量深拷贝**，代码里还打了一行 "cloning full conversation" 的 debug log 自认成本[^9]。它没有 Codex 的 Arc COW，比 Pi 的 `.slice()` 浅拷贝更贵，上界靠对话 pruning 压着。
 
-**并行工具的回灌顺序，和 Codex 恰好相反。** Grok 用 `FuturesUnordered`（tool_calls.rs:611），结果**按完成顺序**进历史，不保证请求序。正确性不靠序，靠三件套：call_id 配对（协议层天然无序安全）、写边界修复不变量（`repair_dangling_tool_calls` + `dedup_duplicate_tool_results`，只在三个写边界跑）、turn 末 reconciliation。
+**并行工具的回灌顺序，和 Codex 恰好相反。** Grok 用 `FuturesUnordered`[^10]，结果**按完成顺序**进历史，不保证请求序。正确性不靠序，靠三件套：call_id 配对（协议层天然无序安全）、写边界修复不变量（`repair_dangling_tool_calls` + `dedup_duplicate_tool_results`，只在三个写边界跑）、turn 末 reconciliation。
 
 第 14 章说 Codex 的 `FuturesOrdered` 是"正确性藏在类型名里"。Grok 直接放弃了顺序保证，把不变量做成显式修复函数。**两种哲学：一个防患于未然，一个宽进严出。**
 
@@ -214,13 +212,13 @@ for 调用 in 本批并行工具调用:
         排队等锁 → 按模型发出的顺序依次执行
 ```
 
-也就是只有"非只读 + 撞同一个 `file_path`"这一种组合会被串行化，其余全并发。用的是 `tokio::sync::Mutex`，实现在 tool_dispatch.rs:50-59。
+也就是只有"非只读 + 撞同一个 `file_path`"这一种组合会被串行化，其余全并发。用的是 `tokio::sync::Mutex`[^11]。
 
-**插话是双范式并存。** 默认走 Pi 式排队，`InterjectionBuffer` 的注释写着 "An interjection never cancels the turn"，而且它在同 turn 的循环边界就把队列排干，比 Pi 更激进；另外还留了 `send_now` 这条 Codex 式 cancel-and-send 硬中断。第 02 章那场"排队 vs 打断"之争，Grok 的答案是"都要，让队列策略函数裁决"。对应 interjection.rs:332 与 commands.rs:233。
+**插话是双范式并存。** 默认走 Pi 式排队，`InterjectionBuffer` 的注释写着 "An interjection never cancels the turn"[^12]，而且它在同 turn 的循环边界就把队列排干，比 Pi 更激进；另外还留了 `send_now` 这条 Codex 式 cancel-and-send 硬中断[^13]。第 02 章那场"排队 vs 打断"之争，Grok 的答案是"都要，让队列策略函数裁决"。
 
-**崩溃语义处在中间档。** 内存里的 actor 是运行时真相，落盘默认是 Buffered、不 fsync（`AppendDurability`，jsonl/mod.rs:22-25）——比 Pi 的同步 append 弱、比纯内存强。
+**崩溃语义处在中间档。** 内存里的 actor 是运行时真相，落盘默认是 Buffered、不 fsync（`AppendDurability`）[^14]——比 Pi 的同步 append 弱、比纯内存强。
 
-JSONL 还带 torn-tail 自愈：append 前先查最后一个字节，不是 `\n` 就先把那行残行封死。这段代码的注释里写着，这个 bug 曾经 "bricked session resume"（storage/jsonl/mod.rs:257-330）。
+JSONL 还带 torn-tail 自愈：append 前先查最后一个字节，不是 `\n` 就先把那行残行封死。这段代码的注释里写着，这个 bug 曾经 "bricked session resume"[^15]。
 
 **防模型傻转圈是显式机制，不是靠 prompt 求它别转。** 逻辑很短：
 
@@ -231,7 +229,7 @@ if 连续相同签名 == 16 次:   硬停
 if `run true` 式空转 == 4 次: 直接停
 ```
 
-硬停返回的是专用的 `TurnOutcome::StationarityEnded`，注释里明确说要"与 Completed 区分，防止恢复逻辑重开循环"。8 和 16 这两个常量之间还挂了编译期断言。四家里，只有它把"模型转圈"当成一等失败模式处理。出处：turn.rs:2724-2728。
+硬停返回的是专用的 `TurnOutcome::StationarityEnded`，注释里明确说要"与 Completed 区分，防止恢复逻辑重开循环"。8 和 16 这两个常量之间还挂了编译期断言[^16]。四家里，只有它把"模型转圈"当成一等失败模式处理。
 
 **时间旅行有三套机制并存**，各管各的场景：
 
@@ -251,15 +249,15 @@ if `run true` 式空转 == 4 次: 直接停
 
 省下来的重量去哪了？环境信息（git 状态、项目布局）全部下放到**首条 user 消息前缀**，用户请求包在 `<user_query>` 标签里；工具列表也不进 system prompt。
 
-per-model 的分化只有两档：换个身份名（`system_prompt_label`，五级解析，默认 "Grok"），或者整个换成 **concise 两句话版**——切换模型时就地改写会话里的 System item（model_switch.rs:83-95）。
+per-model 的分化只有两档：换个身份名（`system_prompt_label`，五级解析，默认 "Grok"），或者整个换成 **concise 两句话版**——切换模型时就地改写会话里的 System item[^17]。
 
 **但这个 prompt 在二进制里是 XOR 混淆的。** 明文模板就摆在仓库里，运行时用的却是 `prompt_encrypted.rs` 的加密字节，文件头注释写着 "XOR-encrypted prompt templates (key = position-dependent seed)"，解密到 `Zeroizing<String>`、用完清零。防的是对发行二进制 `strings` 提取，不防读源码。一个开源仓库加密自己已经公开的 prompt，姿态耐人寻味。
 
-**没有 GROK.md。** 项目约定文件的识别名单是 `Agents.md / Claude.md / CLAUDE.md / CLAUDE.local.md / AGENT.md / AGENTS.md`，外加 `.claude/CLAUDE.md`——**自家品牌反而没有专属文件名**（compat.rs:401-415）。rules 目录认 `.grok/rules` + `.claude/rules` + `.cursor/rules`。
+**没有 GROK.md。** 项目约定文件的识别名单是 `Agents.md / Claude.md / CLAUDE.md / CLAUDE.local.md / AGENT.md / AGENTS.md`，外加 `.claude/CLAUDE.md`——**自家品牌反而没有专属文件名**[^18]。rules 目录认 `.grok/rules` + `.claude/rules` + `.cursor/rules`。
 
-注入方式是全文 verbatim、无截断；而且压缩之后 AGENTS.md 是**原文重注入**，不依赖摘要模型转述（assemble.rs:73-79）。
+注入方式是全文 verbatim、无截断；而且压缩之后 AGENTS.md 是**原文重注入**，不依赖摘要模型转述[^19]。
 
-**压缩是第四种切点哲学。** 第 04 章记录了三家：Pi 白名单切点向新挪、LangChain 向旧回溯、Codex 服务端。Grok Build 走客户端 full-replace，切点钉死在语义锚点上：
+**压缩是第四种切点哲学。** 第 04 章记录了三家：Pi 白名单切点向新挪、LangChain 向旧回溯、Codex 服务端。Grok Build 走客户端 full-replace，切点钉死在语义锚点上[^20]：
 
 ```
 切点 = 最后一条真实 user 消息
@@ -268,17 +266,15 @@ per-model 的分化只有两档：换个身份名（`system_prompt_label`，五�
 if 还是放不下:   verbatim → fitted → lossy 逐级降级
 ```
 
-切点那一步实现在 compaction_utils.rs:581-582。
-
 这套里有两个亮点，外加一条边角料。
 
-**prefire 两段式预压缩**：用量到阈值−10% 就在后台把前 95% 历史先摘要成 NOTE₁ 缓存（带前缀指纹，rewind 即失效），真到 85% 触发时只需"NOTE₁ + 5% 尾巴"重写——把用户可感知的压缩延迟藏进后台（two_pass.rs:1-13）。四家里唯一对压缩延迟做工程优化的。
+**prefire 两段式预压缩**：用量到阈值−10% 就在后台把前 95% 历史先摘要成 NOTE₁ 缓存（带前缀指纹，rewind 即失效），真到 85% 触发时只需"NOTE₁ + 5% 尾巴"重写——把用户可感知的压缩延迟藏进后台[^21]。四家里唯一对压缩延迟做工程优化的。
 
 摘要 prompt 里还有一段独有的防御，防的是摘要模型自己跑去读压缩残档：
 
 > "If the prior conversation contains a note about files at /tmp/compaction/segment_*.md … those files are an out-of-band memory channel for a FUTURE work agent, not for you."
 
-边角料：压缩摘要 prompt 模板里出现了 `grok-4.20` 这个未发布的型号名，位置是 chat 侧专用压缩模型配置（intra_compaction/config.rs:208）。
+边角料：压缩摘要 prompt 模板里出现了 `grok-4.20` 这个未发布的型号名，位置是 chat 侧专用压缩模型配置[^22]。
 
 prefire 预压缩和正式压缩的两段式衔接，画出来是这样：
 
@@ -421,7 +417,7 @@ flowchart TD
 
 ### 6.1 沙箱：两套内核沙箱 + 细到病态的审批分类器
 
-隔离用的是第三方 crate `nono`，即 Linux Landlock + macOS Seatbelt 两套（`xai-grok-sandbox/src/lib.rs:14-17`）。**Windows 没有内核沙箱**，feature 直接门控在 `unix` 上——对照 Codex 的三套，少的正是 Windows 那套。
+隔离用的是第三方 crate `nono`，即 Linux Landlock + macOS Seatbelt 两套[^23]。**Windows 没有内核沙箱**，feature 直接门控在 `unix` 上——对照 Codex 的三套，少的正是 Windows 那套。
 
 网络这块是分层的：进程级网络开放（agent 自己要调 LLM API），子进程网络仅在 Linux 上经 seccomp 封锁。五个内置 profile，默认的 `workspace` 是全盘可读、workspace 可写、不限网。
 
@@ -436,7 +432,7 @@ for 段 in 各段:
 全部段都通过 → 这条命令才算通过
 ```
 
-auto 模式的分类器细到什么程度？`cat x >> ~/.bashrc`、`git diff --output=~/.bashrc`、`go build -o ~/.bashrc` 这类花式写 dotfile/ssh 的组合都能拦下来，而且有测试锁定（auto_mode/mod.rs:2077-2137）。
+auto 模式的分类器细到什么程度？`cat x >> ~/.bashrc`、`git diff --output=~/.bashrc`、`go build -o ~/.bashrc` 这类花式写 dotfile/ssh 的组合都能拦下来，而且有测试锁定[^24]。
 
 最有意思的防提权是 **hook 源文件的内核级 write-deny**：
 
@@ -449,7 +445,7 @@ auto 模式的分类器细到什么程度？`cat x >> ~/.bashrc`、`git diff --o
             拒绝启动沙箱          // fail-closed
 ```
 
-这和 Codex 用 WritableRoot 防 `.git/hooks` 是同题异构，而且更硬——Codex 那套是不让你写，这套是"只要看着可疑，整个沙箱就不启动"。实现在 hook_write_deny.rs:36-47。
+这和 Codex 用 WritableRoot 防 `.git/hooks` 是同题异构，而且更硬——Codex 那套是不让你写，这套是"只要看着可疑，整个沙箱就不启动"[^25]。
 
 ### 6.2 数据边界：残留代码找到了，禁用方式是"掏空函数体"
 
@@ -471,7 +467,7 @@ skip_artifact(..., "full_prompt.txt", "prompt_content_upload_disabled")
 
 1. **内容路径中和**（上面那段代码）；仓库变更序列化模块整个被掏空，只剩类型 re-export。
 2. **新增 workspace 分类器**（`xai-file-utils/src/workspace_classifier.rs`）：`$HOME` 本身、`~/Library`、Desktop/Downloads/Documents、`.ssh`/`.claude`/`.grok` 目录明确排除出上传范围，只有 git 仓库或"项目目录"才可归类上传——直接对应"把家目录整个传了"的事故。
-3. **ZDR/opt-out 时主动 purge 本地待传队列**（auth/model.rs:184-189）。
+3. **ZDR/opt-out 时主动 purge 本地待传队列**[^26]。
 
 三件整改怎么对应到事故本身，画成一张图：
 
@@ -516,7 +512,7 @@ flowchart TD
 | 仓库信息外泄面 | 模型请求 header 带 cwd 绝对路径 + remote URL，**关不掉** | header 只带 id 类字段;仓库路径/remote URL 在 GCS trace metadata 里，**默认关** |
 | 设备标识 | `x-codex-installation-id`（随机持久 UUID） | `x-grok-agent-id` = **硬件派生设备指纹**（macOS 硬件序列号 / Linux machine-id 派生 UUIDv5） |
 | 文档披露 | 仓库内 0 命中 | 用户指南专章披露配置项、env、ZDR（docs/user-guide/05, 24） |
-| 治理暗门 | 用户配置可覆盖企业设置 | **`remote_settings` 可服务端远程打开遥测和 trace 上传**（config.rs:2340-2367），用户本地不改配置也会被打开（仍受 ZDR/凭证门） |
+| 治理暗门 | 用户配置可覆盖企业设置 | **`remote_settings` 可服务端远程打开遥测和 trace 上传**[^27]，用户本地不改配置也会被打开（仍受 ZDR/凭证门） |
 
 两边各有一个"最该被挑战的点"。Codex 是"默认开 + 零披露"；Grok 是"默认关，但服务端握着远程开关"——一家刚出过数据事故的公司，在代码里保留的是 remote kill-switch 的**反向开关**。这个设计值得每个企业买家在采购评审里问一句。
 
@@ -563,3 +559,35 @@ workspace 分类器排除 `$HOME`/`.ssh`、内容上传函数存根化、ZDR pur
 [DevOps.com](https://devops.com/xai-open-sources-grok-build-coding-agent-after-cloud-upload-exposes-ssh-keys-repos/) ·
 [The Decoder](https://the-decoder.com/xai-open-sources-grok-build-on-github-after-massive-data-breach/) ·
 [SQ Magazine](https://sqmagazine.co.uk/xai-open-sources-grok-build/)
+
+---
+
+## 出处
+
+[^1]: `CONTRIBUTING.md:3-4`。
+[^2]: `README.md:31-35`。
+[^3]: `xai-grok-pager/Cargo.toml:99`，TUI 对 `xai-grok-shell` 的依赖声明。
+[^4]: `pager/src/acp/spawn.rs:1-4`，"Simplified to only support GrokShell (in-process) mode" 那句注释。
+[^5]: 根 `Cargo.toml:97`，`agent-client-protocol` 依赖版本 0.10.4。
+[^6]: `app.rs:421-424`。
+[^7]: `xai-grok-pager-bin/Cargo.toml:66-68`，"Binary hardening" 依赖分组注释。
+[^8]: `xai-chat-state/src/lib.rs:12`，ASCII 架构图里的 "State (no locks needed)" 标注。
+[^9]: `actor/mod.rs:305-311`，"cloning full conversation" 的 debug log。
+[^10]: `tool_calls.rs:611`，`FuturesUnordered` 派发。
+[^11]: `tool_dispatch.rs:50-59`，per-path `tokio::sync::Mutex` 实现。
+[^12]: `interjection.rs:332`，`InterjectionBuffer` 上 "An interjection never cancels the turn" 的注释。
+[^13]: `commands.rs:233`，`send_now` 的 cancel-and-send 实现。
+[^14]: `jsonl/mod.rs:22-25`，`AppendDurability` 默认值（Buffered、不 fsync）。
+[^15]: `storage/jsonl/mod.rs:257-330`，torn-tail 自愈逻辑，注释自陈曾经 "bricked session resume"。
+[^16]: `turn.rs:2724-2728`，8/16 次阈值常量与编译期断言。
+[^17]: `model_switch.rs:83-95`，切换模型时改写会话内 System item。
+[^18]: `compat.rs:401-415`，项目约定文件识别名单，无 GROK.md。
+[^19]: `assemble.rs:73-79`，压缩后 AGENTS.md 原文重注入逻辑。
+[^20]: `compaction_utils.rs:581-582`，切点定位到最后一条真实 user 消息。
+[^21]: `two_pass.rs:1-13`，prefire 两段式预压缩实现。
+[^22]: `intra_compaction/config.rs:208`，chat 侧专用压缩模型配置，出现 `grok-4.20`。
+[^23]: `xai-grok-sandbox/src/lib.rs:14-17`，`nono` crate 接入 Landlock/Seatbelt。
+[^24]: `auto_mode/mod.rs:2077-2137`，dotfile/ssh 花式写入拦截的测试锁定。
+[^25]: `hook_write_deny.rs:36-47`，hook 文件内核级 write-deny 实现。
+[^26]: `auth/model.rs:184-189`，ZDR/opt-out 时 purge 本地待传队列。
+[^27]: `config.rs:2340-2367`，`remote_settings` 远程打开遥测/trace 上传的开关。
