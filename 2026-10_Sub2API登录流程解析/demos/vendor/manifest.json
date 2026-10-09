@@ -1,0 +1,50 @@
+{
+  "delivery": "Local browser-ready copies; no build or CDN request required.",
+  "assets": [
+    {
+      "name": "Tailwind CSS browser",
+      "version": "4.1.13",
+      "file": "tailwindcss.js",
+      "source": "https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.1.13/dist/index.global.js",
+      "sha256": "4df034809c175da313a3e44657411bd26cbd52ceb16f52f028e35e3d646bb9c8",
+      "license": "tailwindcss-LICENSE",
+      "licenseSource": "https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.1.13/LICENSE"
+    },
+    {
+      "name": "Basecoat CSS",
+      "version": "1.0.2",
+      "file": "basecoat.css",
+      "source": "https://cdn.jsdelivr.net/npm/basecoat-css@1.0.2/dist/basecoat.cdn.min.css",
+      "sha256": "8123677adb9bba43be3298e1543bcc5fc763e8cda3d32dc74c806046a3537ca0",
+      "license": "basecoat-LICENSE",
+      "licenseSource": "https://cdn.jsdelivr.net/npm/basecoat-css@1.0.2/LICENSE.md"
+    },
+    {
+      "name": "Basecoat runtime",
+      "version": "1.0.2",
+      "file": "basecoat-all.min.js",
+      "source": "https://cdn.jsdelivr.net/npm/basecoat-css@1.0.2/dist/js/all.min.js",
+      "sha256": "bdb364d43e0f3e7b8dfcfa27bbbe8baac96249e57b79e7f0d241bf70b056ea98",
+      "license": "basecoat-LICENSE",
+      "licenseSource": "https://cdn.jsdelivr.net/npm/basecoat-css@1.0.2/LICENSE.md"
+    },
+    {
+      "name": "Lucide",
+      "version": "0.468.0",
+      "file": "lucide.min.js",
+      "source": "https://cdn.jsdelivr.net/npm/lucide@0.468.0/dist/umd/lucide.min.js",
+      "sha256": "3411692820cb8d47543f69496aa25fd603a358f4498046f41c508a5a3342210e",
+      "license": "lucide-LICENSE",
+      "licenseSource": "https://cdn.jsdelivr.net/npm/lucide@0.468.0/LICENSE"
+    },
+    {
+      "name": "Motion",
+      "version": "12.23.24",
+      "file": "motion.js",
+      "source": "https://cdn.jsdelivr.net/npm/motion@12.23.24/dist/motion.js",
+      "sha256": "631dbfc6984d0078a6edbc9885a87d5d941ad9d7534740237c9679140c0dfdc5",
+      "license": "motion-LICENSE",
+      "licenseSource": "https://cdn.jsdelivr.net/npm/motion@12.23.24/LICENSE"
+    }
+  ]
+}

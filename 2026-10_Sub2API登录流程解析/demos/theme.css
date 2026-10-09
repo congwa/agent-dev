@@ -1,0 +1,96 @@
+/* Semantic tokens are complete color values, compatible with Basecoat 1.0.2.
+   Custom rules below describe the data-flow diagram, record visualization and focus;
+   normal layout/spacing/type uses Tailwind and controls use Basecoat. */
+:root {
+  --background: #f5f7fa; --foreground: #182335; --card: #ffffff; --card-foreground: #182335;
+  --popover: #ffffff; --popover-foreground: #182335; --primary: #2459d3; --primary-foreground: #ffffff;
+  --secondary: #eaf0ff; --secondary-foreground: #234a9f; --muted: #eef1f6; --muted-foreground: #526174;
+  --accent: #eaf0ff; --accent-foreground: #234a9f; --destructive: #b42332; --destructive-foreground: #ffffff;
+  --border: #d4dce7; --input: #c1cbd9; --ring: #2459d3; --radius: .75rem;
+  --chart-1: #2459d3; --chart-2: #087b68; --chart-3: #8f4f18; --chart-4: #7550b0; --chart-5: #b42332;
+  --sidebar: #ffffff; --sidebar-foreground: #182335; --sidebar-primary: #2459d3; --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #eaf0ff; --sidebar-accent-foreground: #234a9f; --sidebar-border: #d4dce7; --sidebar-ring: #2459d3;
+  --browser-ink: #2459d3; --browser-surface: #eaf0ff; --server-ink: #67429b; --server-surface: #f1ecfa;
+  --pg-ink: #08705f; --pg-surface: #e6f4ee; --redis-ink: #a74422; --redis-surface: #fff0e9;
+  --code-background: #f3f5f9; --code-foreground: #283b55;
+  --font-sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+body { font-family: var(--font-sans); line-height: 1.6; }
+/* These cards own child spacing explicitly; disable the Basecoat card's default gap/padding. */
+.card { padding-block: 0; gap: 0; }
+button, select, a { touch-action: manipulation; }
+button { cursor: pointer; }
+button:disabled { cursor: not-allowed; }
+.btn:disabled { opacity: 1; color: var(--muted-foreground); background: var(--muted); border-color: var(--border); }
+button:focus-visible, select:focus-visible, a:focus-visible { outline: 3px solid var(--ring); outline-offset: 3px; }
+.skip-link { position: fixed; left: 20px; top: 12px; z-index: 50; background: var(--primary); color: var(--primary-foreground); padding: 12px 18px; }
+.skip-link:not(:focus) { clip-path: inset(50%); width: 1px; height: 1px; overflow: hidden; white-space: nowrap; padding: 0; }
+svg.lucide { width: 18px; height: 18px; stroke-width: 1.8; flex-shrink: 0; }
+.brand-mark { display: inline-flex; padding: 9px; background: var(--primary); color: var(--primary-foreground); border-radius: 10px; }
+.sample-note { display: flex; align-items: flex-start; gap: 9px; max-width: 320px; font-size: 12px; color: var(--muted-foreground); }
+.sample-note strong { color: var(--foreground); font-weight: 600; }
+.sample-note svg { margin-top: 3px; }
+.phase-btn { min-height: 44px; }
+.phase-btn[aria-pressed="true"], .phase-btn[aria-pressed="true"]:hover, .phase-btn[aria-pressed="true"]:active { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); }
+.phase-btn .phase-num { font-size: 11px; font-variant-numeric: tabular-nums; opacity: .9; }
+#progress-fill { width: 0; background: var(--primary); }
+.diagram { position: relative; padding-top: 78px; }
+.routes { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; z-index: 2; color: var(--primary); }
+#route-line { fill: none; stroke: var(--primary); stroke-width: 2; stroke-dasharray: 5 5; opacity: .6; }
+.packet { position: absolute; left: 0; top: 0; z-index: 3; padding: 5px 10px; border: 1px solid var(--primary); border-radius: 7px; background: var(--primary); color: var(--primary-foreground); font-size: 11px; font-weight: 600; white-space: nowrap; opacity: 0; pointer-events: none; box-shadow: 0 3px 12px #2459d326; }
+.lane { flex: 1; min-width: 0; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); overflow-wrap: anywhere; position: relative; }
+.lane[data-lane="browser"] { --lane-ink: var(--browser-ink); --lane-surface: var(--browser-surface); }
+.lane[data-lane="server"] { --lane-ink: var(--server-ink); --lane-surface: var(--server-surface); }
+.lane[data-lane="pg"] { --lane-ink: var(--pg-ink); --lane-surface: var(--pg-surface); }
+.lane[data-lane="redis"] { --lane-ink: var(--redis-ink); --lane-surface: var(--redis-surface); }
+.lane.is-active { border-color: var(--lane-ink); box-shadow: 0 0 0 2px var(--lane-surface); }
+.lane-heading { display: flex; align-items: center; gap: 9px; padding: 15px 13px; border-bottom: 1px solid var(--border); }
+.lane-heading h3 { font-size: 14px; font-weight: 650; }
+.lane-heading p { font-size: 11px; color: var(--muted-foreground); margin-top: 2px; }
+.actor-icon { display: inline-flex; padding: 8px; border-radius: 9px; color: var(--lane-ink); background: var(--lane-surface); }
+.actor-number { margin-left: auto; color: var(--muted-foreground); font-size: 11px; font-variant-numeric: tabular-nums; }
+.lane-body { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.record { padding: 11px; border: 1px solid var(--border); border-radius: 8px; text-align: left; width: 100%; color: var(--foreground); background: var(--card); }
+.record:hover { background: var(--lane-surface); color: var(--foreground); border-color: var(--lane-ink); }
+.record.is-touched, .record.is-touched:hover { border-color: var(--lane-ink); background: var(--lane-surface); color: var(--foreground); }
+.record-title { display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 12px; font-weight: 650; }
+.record-title .lucide { width: 13px; height: 13px; }
+.structure { display: inline-block; margin-top: 5px; font-size: 10px; color: var(--lane-ink); font-weight: 650; }
+.record-pair { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-top: 5px; font-size: 11px; line-height: 1.7; }
+.record-pair dt { color: var(--muted-foreground); flex-shrink: 0; }
+.record-pair dd { text-align: right; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; min-width: 0; overflow-wrap: anywhere; }
+.empty { padding: 14px 11px; border: 1px dashed var(--border); border-radius: 8px; color: var(--muted-foreground); font-size: 12px; line-height: 1.8; }
+.lane-note { font-size: 11px; color: var(--muted-foreground); line-height: 1.8; }
+.set-members { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 8px; font-family: ui-monospace, monospace; font-size: 12px; }
+.member { border: 1px solid var(--border); border-radius: 5px; padding: 1px 7px; background: var(--card); color: var(--foreground); }
+.ttl { margin-top: 7px; font-size: 10px; color: var(--muted-foreground); }
+.step-number { display: inline-flex; width: 42px; height: 42px; justify-content: center; align-items: center; border-radius: 10px; flex-shrink: 0; background: var(--secondary); color: var(--secondary-foreground); font-family: ui-monospace, monospace; font-size: 18px; font-weight: 600; }
+.action-facts { display: flex; flex-direction: column; gap: 12px; font-size: 13px; }
+.action-facts > div { display: flex; align-items: baseline; gap: 15px; }
+.action-facts dt { width: 72px; flex-shrink: 0; color: var(--muted-foreground); }
+.action-facts dd { min-width: 0; overflow-wrap: anywhere; }
+.operation { padding: 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--code-background); color: var(--code-foreground); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.8; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.takeaway { font-size: 12px; line-height: 1.9; padding-left: 12px; border-left: 3px solid var(--primary); color: var(--muted-foreground); }
+.steps { max-height: 480px; overflow-y: auto; }
+.step-btn { display: flex; width: 100%; gap: 10px; align-items: center; text-align: left; border: 1px solid transparent; border-radius: 8px; padding: 9px; font-size: 12px; color: var(--muted-foreground); min-height: 40px; }
+.step-btn:hover { background: var(--muted); color: var(--foreground); }
+.step-btn[aria-current="step"], .step-btn[aria-current="step"]:hover { background: var(--secondary); border-color: var(--primary); color: var(--secondary-foreground); }
+.step-btn .num { min-width: 22px; font-family: ui-monospace, monospace; font-size: 10px; }
+.step-btn .step-check { margin-left: auto; width: 14px; height: 14px; }
+.inspector-table { width: 100%; font-size: 12px; border-collapse: collapse; }
+.inspector-table td, .inspector-table th { padding: 9px 8px; border-bottom: 1px solid var(--border); text-align: left; overflow-wrap: anywhere; }
+.inspector-table td { vertical-align: top; }
+.inspector-table td:nth-child(2) { overflow-wrap: normal; word-break: normal; }
+.inspector-table th { color: var(--muted-foreground); font-weight: 500; }
+.dialog a { color: var(--primary); text-decoration: underline; text-underline-offset: 3px; }
+/* Basecoat positions the content inside a zero-sized native dialog; size its content explicitly. */
+.dialog > div { width: min(650px, calc(100vw - 32px)); max-width: none; }
+@media (max-width: 1023px) {
+  .diagram { padding-top: 16px; }
+  .routes, .packet { display: none; }
+  .lane.is-active::before { content: "本步涉及"; position: absolute; right: 10px; top: -8px; font-size: 10px; background: var(--lane-ink); color: #fff; padding: 0 6px; border-radius: 4px; }
+  .lane-body { flex-direction: row; flex-wrap: wrap; }
+  .lane-body > * { flex: 1 1 180px; min-width: 0; }
+  .lane-body > .lane-note { flex-basis: 100%; }
+}
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation: none !important; transition: none !important; } }
