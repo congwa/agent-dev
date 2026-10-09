@@ -4,98 +4,144 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
-  <title>Sub2API 登录数据流动画</title>
+  <title>Sub2API 登录全流程 · 存储与 Token 计算</title>
   <link rel="icon" href="data:,">
   <script src="vendor/tailwindcss.js"></script>
   <link rel="stylesheet" href="vendor/basecoat.css">
   <link rel="stylesheet" href="theme.css">
-  <style type="text/tailwindcss">
-    @theme { --font-sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; --color-page: var(--background); --color-ink: var(--foreground); --color-subtle: var(--muted-foreground); --color-line: var(--border); --color-surface: var(--card); }
-  </style>
+  <style type="text/tailwindcss">@theme { --font-sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; --color-page: var(--background); --color-ink: var(--foreground); --color-subtle: var(--muted-foreground); --color-line: var(--border); --color-surface: var(--card); }</style>
   <script defer src="vendor/basecoat-all.min.js"></script>
-  <script defer src="vendor/lucide.min.js"></script>
-  <script defer src="vendor/motion.js"></script>
-  <script defer src="data.js"></script>
-  <script defer src="app.js"></script>
+  <script defer src="vendor/lucide.min.js" onload="lucide.createIcons()"></script>
 </head>
 <body class="bg-page text-ink antialiased">
-  <a href="#main" class="skip-link">跳到动画</a>
-  <div class="mx-auto max-w-[1480px] px-4 py-6 sm:px-8 sm:py-9">
-    <header class="flex flex-wrap items-center justify-between gap-4 border-b border-line pb-5">
-      <a href="../1_从密码校验到会话续期.md" class="flex items-center gap-3 text-sm font-semibold" aria-label="阅读 Sub2API 登录流程解析文章">
-        <span class="brand-mark"><i data-lucide="route" aria-hidden="true"></i></span>
-        <span>Sub2API <span class="ml-2 font-normal text-subtle">登录数据流</span></span>
-      </a>
-      <div class="flex items-center gap-3">
-        <span class="hidden text-xs text-subtle sm:block">源码版本 3a6fd1c9</span>
-        <button id="sources" class="btn" data-variant="outline"><i data-lucide="book-open" aria-hidden="true"></i> 数据结构与出处</button>
-      </div>
+  <a href="#main" class="skip-link">跳到流程正文</a>
+  <div class="mx-auto max-w-[1200px] px-4 py-6 sm:px-8 sm:py-8">
+    <header class="flex flex-wrap items-center justify-between gap-4 border-b border-line pb-5 text-sm">
+      <a href="../1_从密码校验到会话续期.md" class="flex items-center gap-3 font-semibold"><span class="brand-mark"><i data-lucide="route" aria-hidden="true"></i></span>Sub2API <span class="font-normal text-subtle">登录流程解析</span></a>
+      <a href="#sources" class="text-subtle">源码 3a6fd1c9 · 查看出处</a>
     </header>
     <main id="main">
-      <section class="flex flex-wrap items-end justify-between gap-6 pb-7 pt-8 sm:pt-10" aria-labelledby="page-title">
-        <div class="max-w-3xl">
-          <p class="mb-3 text-xs font-semibold tracking-widest text-subtle">从存入，到取出，再到使用</p>
-          <h1 id="page-title" class="text-3xl font-semibold leading-tight tracking-tight sm:text-[42px]">一次登录，数据如何流转</h1>
-          <p class="mt-4 text-sm leading-7 text-subtle sm:text-base">跟着用户 42，观察浏览器、后端、PostgreSQL 和 Redis。<br class="hidden sm:block">逐步播放，每个存取动作都能停下来看。</p>
+      <section class="pb-6 pt-8 sm:pt-10" aria-labelledby="page-title">
+        <h1 id="page-title" class="text-3xl font-semibold leading-tight tracking-tight sm:text-[38px]">登录全流程，一页看清</h1>
+        <p class="mt-3 text-base leading-8 text-subtle">先看数据住在哪里，再沿七个环节看它怎样被取出、校验和使用。</p>
+        <p class="mt-3 text-xs leading-6 text-subtle">图中用户为 42；A1 是访问 JWT，R1 是刷新原值，H1 是 R1 的哈希，F1 是会话家族，T1 是临时 2FA Token。所有值均为示意。</p>
+      </section>
+      <section id="storage" aria-labelledby="storage-title">
+        <div class="mb-3 flex flex-wrap items-center justify-between gap-3"><h2 id="storage-title" class="text-base font-semibold">数据分别存在哪里</h2><a href="#formats" class="text-sm text-subtle">Token 计算与前缀 ↓</a></div>
+        <div class="flex flex-col gap-3 sm:flex-row">
+          <article class="storage-card flex-1" data-actor="pg"><header><i data-lucide="database" aria-hidden="true"></i><h3>PostgreSQL</h3><span>关系表 · 行与列</span></header><p><code>users</code>：身份、bcrypt 哈希、角色、状态、TOTP 密文。<br><code>security_secrets</code>：系统 JWT 签名密钥。<br><code>settings</code>：功能开关。</p></article>
+          <article class="storage-card flex-1" data-actor="redis"><header><i data-lucide="layers" aria-hidden="true"></i><h3>Redis</h3><span>String JSON · Set</span></header><p>刷新主记录与临时 2FA 会话：<strong>String 内的 JSON 文本</strong>。<br>用户索引与家族索引：<strong>Set 内的 Token 哈希</strong>。<br>TTL 设置在 key 上。</p></article>
+          <article class="storage-card flex-1" data-actor="browser"><header><i data-lucide="monitor" aria-hidden="true"></i><h3>浏览器</h3><span>localStorage · String</span></header><p><code>auth_token</code>：A1 原值。<br><code>refresh_token</code>：R1 原值。<br><code>auth_user</code>：资料 JSON 字符串。<br><code>token_expires_at</code>：毫秒到期时间字符串。</p></article>
         </div>
-        <div class="sample-note"><i data-lucide="flask-conical" aria-hidden="true"></i><div><strong>示意数据 · 纯本地演示</strong><p>F1 是会话，A1 是 JWT，R1 是刷新凭据，H1 是 R1 的哈希。</p></div></div>
+        <p class="mt-3 text-sm leading-7 text-subtle"><strong class="text-ink">后端内存：</strong>加载后的签名密钥、请求临时值、解析后的用户与会话对象；取出来做校验，或继续签发新凭据。</p>
+      </section>
+      <nav class="my-6 flex flex-wrap gap-2" aria-label="跳到流程环节"><a class="btn" data-variant="outline" href="#startup"><span class="nav-num">01</span>启动</a><a class="btn" data-variant="outline" href="#login"><span class="nav-num">02</span>登录</a><a class="btn" data-variant="outline" href="#two-factor"><span class="nav-num">03</span>双重验证</a><a class="btn" data-variant="outline" href="#request"><span class="nav-num">04</span>接口鉴权</a><a class="btn" data-variant="outline" href="#refresh"><span class="nav-num">05</span>续期</a><a class="btn" data-variant="outline" href="#logout"><span class="nav-num">06</span>退出</a><a class="btn" data-variant="outline" href="#password"><span class="nav-num">07</span>改密</a></nav>
+      <div class="stages"><section id="startup" class="stage" aria-labelledby="title-startup"><header class="mb-5 flex items-start gap-4"><span class="stage-num">01</span><div class="min-w-0"><h2 id="title-startup" class="text-xl font-semibold sm:text-[22px]">启动：把签名密钥从数据库读到内存</h2><p class="mt-1 text-sm leading-7 text-subtle">这把密钥供所有登录会话签名与验签；它不随 Token 续期而变化。</p></div></header><ol class="flow flex flex-col md:flex-row" aria-label="本环节按箭头顺序进行"><li class="flow-node min-w-0 flex-1" data-actor="pg"><div class="flex items-center justify-between gap-2"><span class="actor">PostgreSQL</span><span class="node-num">01</span></div><h3 class="mt-3 text-sm font-semibold">查已有密钥</h3><p class="mt-2 text-sm leading-6 text-subtle">按 key 找到系统密钥这一行。</p><code class="node-code">key = &quot;jwt_secret&quot;</code></li><li class="flow-node min-w-0 flex-1" data-actor="server"><div class="flex items-center justify-between gap-2"><span class="actor">后端</span><span class="node-num">02</span></div><h3 class="mt-3 text-sm font-semibold">没有时生成</h3><p class="mt-2 text-sm leading-6 text-subtle">未配置且数据库无记录时，生成 32 字节随机值，再编码为 64 位 hex。</p><code class="node-code">JWT_KEY = hex(rand(32B))</code></li><li class="flow-node min-w-0 flex-1" data-actor="pg"><div class="flex items-center justify-between gap-2"><span class="actor">PostgreSQL</span><span class="node-num">03</span></div><h3 class="mt-3 text-sm font-semibold">保存为一行</h3><p class="mt-2 text-sm leading-6 text-subtle">插入 key / value；唯一约束冲突时保留已有值。</p><code class="node-code">ON CONFLICT DO NOTHING</code></li><li class="flow-node min-w-0 flex-1" data-actor="server"><div class="flex items-center justify-between gap-2"><span class="actor">后端</span><span class="node-num">04</span></div><h3 class="mt-3 text-sm font-semibold">再读最终值</h3><p class="mt-2 text-sm leading-6 text-subtle">读取数据库实际保存的 value，加载到运行配置。</p><code class="node-code">cfg.JWT.Secret = value</code></li></ol><div class="flow-note"><strong>存、取、用</strong><span><code>security_secrets.value</code> 是 TEXT；启动时读出，后续在内存中用于 HS256。已有持久化值优先；配置中的密钥只参与首次保存，密钥原值没有固定业务前缀。</span></div></section>
+<section id="login" class="stage" aria-labelledby="title-login"><header class="mb-5 flex items-start gap-4"><span class="stage-num">02</span><div class="min-w-0"><h2 id="title-login" class="text-xl font-semibold sm:text-[22px]">登录：查用户、验证密码、签发两种 Token</h2><p class="mt-1 text-sm leading-7 text-subtle">邮箱密码主线；入口还会做请求校验、限流和按配置启用的人机验证。</p></div></header><ol class="flow flex flex-col md:flex-row" aria-label="本环节按箭头顺序进行"><li class="flow-node min-w-0 flex-1" data-actor="browser"><div class="flex items-center justify-between gap-2"><span class="actor">浏览器</span><span class="node-num">01</span></div><h3 class="mt-3 text-sm font-semibold">提交邮箱和密码</h3><p class="mt-2 text-sm leading-6 text-subtle">密码原文作为本次请求的临时值。</p><code class="node-code">POST /api/v1/auth/login</code></li><li class="flow-node min-w-0 flex-1" data-actor="pg"><div class="flex items-center justify-between gap-2"><span class="actor">PostgreSQL</span><span class="node-num">02</span></div><h3 class="mt-3 text-sm font-semibold">读出用户行</h3><p class="mt-2 text-sm leading-6 text-subtle">按邮箱读出 bcrypt 哈希、角色和状态。</p><code class="node-code">users.password_hash</code></li><li class="flow-node min-w-0 flex-1" data-actor="server"><div class="flex items-center justify-between gap-2"><span class="actor">后端</span><span class="node-num">03</span></div><h3 class="mt-3 text-sm font-semibold">验证身份</h3><p class="mt-2 text-sm leading-6 text-subtle">bcrypt 比对密码；检查 active、登录模式和是否需要 2FA。</p><code class="node-code">bcrypt.CompareHashAndPassword</code></li><li class="flow-node min-w-0 flex-1" data-actor="server"><div class="flex items-center justify-between gap-2"><span class="actor">后端</span><span class="node-num">04</span></div><h3 class="mt-3 text-sm font-semibold">生成 F1、A1、R1</h3><p class="mt-2 text-sm leading-6 text-subtle">新会话 F1 → JWT A1 → 随机刷新 Token R1 → 哈希 H1。</p><code class="node-code">F1 = hex(rand(16B))
+A1 = JWT_HS256(载荷, JWT_KEY)
+R1 = "rt_" + hex(rand(32B))
+H1 = hex(SHA256(R1))</code></li><li class="flow-node min-w-0 flex-1" data-actor="both"><div class="flex items-center justify-between gap-2"><span class="actor">后端 / Redis</span><span class="node-num">05</span></div><h3 class="mt-3 text-sm font-semibold">分开保存</h3><p class="mt-2 text-sm leading-6 text-subtle">H1 对应的会话写 Redis；A1 / R1 原值随响应交给浏览器。</p><code class="node-code">SET refresh_token:H1
+SADD user_refresh_tokens:42 H1
+SADD token_family:F1 H1
+返回 A1 / R1 原值</code></li></ol><div class="mt-4 flex flex-col gap-3 sm:flex-row"><div class="result-box flex-1"><strong>浏览器保存原值</strong><p><code>auth_token = A1</code>，<code>refresh_token = R1</code>；另存资料 JSON 和预计到期时间。</p></div><div class="result-box flex-1"><strong>Redis 保存会话与索引</strong><p><code>refresh_token:H1</code> 是 String JSON；<code>user_refresh_tokens:42</code> 和 <code>token_family:F1</code> 是 Set。</p></div></div><div class="flow-note"><strong>取出来怎么用</strong><span>A1 用于接口鉴权，R1 用于换发新 Token。PostgreSQL 尝试记录登录时间；用户行不保存这两张 Token。需要 2FA 时，先走下一环节，完成后再正式签发。</span></div></section>
+<section id="two-factor" class="stage" aria-labelledby="title-two-factor"><header class="mb-5 flex items-start gap-4"><span class="stage-num">03</span><div class="min-w-0"><h2 id="title-two-factor" class="text-xl font-semibold sm:text-[22px]">双重验证：临时 Token 把两次请求连起来</h2><p class="mt-1 text-sm leading-7 text-subtle">只有系统和用户均启用 TOTP 时，密码通过后才走这条分支。</p></div></header><ol class="flow flex flex-col md:flex-row" aria-label="本环节按箭头顺序进行"><li class="flow-node min-w-0 flex-1" data-actor="redis"><div class="flex items-center justify-between gap-2"><span class="actor">Redis</span><span class="node-num">01</span></div><h3 class="mt-3 text-sm font-semibold">保存临时会话</h3><p class="mt-2 text-sm leading-6 text-subtle">生成 T1 原值，保存等待验证的用户编号与邮箱，TTL 5 分钟。</p><code class="node-code">SET totp:login:T1 JSON</code></li><li class="flow-node min-w-0 flex-1" data-actor="browser"><div class="flex items-center justify-between gap-2"><span class="actor">浏览器</span><span class="node-num">02</span></div><h3 class="mt-3 text-sm font-semibold">接收 T1，输入动态码</h3><p class="mt-2 text-sm leading-6 text-subtle">响应 requires_2fa；第二次提交临时 Token 和六位动态码。</p><code class="node-code">temp_token + totp_code</code></li><li class="flow-node min-w-0 flex-1" data-actor="server"><div class="flex items-center justify-between gap-2"><span class="actor">后端</span><span class="node-num">03</span></div><h3 class="mt-3 text-sm font-semibold">用 T1 查回用户编号</h3><p class="mt-2 text-sm leading-6 text-subtle">GET 临时 JSON，反序列化后取出 UserID。</p><code class="node-code">GET totp:login:T1 → 42</code></li><li class="flow-node min-w-0 flex-1" data-actor="pg"><div class="flex items-center justify-between gap-2"><span class="actor">PostgreSQL</span><span class="node-num">04</span></div><h3 class="mt-3 text-sm font-semibold">取出 TOTP 密文</h3><p class="mt-2 text-sm leading-6 text-subtle">读取用户的加密 TOTP 密钥；后端解密并验证动态码。</p><code class="node-code">users.totp_secret_encrypted</code></li><li class="flow-node min-w-0 flex-1" data-actor="server"><div class="flex items-center justify-between gap-2"><span class="actor">后端</span><span class="node-num">05</span></div><h3 class="mt-3 text-sm font-semibold">再查状态，完成登录</h3><p class="mt-2 text-sm leading-6 text-subtle">重新检查当前用户与模式；删除 T1，记录登录，再签发 A1 / R1。</p><code class="node-code">DEL totp:login:T1
+然后签发正式凭据对</code></li></ol><div class="flow-note"><strong>前缀区别</strong><span>T1 本身是 <code>hex(rand(32B))</code>，64 位 hex，<strong>没有固定前缀</strong>。<code>totp:login:</code> 是 Redis key 前缀，后面直接拼 T1 原值，<strong>这里不先做 SHA-256</strong>。</span></div></section>
+<section id="request" class="stage" aria-labelledby="title-request"><header class="mb-5 flex items-start gap-4"><span class="stage-num">04</span><div class="min-w-0"><h2 id="title-request" class="text-xl font-semibold sm:text-[22px]">访问接口：取出 JWT，验签后再检查当前用户</h2><p class="mt-1 text-sm leading-7 text-subtle">A1 已经保存在 localStorage。每次请求都重新确认服务器是否还接受它。</p></div></header><ol class="flow flex flex-col md:flex-row" aria-label="本环节按箭头顺序进行"><li class="flow-node min-w-0 flex-1" data-actor="browser"><div class="flex items-center justify-between gap-2"><span class="actor">浏览器</span><span class="node-num">01</span></div><h3 class="mt-3 text-sm font-semibold">取出 A1</h3><p class="mt-2 text-sm leading-6 text-subtle">从本地读完整 JWT 字符串。</p><code class="node-code">getItem(&quot;auth_token&quot;)</code></li><li class="flow-node min-w-0 flex-1" data-actor="browser"><div class="flex items-center justify-between gap-2"><span class="actor">浏览器</span><span class="node-num">02</span></div><h3 class="mt-3 text-sm font-semibold">拼成请求头</h3><p class="mt-2 text-sm leading-6 text-subtle">Bearer 后有一个空格，再跟 JWT 原值。</p><code class="node-code">Authorization: Bearer A1</code></li><li class="flow-node min-w-0 flex-1" data-actor="server"><div class="flex items-center justify-between gap-2"><span class="actor">后端</span><span class="node-num">03</span></div><h3 class="mt-3 text-sm font-semibold">验证签名和时间</h3><p class="mt-2 text-sm leading-6 text-subtle">用内存密钥验签，再检查 exp / nbf，得到可信载荷。</p><code class="node-code">HS256 · exp · nbf</code></li><li class="flow-node min-w-0 flex-1" data-actor="pg"><div class="flex items-center justify-between gap-2"><span class="actor">PostgreSQL</span><span class="node-num">04</span></div><h3 class="mt-3 text-sm font-semibold">读取当前用户</h3><p class="mt-2 text-sm leading-6 text-subtle">按 user_id 查状态与角色；用邮箱和密码哈希计算当前版本。</p><code class="node-code">当前 V1 == JWT 的 V1</code></li><li class="flow-node min-w-0 flex-1" data-actor="server"><div class="flex items-center justify-between gap-2"><span class="actor">后端</span><span class="node-num">05</span></div><h3 class="mt-3 text-sm font-semibold">使用身份执行业务</h3><p class="mt-2 text-sm leading-6 text-subtle">可选绑定检查通过后，将当前用户与会话放入请求上下文。</p><code class="node-code">user_id / role / email / sid</code></li></ol><div class="flow-note"><strong>取出来怎么用</strong><span>JWT 载荷中的 <code>user_id</code> 用来查用户，<code>token_version</code> 用来比较版本。业务使用当前角色；<strong>普通 JWT 鉴权不读取 Redis 刷新主记录</strong>。</span></div></section>
+<section id="refresh" class="stage" aria-labelledby="title-refresh"><header class="mb-5 flex items-start gap-4"><span class="stage-num">05</span><div class="min-w-0"><h2 id="title-refresh" class="text-xl font-semibold sm:text-[22px]">续期：用刷新原值定位会话，再换两张新 Token</h2><p class="mt-1 text-sm leading-7 text-subtle">前端预计到期前 120 秒尝试续期；普通接口的 401 也可能触发。</p></div></header><ol class="flow flex flex-col md:flex-row" aria-label="本环节按箭头顺序进行"><li class="flow-node min-w-0 flex-1" data-actor="browser"><div class="flex items-center justify-between gap-2"><span class="actor">浏览器</span><span class="node-num">01</span></div><h3 class="mt-3 text-sm font-semibold">取出 R1</h3><p class="mt-2 text-sm leading-6 text-subtle">读刷新 Token 原值，放进请求体。</p><code class="node-code">POST /api/v1/auth/refresh</code></li><li class="flow-node min-w-0 flex-1" data-actor="server"><div class="flex items-center justify-between gap-2"><span class="actor">后端</span><span class="node-num">02</span></div><h3 class="mt-3 text-sm font-semibold">计算 H1，读会话</h3><p class="mt-2 text-sm leading-6 text-subtle">验证 rt_ 前缀，哈希完整 R1；用带前缀的 Redis key GET JSON。</p><code class="node-code">H1 = hex(SHA256(R1))
+GET refresh_token:H1</code></li><li class="flow-node min-w-0 flex-1" data-actor="pg"><div class="flex items-center justify-between gap-2"><span class="actor">PostgreSQL</span><span class="node-num">03</span></div><h3 class="mt-3 text-sm font-semibold">确认当前用户</h3><p class="mt-2 text-sm leading-6 text-subtle">从会话取 user_id / V1 / F1 / 到期时间；查询用户并检查版本与可选绑定。</p><code class="node-code">会话 V1 == 当前 V1</code></li><li class="flow-node min-w-0 flex-1" data-actor="both"><div class="flex items-center justify-between gap-2"><span class="actor">后端 / Redis</span><span class="node-num">04</span></div><h3 class="mt-3 text-sm font-semibold">删旧主记录，生成新对</h3><p class="mt-2 text-sm leading-6 text-subtle">DEL H1；生成 A2 / R2 / H2，家族 F1 不变。</p><code class="node-code">DEL refresh_token:H1</code></li><li class="flow-node min-w-0 flex-1" data-actor="both"><div class="flex items-center justify-between gap-2"><span class="actor">后端 / Redis</span><span class="node-num">05</span></div><h3 class="mt-3 text-sm font-semibold">写新记录，返回原值</h3><p class="mt-2 text-sm leading-6 text-subtle">SET H2，两个 Set 加入 H2；返回 A2 / R2，前端替换本地凭据。</p><code class="node-code">SET refresh_token:H2
+SADD user_refresh_tokens:42 H2
+SADD token_family:F1 H2</code></li></ol><div class="result-box mt-4"><strong>轮换后的数据</strong><p><code>refresh_token:H1</code> 主记录已删除；<code>refresh_token:H2</code> 成为新的 String JSON。两个 Set 是 <code>{H1, H2}</code>，旧 H1 可残留。浏览器先存 A2 与预计到期时间，最后存 R2；由 401 触发时，用 A2 重试原请求一次。</p></div><div class="flow-note"><strong>取出来怎么用</strong><span>会话的 <code>user_id</code> 指向用户，<code>token_version</code> 与当前版本比较，<code>family_id</code> 保持登录链。读、删、签发是分开的操作；并发或删除失败时，不能把这条成功流程理解成原子消费。</span></div></section>
+<section id="logout" class="stage" aria-labelledby="title-logout"><header class="mb-5 flex items-start gap-4"><span class="stage-num">06</span><div class="min-w-0"><h2 id="title-logout" class="text-xl font-semibold sm:text-[22px]">退出：撤销刷新资格，清理浏览器登录状态</h2><p class="mt-1 text-sm leading-7 text-subtle">这里展示普通退出的正常删除路径。</p></div></header><ol class="flow flex flex-col md:flex-row" aria-label="本环节按箭头顺序进行"><li class="flow-node min-w-0 flex-1" data-actor="browser"><div class="flex items-center justify-between gap-2"><span class="actor">浏览器</span><span class="node-num">01</span></div><h3 class="mt-3 text-sm font-semibold">取出当前 R2</h3><p class="mt-2 text-sm leading-6 text-subtle">将刷新原值交给退出接口。</p><code class="node-code">POST /api/v1/auth/logout</code></li><li class="flow-node min-w-0 flex-1" data-actor="server"><div class="flex items-center justify-between gap-2"><span class="actor">后端</span><span class="node-num">02</span></div><h3 class="mt-3 text-sm font-semibold">算出 H2</h3><p class="mt-2 text-sm leading-6 text-subtle">对完整 R2 做同一套 SHA-256 + hex。</p><code class="node-code">H2 = hex(SHA256(R2))</code></li><li class="flow-node min-w-0 flex-1" data-actor="redis"><div class="flex items-center justify-between gap-2"><span class="actor">Redis</span><span class="node-num">03</span></div><h3 class="mt-3 text-sm font-semibold">删除当前主记录</h3><p class="mt-2 text-sm leading-6 text-subtle">删除 String，用户集合与家族集合仍可能保留旧成员。</p><code class="node-code">DEL refresh_token:H2</code></li><li class="flow-node min-w-0 flex-1" data-actor="browser"><div class="flex items-center justify-between gap-2"><span class="actor">浏览器</span><span class="node-num">04</span></div><h3 class="mt-3 text-sm font-semibold">清理本地状态</h3><p class="mt-2 text-sm leading-6 text-subtle">删除两张 Token、资料与到期时间；停止续期定时器。</p><code class="node-code">removeItem × 4</code></li></ol><div class="flow-note"><strong>退出后的用途</strong><span>R2 无法再从主记录取得会话。前端即使退出请求失败也会清本地；若 A2 曾另行保留，它仍可能在到期前通过普通鉴权，<strong>删除刷新记录不会直接改写 JWT</strong>。</span></div></section>
+<section id="password" class="stage" aria-labelledby="title-password"><header class="mb-5 flex items-start gap-4"><span class="stage-num">07</span><div class="min-w-0"><h2 id="title-password" class="text-xl font-semibold sm:text-[22px]">改密：更新持久化哈希，让旧版本校验失败</h2><p class="mt-1 text-sm leading-7 text-subtle">正常改密服务从已完成 JWT 鉴权的当前用户开始；旧 Token 自身的内容不会被改写。</p></div></header><ol class="flow flex flex-col md:flex-row" aria-label="本环节按箭头顺序进行"><li class="flow-node min-w-0 flex-1" data-actor="pg"><div class="flex items-center justify-between gap-2"><span class="actor">PostgreSQL</span><span class="node-num">01</span></div><h3 class="mt-3 text-sm font-semibold">取旧哈希，验证旧密码</h3><p class="mt-2 text-sm leading-6 text-subtle">读取当前用户，用 bcrypt 比对当前密码。</p><code class="node-code">读取 password_hash</code></li><li class="flow-node min-w-0 flex-1" data-actor="server"><div class="flex items-center justify-between gap-2"><span class="actor">后端</span><span class="node-num">02</span></div><h3 class="mt-3 text-sm font-semibold">生成新 bcrypt 哈希</h3><p class="mt-2 text-sm leading-6 text-subtle">新密码产生新的哈希材料。</p><code class="node-code">bcrypt(新密码)</code></li><li class="flow-node min-w-0 flex-1" data-actor="pg"><div class="flex items-center justify-between gap-2"><span class="actor">PostgreSQL</span><span class="node-num">03</span></div><h3 class="mt-3 text-sm font-semibold">只更新密码哈希列</h3><p class="mt-2 text-sm leading-6 text-subtle">保存新 password_hash；没有独立 token_version 数据库列。</p><code class="node-code">UPDATE users.password_hash</code></li><li class="flow-node min-w-0 flex-1" data-actor="server"><div class="flex items-center justify-between gap-2"><span class="actor">后端</span><span class="node-num">04</span></div><h3 class="mt-3 text-sm font-semibold">下次加载得到 V2</h3><p class="mt-2 text-sm leading-6 text-subtle">新邮箱 / 哈希材料产生当前 V2，旧 A2 与 H2 会话还保存 V1。</p><code class="node-code">V1 ≠ V2 → 拒绝</code></li></ol><div class="mt-4 flex flex-col gap-3 sm:flex-row"><div class="result-box flex-1"><strong>旧 access token</strong><p>验签后读当前用户，比较 V1 与 V2，返回 <code>401 TOKEN_REVOKED</code>。</p></div><div class="result-box flex-1"><strong>旧 refresh token</strong><p>GET H2 会话并查用户，版本不匹配；尝试 <code>SMEMBERS token_family:F1</code>，逐个 DEL 主记录并删除家族 Set。</p></div></div><div class="flow-note"><strong>取出来怎么用</strong><span>版本值用于把签发时凭据与当前用户材料对齐；改密后无需等待 JWT 自然到期。刷新被明确拒绝时，前端清本地状态；用户 Set 的旧哈希仍可能残留。</span></div></section></div>
+
+      <section id="formats" class="reference-section" aria-labelledby="formats-title">
+        <header class="mb-5"><h2 id="formats-title" class="text-2xl font-semibold">Token 怎么生成，前缀加在哪里</h2><p class="mt-2 text-sm leading-7 text-subtle">原值、哈希、Redis key 是三层不同的东西。这里展开图中的 A1、R1、H1、F1 和 T1。</p></header>
+        <article class="formula-card" id="jwt-format">
+          <h3 class="text-base font-semibold">A1 · access token：HS256 签名的 JWT</h3>
+          <p class="mt-2 text-sm leading-7 text-subtle"><strong>原值没有固定业务前缀</strong>。它是三个 Base64URL 段，以两个点分隔；Base64URL 编码不带尾部 <code>=</code>。常见开头 <code>eyJ…</code> 是 JSON 编码结果，不是人为加上的 <code>jwt_</code> 前缀。</p>
+          <pre class="formula">header = {"alg":"HS256","typ":"JWT"}
+payload = {user_id, email, role, token_version, sid, bnd?, iat, nbf, exp}
+X = Base64URL(UTF8(JSON(header)))
+Y = Base64URL(UTF8(JSON(payload)))
+S = Base64URL(HMAC-SHA256(UTF8(jwt_secret), ASCII(X + "." + Y)))
+A1 = X + "." + Y + "." + S</pre>
+          <div class="mt-3 flex flex-col gap-2 sm:flex-row sm:justify-between text-sm leading-7"><span>保存：<code>localStorage["auth_token"] = A1</code></span><span>使用：<code>Authorization: Bearer A1</code></span></div>
+          <p class="mt-3 text-sm leading-7 text-subtle"><code>Bearer </code> 后的空格属于请求头方案，不属于 JWT 原值。载荷可解码阅读；只有验签通过才能信任。默认访问有效期为 24 小时，可配置覆盖。<a href="https://www.rfc-editor.org/rfc/rfc7515.html#section-3.1" target="_blank" rel="noopener noreferrer">三段格式依据 RFC 7515</a>。</p>
+        </article>
+        <div class="mt-4 flex flex-col gap-4 md:flex-row">
+          <article class="formula-card min-w-0 flex-1"><h3 class="text-base font-semibold">R1 与 H1 · 刷新原值和存储哈希</h3><pre class="formula">R1 = "rt_" + hex(crypto/rand 的 32 字节)
+// 前缀 rt_ + 64 位小写 hex = 67 个字符
+H1 = hex(SHA256(UTF8(完整 R1)))
+// 输入包含 rt_；输出 64 位 hex，无额外前缀
+Redis key = "refresh_token:" + H1</pre><p class="mt-3 text-sm leading-7 text-subtle">R1 是随机字符串，没有 JWT 载荷。原值保存在浏览器，后端 Redis 保存关联会话；续期时重新生成 R2，按同一公式算 H2。</p></article>
+          <article class="formula-card min-w-0 flex-1"><h3 class="text-base font-semibold">F1 与 T1 · 会话家族和临时 2FA</h3><pre class="formula">F1 = hex(crypto/rand 的 16 字节)
+// 32 位 hex，无固定前缀
+家族 Redis key = "token_family:" + F1
+
+T1 = hex(crypto/rand 的 32 字节)
+// 64 位 hex，无固定前缀
+临时 Redis key = "totp:login:" + T1</pre><p class="mt-3 text-sm leading-7 text-subtle">正式凭据对的 F1 写入 JWT 的 <code>sid</code> 与会话 JSON 的 <code>family_id</code>；只签发 access token 的兼容路径会另用 8 字节随机值编码成 sid。T1 直接拼 Redis key，完成 2FA 后删除；不拿它访问普通接口。</p></article>
+        </div>
+        <article class="formula-card mt-4" id="example"><h3 class="text-base font-semibold">把原值真正代入一次</h3><p class="mt-2 text-sm leading-7 text-subtle">下面使用重复字节便于辨认；实际生成使用安全随机源，不能使用这组示意值。</p><pre class="formula">R1 = rt_abababababababababababababababababababababababababababababababab
+H1 = c523da845bd3fde4fc79660e22a39c1a773eadb656ccda24b8c8f415eb46ab8b
+刷新主记录 key = refresh_token:c523da845bd3fde4fc79660e22a39c1a773eadb656ccda24b8c8f415eb46ab8b
+
+F1 = cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd
+家族索引 key = token_family:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd
+用户索引 key = user_refresh_tokens:42
+
+T1 = efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef
+临时 2FA key = totp:login:efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef</pre></article>
+        <div class="mt-4 flex flex-col gap-4 md:flex-row">
+          <article class="formula-card min-w-0 flex-1"><h3 class="text-base font-semibold">V1 · 当前凭据版本怎样算</h3><pre class="formula">材料 = lower(trim(email)) + "\n" + password_hash
+sum = SHA256(UTF8(材料))
+fingerprint = BigEndianUint64(sum[0:8])
+              &amp; 0x7fffffffffffffff
+V1 = 未解析的内存 TokenVersion XOR fingerprint
+// 已解析过时，直接使用现有版本，不重复计算</pre><p class="mt-3 text-sm leading-7 text-subtle">数据库没有独立版本列；持久化的邮箱与密码哈希是计算材料。改密让新请求读到新的材料，得到 V2。</p></article>
+          <article class="formula-card min-w-0 flex-1"><h3 class="text-base font-semibold">B1 · 可选 IP / UA 绑定指纹</h3><pre class="formula">材料 = trim(IP) + "\n" + trim(User-Agent)
+B1 = hex(SHA256(UTF8(材料))[0:16])
+// 32 位 hex，无固定前缀
+// 缺少绑定，或 IP / UA 都为空：空字符串</pre><p class="mt-3 text-sm leading-7 text-subtle">放入 JWT 的 <code>bnd</code> 与会话 JSON 的 <code>binding_hash</code>。校验由 <code>session_binding_enabled</code> 控制，默认关闭；有请求指纹时仍可写入字段。</p></article>
+        </div>
       </section>
 
-      <nav id="phases" class="flex flex-wrap gap-2" aria-label="选择流程阶段"></nav>
+      <section id="structures" class="reference-section" aria-labelledby="structures-title">
+        <header class="mb-5"><h2 id="structures-title" class="text-2xl font-semibold">落到存储里的具体结构</h2><p class="mt-2 text-sm leading-7 text-subtle">流程里的写入和读取，对应下列 key、类型与字段。</p></header>
+        <h3 class="mb-3 text-base font-semibold">Redis：四种 key 的拼法与用途</h3>
+        <div class="table-wrap"><table class="reference-table"><thead><tr><th>名称 / key 前缀</th><th>前缀后拼什么</th><th>Redis 类型 / value</th><th>取出后怎么用</th></tr></thead><tbody><tr><td><strong>刷新主记录</strong><code>refresh_token:</code></td><td>H1 = hex(SHA256(完整 R1))</td><td>String / JSON</td><td>GET 后反序列化，检查用户、版本、家族、到期时间；默认 TTL 30 天。</td></tr><tr><td><strong>用户索引</strong><code>user_refresh_tokens:</code></td><td>用户编号，如 42</td><td>Set / H1、H2</td><td>SMEMBERS 找哈希，再定位主记录；TTL 在添加成员时重设。</td></tr><tr><td><strong>家族索引</strong><code>token_family:</code></td><td>F1（32 位 hex）</td><td>Set / H1、H2</td><td>SMEMBERS 找同一登录链的哈希，批量 DEL；成员没有单独 TTL。</td></tr><tr><td><strong>临时 2FA</strong><code>totp:login:</code></td><td>T1 原值（64 位 hex）</td><td>String / JSON</td><td>GET 后取 UserID，查用户 TOTP 密钥；TTL 5 分钟。</td></tr></tbody></table></div>
+        <div class="mt-4 flex flex-col gap-4 md:flex-row">
+          <article class="formula-card min-w-0 flex-1"><h3 class="text-base font-semibold">刷新主记录的 String JSON</h3><pre class="formula">key: refresh_token:H1
+value:
+{
+  "user_id": 42,
+  "token_version": 123456789,
+  "family_id": "F1",
+  "binding_hash": "B1",
+  "created_at": "2026-10-09T02:00:00Z",
+  "expires_at": "2026-11-08T02:00:00Z"
+}</pre><p class="mt-3 text-sm leading-7 text-subtle">F1 / B1 / H1 用简写，版本数字为示意。<code>binding_hash</code> 为空时可省略。JSON 是 String 的内容，<strong>不是 Redis Hash</strong>；TTL 是 key 的属性，JSON 的 <code>expires_at</code> 另供程序判断。</p></article>
+          <article class="formula-card min-w-0 flex-1"><h3 class="text-base font-semibold">Set 索引与临时会话</h3><pre class="formula">key: user_refresh_tokens:42
+类型: Set     成员: H1、H2
 
-      <section class="card mt-5 overflow-hidden" aria-labelledby="stage-title">
-        <div class="flex flex-wrap items-center justify-between gap-4 border-b border-line p-5 sm:px-6">
-          <div class="min-w-0">
-            <div class="mb-1 flex items-center gap-2 text-xs text-subtle"><span id="phase-index"></span><span> / </span><span id="stage-subtitle"></span></div>
-            <h2 id="stage-title" class="text-lg font-semibold"></h2>
-          </div>
-          <div class="flex flex-wrap items-center gap-2" aria-label="播放控制">
-            <button id="reset" class="btn" data-variant="ghost" aria-label="重置当前阶段"><i data-lucide="rotate-ccw" aria-hidden="true"></i></button>
-            <button id="prev" class="btn" data-variant="outline"><i data-lucide="skip-back" aria-hidden="true"></i> 上一步</button>
-            <button id="play" class="btn"><i data-lucide="play" aria-hidden="true"></i><span>播放阶段</span></button>
-            <button id="next" class="btn" data-variant="outline">下一步 <i data-lucide="skip-forward" aria-hidden="true"></i></button>
-            <label for="speed" class="sr-only">播放速度</label>
-            <select id="speed" class="select w-24" aria-label="播放速度"><option value="0.7">慢速</option><option value="1" selected>正常</option><option value="1.8">快速</option></select>
-          </div>
-        </div>
-        <div class="flex flex-wrap items-center justify-between gap-2 px-5 pt-4 text-xs sm:px-6">
-          <p id="seed-note" class="leading-6 text-subtle"></p>
-          <span id="progress-label" class="font-mono font-medium"></span>
-        </div>
-        <div class="mx-5 mt-3 h-1 overflow-hidden rounded-full bg-page sm:mx-6" role="progressbar" aria-label="阶段进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progress"><div id="progress-fill" class="h-full"></div></div>
-        <div class="mx-5 mt-4 rounded-lg bg-page px-4 py-3 text-sm sm:mx-6"><p id="flow-action" class="font-semibold"></p><p id="flow-use" class="mt-1 text-xs leading-6 text-subtle"></p></div>
+key: token_family:F1
+类型: Set     成员: H1、H2
 
-        <div id="diagram" class="diagram mx-5 mb-5 mt-1 sm:mx-6" aria-label="四处数据存储的当前快照">
-          <svg id="routes" class="routes" aria-hidden="true"><defs><marker id="arrowhead" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/></marker></defs><path id="route-line" marker-end="url(#arrowhead)"/></svg>
-          <div id="packet" class="packet" aria-hidden="true"></div>
-          <div class="lanes flex flex-col items-stretch gap-4 lg:flex-row">
-            <section id="lane-browser" class="lane" data-lane="browser" aria-labelledby="browser-title"><header class="lane-heading"><span class="actor-icon"><i data-lucide="monitor" aria-hidden="true"></i></span><div><h3 id="browser-title">浏览器</h3><p>localStorage · 字符串</p></div><span class="actor-number">01</span></header><div id="browser-data" class="lane-body"></div></section>
-            <section id="lane-server" class="lane" data-lane="server" aria-labelledby="server-title"><header class="lane-heading"><span class="actor-icon"><i data-lucide="cpu" aria-hidden="true"></i></span><div><h3 id="server-title">后端进程</h3><p>运行内存 · 请求临时值</p></div><span class="actor-number">02</span></header><div id="server-data" class="lane-body"></div></section>
-            <section id="lane-pg" class="lane" data-lane="pg" aria-labelledby="pg-title"><header class="lane-heading"><span class="actor-icon"><i data-lucide="database" aria-hidden="true"></i></span><div><h3 id="pg-title">PostgreSQL</h3><p>关系表 · 行与列</p></div><span class="actor-number">03</span></header><div id="pg-data" class="lane-body"></div></section>
-            <section id="lane-redis" class="lane" data-lane="redis" aria-labelledby="redis-title"><header class="lane-heading"><span class="actor-icon"><i data-lucide="layers" aria-hidden="true"></i></span><div><h3 id="redis-title">Redis</h3><p>String JSON · Set 集合</p></div><span class="actor-number">04</span></header><div id="redis-data" class="lane-body"></div></section>
-          </div>
+key: totp:login:T1
+类型: String  value:
+{
+  "UserID": 42,
+  "Email": "user@example.com",
+  "TokenExpiry": "2026-10-09T02:05:00Z"
+}</pre><p class="mt-3 text-sm leading-7 text-subtle">Set 成员是哈希，不是 JSON，也不含刷新原值。清理时先 <code>SMEMBERS</code>，再拼主记录 key。成员存在不代表主记录仍有效。</p></article>
         </div>
-        <div class="flex flex-wrap items-center justify-between gap-3 border-t border-line bg-page px-5 py-3 text-xs text-subtle sm:px-6"><span class="flex items-center gap-2"><i data-lucide="mouse-pointer-2" aria-hidden="true"></i> 点存储记录，展开字段和值</span><span id="motion-note">连线上的数据包表示本步传输方向</span></div>
+        <h3 class="mb-3 mt-7 text-base font-semibold">PostgreSQL：按关系表的行和列保存</h3>
+        <div class="table-wrap"><table class="reference-table"><thead><tr><th>表</th><th>列</th><th>SQL 类型</th><th>用途</th></tr></thead><tbody><tr><td>users</td><td><code>id</code></td><td>BIGINT</td><td>按用户编号关联 JWT 与刷新会话</td></tr><tr><td>users</td><td><code>email / password_hash</code></td><td>VARCHAR(255)</td><td>邮箱；bcrypt 密码哈希，也是版本计算材料</td></tr><tr><td>users</td><td><code>role / status</code></td><td>VARCHAR(20)</td><td>当前权限角色、账号状态</td></tr><tr><td>users</td><td><code>totp_enabled</code></td><td>BOOLEAN</td><td>用户是否启用双重验证</td></tr><tr><td>users</td><td><code>totp_secret_encrypted</code></td><td>TEXT，可空</td><td>后端解密后用于校验动态码</td></tr><tr><td>users</td><td><code>last_login_at / last_active_at</code></td><td>TIMESTAMPTZ，可空</td><td>登录与活跃时间</td></tr><tr><td>security_secrets</td><td><code>id / key / value</code></td><td>BIGSERIAL / VARCHAR(100) UNIQUE / TEXT</td><td>key 为 jwt_secret，value 为系统签名密钥</td></tr><tr><td>security_secrets</td><td><code>created_at / updated_at</code></td><td>TIMESTAMPTZ</td><td>密钥记录维护时间</td></tr><tr><td>settings</td><td><code>key / value</code></td><td>VARCHAR(100) UNIQUE / TEXT</td><td>如 session_binding_enabled / "false"</td></tr><tr><td>settings</td><td><code>updated_at</code></td><td>TIMESTAMPTZ</td><td>设置最近更新时间</td></tr></tbody></table></div>
+        <p class="mt-3 text-sm leading-7 text-subtle">这张表列出登录主线涉及的列；用户表没有 access_token、refresh_token 或独立 token_version 列。Redis 中的刷新会话与 PostgreSQL 用户行通过 user_id 关联。</p>
       </section>
-
-      <div class="mt-5 flex flex-col items-stretch gap-5 lg:flex-row">
-        <section class="card min-w-0 flex-[1.65]" aria-labelledby="action-title">
-          <header class="flex items-start gap-4 p-5 sm:p-6"><span id="step-number" class="step-number">00</span><div><p id="action-kind" class="mb-1 text-xs font-semibold text-subtle">阶段起点</p><h2 id="action-title" class="text-xl font-semibold">先认识四份不同的数据</h2></div></header>
-          <div class="px-5 pb-5 sm:px-6 sm:pb-6"><p id="action-description" class="mb-5 text-sm leading-7"></p><dl id="action-facts" class="action-facts"></dl><pre id="operation" class="operation mt-5" aria-label="本步存取操作"></pre><p id="takeaway" class="takeaway mt-4"></p></div>
-        </section>
-        <section class="card min-w-0 flex-1" aria-labelledby="steps-title"><header class="flex items-center justify-between px-5 pb-3 pt-5"><h2 id="steps-title" class="text-sm font-semibold">本阶段的全部步骤</h2><span class="text-xs text-subtle">点击可跳转</span></header><ol id="steps" class="steps px-3 pb-3"></ol></section>
-      </div>
-      <p id="announcement" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
+      <section id="sources" class="reference-section" aria-labelledby="sources-title"><h2 id="sources-title" class="text-lg font-semibold">源码出处</h2><p class="mt-2 text-sm leading-7 text-subtle">固定到 Wei-Shaw/sub2api 的 commit 3a6fd1c9，2026-10-09 核对。流程展示正常成功路径；凭据对签发的降级、索引写入失败和撤销边界可读原文。</p><details class="mt-4"><summary class="source-summary">查看对应源码文件与行号</summary><ul class="source-links mt-3 flex flex-col gap-2 text-sm"><li><a href="https://github.com/Wei-Shaw/sub2api/blob/3a6fd1c9db07203ca308aaba69e502bc1f35b307/backend/internal/service/auth_service.go#L59-L70" target="_blank" rel="noopener noreferrer">JWT 字段与 HS256 签发</a></li><li><a href="https://github.com/Wei-Shaw/sub2api/blob/3a6fd1c9db07203ca308aaba69e502bc1f35b307/backend/internal/service/auth_service.go#L1420-L1449" target="_blank" rel="noopener noreferrer">JWT 签发与到期时间</a></li><li><a href="https://github.com/Wei-Shaw/sub2api/blob/3a6fd1c9db07203ca308aaba69e502bc1f35b307/backend/internal/service/auth_service.go#L1689-L1776" target="_blank" rel="noopener noreferrer">会话编号、rt_ 与刷新生成</a></li><li><a href="https://github.com/Wei-Shaw/sub2api/blob/3a6fd1c9db07203ca308aaba69e502bc1f35b307/backend/internal/service/auth_service.go#L1913-L1931" target="_blank" rel="noopener noreferrer">SHA-256 与版本计算</a></li><li><a href="https://github.com/Wei-Shaw/sub2api/blob/3a6fd1c9db07203ca308aaba69e502bc1f35b307/backend/internal/repository/refresh_token_cache.go#L13-L158" target="_blank" rel="noopener noreferrer">Redis key 前缀、String 与 Set</a></li><li><a href="https://github.com/Wei-Shaw/sub2api/blob/3a6fd1c9db07203ca308aaba69e502bc1f35b307/backend/internal/service/totp_service.go#L443-L466" target="_blank" rel="noopener noreferrer">临时 2FA Token 的随机生成</a></li><li><a href="https://github.com/Wei-Shaw/sub2api/blob/3a6fd1c9db07203ca308aaba69e502bc1f35b307/backend/internal/service/totp_service.go#L516-L523" target="_blank" rel="noopener noreferrer">临时 Token 的 hex 编码</a></li><li><a href="https://github.com/Wei-Shaw/sub2api/blob/3a6fd1c9db07203ca308aaba69e502bc1f35b307/backend/internal/repository/totp_cache.go#L72-L110" target="_blank" rel="noopener noreferrer">TOTP Redis 读写</a></li><li><a href="https://github.com/Wei-Shaw/sub2api/blob/3a6fd1c9db07203ca308aaba69e502bc1f35b307/backend/internal/repository/security_secret_bootstrap.go#L21-L128" target="_blank" rel="noopener noreferrer">系统密钥持久化</a></li><li><a href="https://github.com/Wei-Shaw/sub2api/blob/3a6fd1c9db07203ca308aaba69e502bc1f35b307/backend/ent/schema/user.go#L39-L116" target="_blank" rel="noopener noreferrer">用户表字段</a></li><li><a href="https://github.com/Wei-Shaw/sub2api/blob/3a6fd1c9db07203ca308aaba69e502bc1f35b307/backend/ent/schema/setting.go#L32-L47" target="_blank" rel="noopener noreferrer">功能开关表字段</a></li><li><a href="https://github.com/Wei-Shaw/sub2api/blob/3a6fd1c9db07203ca308aaba69e502bc1f35b307/backend/internal/server/middleware/jwt_auth.go#L38-L115" target="_blank" rel="noopener noreferrer">接口鉴权与当前用户</a></li><li><a href="https://github.com/Wei-Shaw/sub2api/blob/3a6fd1c9db07203ca308aaba69e502bc1f35b307/backend/internal/service/session_binding.go#L25-L36" target="_blank" rel="noopener noreferrer">IP / User-Agent 绑定指纹</a></li><li><a href="https://github.com/Wei-Shaw/sub2api/blob/3a6fd1c9db07203ca308aaba69e502bc1f35b307/backend/internal/handler/auth_handler.go#L237-L420" target="_blank" rel="noopener noreferrer">登录、2FA、退出处理器</a></li><li><a href="https://github.com/Wei-Shaw/sub2api/blob/3a6fd1c9db07203ca308aaba69e502bc1f35b307/frontend/src/stores/auth.ts#L105-L329" target="_blank" rel="noopener noreferrer">浏览器登录状态与定时器</a></li><li><a href="https://github.com/Wei-Shaw/sub2api/blob/3a6fd1c9db07203ca308aaba69e502bc1f35b307/frontend/src/api/tokenRefresh.ts#L50-L229" target="_blank" rel="noopener noreferrer">前端刷新对的保存次序</a></li></ul></details><a class="btn mt-5" data-variant="outline" href="../1_从密码校验到会话续期.md">阅读完整解析文章</a></section>
     </main>
-    <footer class="mt-7 flex flex-wrap justify-between gap-3 text-xs leading-6 text-subtle"><span>每个阶段可独立播放，切换时载入注明的起点。成功路径按源码顺序演示，故障边界见当步说明。</span><span>键盘：← 上一步 · → 下一步 · 空格播放或暂停</span></footer>
+    <footer class="mt-8 border-t border-line pt-5 text-xs leading-7 text-subtle">所有环节都在本页直接展开。按箭头读流程，按前缀找到存储，按字段理解用途。资源随页面保存，可离线打开。</footer>
   </div>
-  <dialog id="inspector" class="dialog" aria-labelledby="inspector-title" aria-describedby="inspector-description">
-    <div class="w-[min(650px,calc(100vw-32px))]">
-      <header><h2 id="inspector-title"></h2><p id="inspector-description"></p></header>
-      <section id="inspector-content" class="max-h-[65vh] overflow-y-auto"></section>
-      <footer><button id="close-inspector" class="btn" data-variant="outline">关闭</button></footer>
-    </div>
-  </dialog>
-  <noscript><p class="p-6">请启用 JavaScript 以播放动画，也可阅读同目录上一级的 Markdown 文章。</p></noscript>
 </body>
 </html>
