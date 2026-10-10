@@ -1,82 +1,81 @@
-/* Shared semantic theme uses complete color values compatible with Basecoat.
-   Custom CSS is confined to flow connectors, actor labels, reference tables and focus.
-   Tailwind owns page/flex layout and spacing; Basecoat owns link-button styling. */
+/* 共享语义颜色：完整 CSS 色值，供 Tailwind 与 Basecoat 共用。
+   页面布局和间距用 Tailwind，按钮/选择框/卡片用 Basecoat。
+   此处只处理教学标签、阅读排版、焦点、状态及表格的窄屏适配。 */
 :root {
-  --background: #f5f7fa; --foreground: #182335; --card: #ffffff; --card-foreground: #182335;
-  --popover: #ffffff; --popover-foreground: #182335; --primary: #2459d3; --primary-foreground: #ffffff;
-  --secondary: #eaf0ff; --secondary-foreground: #234a9f; --muted: #eef1f6; --muted-foreground: #526174;
-  --accent: #eaf0ff; --accent-foreground: #234a9f; --destructive: #b42332; --destructive-foreground: #ffffff;
-  --border: #d4dce7; --input: #c1cbd9; --ring: #2459d3; --radius: .75rem;
-  --chart-1: #2459d3; --chart-2: #087b68; --chart-3: #8f4f18; --chart-4: #7550b0; --chart-5: #b42332;
-  --sidebar: #ffffff; --sidebar-foreground: #182335; --sidebar-primary: #2459d3; --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #eaf0ff; --sidebar-accent-foreground: #234a9f; --sidebar-border: #d4dce7; --sidebar-ring: #2459d3;
-  --browser-ink: #2459d3; --browser-surface: #eaf0ff; --server-ink: #67429b; --server-surface: #f1ecfa;
-  --pg-ink: #08705f; --pg-surface: #e6f4ee; --redis-ink: #a74422; --redis-surface: #fff0e9;
-  --code-background: #f3f5f9; --code-foreground: #283b55;
+  --background: #f6f7f9; --foreground: #202b3b;
+  --card: #ffffff; --card-foreground: #202b3b;
+  --popover: #ffffff; --popover-foreground: #202b3b;
+  --primary: #2459c5; --primary-foreground: #ffffff;
+  --secondary: #edf2fc; --secondary-foreground: #254c93;
+  --muted: #eef1f5; --muted-foreground: #536173;
+  --accent: #e6edfa; --accent-foreground: #254c93;
+  --destructive: #a62932; --destructive-foreground: #ffffff;
+  --border: #d3dbe6; --input: #7c8a9d; --ring: #2459c5; --radius: .85rem;
+  --chart-1: #2459c5; --chart-2: #126451; --chart-3: #954222; --chart-4: #67429b; --chart-5: #a62932;
+  --sidebar: #ffffff; --sidebar-foreground: #202b3b;
+  --sidebar-primary: #2459c5; --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #e6edfa; --sidebar-accent-foreground: #254c93;
+  --sidebar-border: #d3dbe6; --sidebar-ring: #2459c5;
+  --browser-ink: #254c93; --browser-surface: #edf2fc;
+  --pg-ink: #126451; --pg-surface: #eaf5ef;
+  --redis-ink: #954222; --redis-surface: #fff1e9;
+  --server-ink: #67429b; --server-surface: #f2edf9;
+  --code-background: #f1f4f8; --code-foreground: #2b405b;
   --font-sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
 }
-
 html { scroll-behavior: auto; }
 body { font-family: var(--font-sans); line-height: 1.65; }
-a, summary { touch-action: manipulation; }
-a:focus-visible, summary:focus-visible { outline: 3px solid var(--ring); outline-offset: 3px; }
-a:not(.btn):hover { color: var(--primary); }
-.skip-link { position: fixed; left: 20px; top: 12px; z-index: 50; padding: 12px 18px; background: var(--primary); color: var(--primary-foreground); }
+h1, h2, h3 { text-wrap: balance; }
+code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+code { font-size: .88em; overflow-wrap: anywhere; }
+a, button, summary, select { touch-action: manipulation; }
+a:not([class*=btn]):hover { color: var(--primary); text-decoration: underline; text-underline-offset: 4px; }
+:where(a, button, summary, select):focus-visible { outline: 3px solid var(--ring); outline-offset: 4px; }
+.skip-link { position: fixed; top: 12px; left: 20px; z-index: 50; padding: 12px 18px; background: var(--primary); color: var(--primary-foreground); }
 .skip-link:not(:focus) { clip-path: inset(50%); width: 1px; height: 1px; overflow: hidden; white-space: nowrap; padding: 0; }
-svg.lucide { width: 18px; height: 18px; stroke-width: 1.8; flex-shrink: 0; }
-.brand-mark { display: inline-flex; padding: 8px; background: var(--primary); color: var(--primary-foreground); border-radius: 9px; }
-.btn { min-height: 44px; }
-.nav-num { font-family: ui-monospace, monospace; font-size: 11px; color: var(--muted-foreground); }
-code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .92em; overflow-wrap: anywhere; }
-[data-actor=browser] { --actor-ink: var(--browser-ink); --actor-surface: var(--browser-surface); }
-[data-actor=server] { --actor-ink: var(--server-ink); --actor-surface: var(--server-surface); }
-[data-actor=pg] { --actor-ink: var(--pg-ink); --actor-surface: var(--pg-surface); }
-[data-actor=redis], [data-actor=both] { --actor-ink: var(--redis-ink); --actor-surface: var(--redis-surface); }
-.storage-card { min-width: 0; padding: 18px; border: 1px solid var(--border); border-radius: 10px; background: var(--card); }
-.storage-card header { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 14px; }
-.storage-card header svg { color: var(--actor-ink); }
-.storage-card h3 { font-weight: 650; }
-.storage-card header span { flex-basis: 100%; font-size: 12px; color: var(--actor-ink); }
-.storage-card p { font-size: 13px; line-height: 1.95; margin-top: 10px; color: var(--muted-foreground); }
-.storage-card strong { color: var(--foreground); font-weight: 500; }
-.stage { scroll-margin-top: 24px; padding: 28px 0; border-top: 1px solid var(--border); }
-.stage-num { display: inline-flex; align-items: center; justify-content: center; width: 38px; height: 38px; flex-shrink: 0; border-radius: 9px; background: var(--secondary); color: var(--secondary-foreground); font-family: ui-monospace, monospace; font-size: 15px; font-weight: 650; }
-.flow { list-style: none; }
-.flow-node { position: relative; border: 1px solid var(--border); border-radius: 9px; padding: 15px; background: var(--card); }
-.actor { display: inline-flex; padding: 2px 7px; border-radius: 5px; background: var(--actor-surface); color: var(--actor-ink); font-size: 11px; font-weight: 600; }
-.node-num { font-family: ui-monospace, monospace; font-size: 10px; color: var(--muted-foreground); }
-.node-code { display: block; white-space: pre-line; font-size: 11px; line-height: 1.8; margin-top: 10px; color: var(--code-foreground); }
-.flow-node + .flow-node { margin-left: 24px; }
-.flow-node + .flow-node::before { content: "→"; position: absolute; left: -22px; top: 50%; translate: 0 -50%; width: 20px; text-align: center; color: var(--muted-foreground); font-size: 19px; }
-.flow-note { display: flex; align-items: baseline; gap: 12px; font-size: 13px; line-height: 1.95; margin-top: 15px; }
-.flow-note > strong { color: var(--foreground); white-space: nowrap; font-weight: 600; }
-.flow-note > span { color: var(--muted-foreground); min-width: 0; }
-.flow-note > span strong { color: var(--foreground); font-weight: 500; }
-.result-box { min-width: 0; padding: 13px 16px; background: var(--muted); border-radius: 8px; font-size: 13px; line-height: 1.95; }
-.result-box strong { font-weight: 600; }
-.result-box p { margin-top: 3px; color: var(--muted-foreground); }
-.reference-section { scroll-margin-top: 24px; margin-top: 16px; border-top: 1px solid var(--border); padding-top: 32px; }
-.formula-card { padding: 20px; background: var(--card); border: 1px solid var(--border); border-radius: 10px; }
-.formula-card a, .source-links a { color: var(--primary); text-decoration: underline; text-underline-offset: 3px; }
-.formula { margin-top: 12px; border: 1px solid var(--border); background: var(--code-background); color: var(--code-foreground); padding: 14px; border-radius: 7px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.85; white-space: pre-wrap; overflow-wrap: anywhere; }
-.table-wrap { border: 1px solid var(--border); border-radius: 9px; overflow: hidden; background: var(--card); }
-.reference-table { width: 100%; border-collapse: collapse; font-size: 13px; line-height: 1.85; }
-.reference-table th { background: var(--muted); color: var(--muted-foreground); font-weight: 500; }
-.reference-table th, .reference-table td { padding: 12px 14px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; overflow-wrap: anywhere; }
-.reference-table tr:last-child td { border-bottom: 0; }
-.reference-table td strong, .reference-table td:first-child code { display: block; }
-.reference-table td:first-child code { margin-top: 4px; }
-.reference-table td:first-child { min-width: 130px; }
-.source-summary { cursor: pointer; color: var(--primary); font-size: 14px; padding: 10px 0; }
-@media (max-width: 767px) {
-  .flow-node + .flow-node { margin-left: 0; margin-top: 23px; }
-  .flow-node + .flow-node::before { content: "↓"; left: 16px; top: -23px; translate: none; line-height: 22px; }
-  .flow-note { display: block; font-size: 14px; }
-  .flow-note > strong { display: block; margin-bottom: 4px; }
-  .storage-card p { font-size: 14px; }
-  .reference-table { font-size: 12px; }
-  .reference-table th, .reference-table td { padding: 10px 8px; }
-  .reference-table td:first-child { min-width: 0; }
-}
-@media print { body { background: white; } nav, .skip-link { display: none; } .stage, .formula-card { break-inside: avoid; } }
+svg.lucide { width: 20px; height: 20px; stroke-width: 1.8; flex-shrink: 0; }
+.brand-mark { display: inline-flex; padding: 9px; border-radius: 10px; background: var(--primary); color: var(--primary-foreground); }
+/* 给有文字的操作至少 44px 的点击高度；覆盖样式只限定教学页面的操作控件。 */
+.btn, .btn[data-variant="outline"], .select { min-height: 44px; font-size: 14px; }
+.btn:hover, .btn:active { background: var(--secondary-foreground); color: var(--primary-foreground); }
+.btn[data-variant="outline"]:hover, .btn[data-variant="outline"]:active { background: var(--accent); color: var(--accent-foreground); }
+.btn[data-variant="outline"]:disabled { opacity: 1; color: var(--muted-foreground); background: var(--muted); border-color: var(--border); cursor: not-allowed; }
+[data-place=browser] { --place-ink: var(--browser-ink); --place-surface: var(--browser-surface); }
+[data-place=pg] { --place-ink: var(--pg-ink); --place-surface: var(--pg-surface); }
+[data-place=redis] { --place-ink: var(--redis-ink); --place-surface: var(--redis-surface); }
+[data-place=server] { --place-ink: var(--server-ink); --place-surface: var(--server-surface); }
+.place svg, .receipt-heading svg { color: var(--place-ink); }
+.chapter-label, .actor-pill { padding: 5px 12px; border-radius: 7px; background: var(--secondary); color: var(--secondary-foreground); font-size: 14px; font-weight: 600; }
+.actor-pill { background: var(--server-surface); color: var(--server-ink); }
+.purpose-box { background: var(--secondary); color: var(--secondary-foreground); }
+.value-paper { padding: 16px; border: 1px solid var(--border); border-left: 4px solid var(--primary); border-radius: 9px; background: var(--card); }
+.value-example { display: block; margin-top: 7px; color: var(--code-foreground); font-size: 15px; overflow-wrap: anywhere; }
+.fact-label { display: block; font-size: 13px; font-weight: 600; color: var(--muted-foreground); margin-bottom: 3px; }
+.receipt { border: 1px solid var(--border); border-radius: 11px; background: var(--card); padding: 16px; }
+.receipt-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 15px; font-weight: 600; }
+.receipt-badge { color: var(--place-ink); background: var(--place-surface); border-radius: 5px; padding: 2px 7px; font-size: 12px; font-weight: 600; }
+.receipt-text { margin-top: 8px; font-size: 14px; line-height: 1.85; color: var(--muted-foreground); }
+.receipt.changed { border-color: var(--place-ink); box-shadow: inset 3px 0 var(--place-ink); }
+summary { min-height: 44px; display: list-item; cursor: pointer; padding: 10px 0; font-weight: 600; }
+summary:hover { color: var(--primary); }
+summary::marker { color: var(--muted-foreground); }
+.receipt summary { font-size: 13px; font-weight: 500; color: var(--place-ink); }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 14px; border: 1px solid var(--border); border-radius: 8px; color: var(--code-foreground); background: var(--code-background); font-size: 13px; line-height: 1.8; }
+.table-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; }
+/* 六列字段表保留阅读宽度，窄屏只在表格内部滚动。 */
+#field-tables table { min-width: 1100px; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; line-height: 1.8; }
+th, td { text-align: left; padding: 12px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { background: var(--muted); color: var(--foreground); font-weight: 600; }
+tr:last-child td { border-bottom: none; }
+td code { color: var(--code-foreground); }
+.reference-content { padding-top: 12px; }
+.reference-content p + p { margin-top: 12px; }
+.source-link { color: var(--primary); text-decoration: underline; text-underline-offset: 3px; }
+@media (max-width: 640px) { table { min-width: 620px; } .table-scroll { overscroll-behavior-x: contain; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation: none !important; transition: none !important; } }
+
+/* 逐步导航固定时，为键盘焦点和浏览器跳转留出可见空间。 */
+#story :where(button, select, summary), #lesson { scroll-margin-top: 150px; }
+
+.btn[data-variant="outline"], .select { border-color: var(--input); }
